@@ -24,7 +24,7 @@ Das Tool wird über ein interaktives Setup-Skript installiert. Es richtet die Py
 Lade das Installationsskript direkt von GitHub herunter:
 
 ```bash
-wget https://raw.githubusercontent.com/ipod86/Notizen/main/setup.sh
+wget -O https://raw.githubusercontent.com/ipod86/Notizen/main/setup.sh
 ```
 
 **2. Skript ausführbar machen:**
