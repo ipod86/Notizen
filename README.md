@@ -23,8 +23,35 @@ Das Tool wird über ein interaktives Setup-Skript installiert. Es richtet die Py
 ### Step-by-Step
 
 **1. Skript herunterladen:**
-Lade das Installationsskript direkt von GitHub herunter. 
-*(Ersetze `DEIN_NAME` und `DEIN_REPO` mit deinen echten GitHub-Daten)*
+Lade das Installationsskript direkt von GitHub herunter:
 
 ```bash
-wget [https://raw.githubusercontent.com/DEIN_NAME/DEIN_REPO/main/install.sh](https://raw.githubusercontent.com/DEIN_NAME/DEIN_REPO/main/install.sh)
+wget [https://raw.githubusercontent.com/ipod86/Notizen/main/setup.sh](https://raw.githubusercontent.com/ipod86/Notizen/main/setup.sh)
+```
+
+**2. Skript ausführbar machen:**
+```bash
+chmod +x setup.sh
+```
+
+**3. Installation starten:**
+Führe das Skript als Root aus. Es wird dich durch die grundlegenden Einstellungen (Port, Autostart, Cronjobs) führen.
+```bash
+sudo ./setup.sh
+```
+
+**4. Fertig!**
+Sobald die Installation abgeschlossen ist, erreichst du dein Notiz-Tool im Browser unter:
+`http://<deine-server-ip>:8080` (bzw. dem Port, den du im Setup gewählt hast).
+
+## 🛠️ Updates
+
+Um das Tool zu aktualisieren, lade einfach die neueste Version des `setup.sh` Skripts herunter und führe es erneut aus. Es überschreibt die App-Dateien, lässt deine bestehenden Notizen (`data.json`) und Uploads aber völlig unangetastet.
+
+## 🌐 Hinweis zu externen Bibliotheken (CDNs)
+
+Das Tool lädt standardmäßig einige wenige externe Bibliotheken (z. B. SortableJS für Drag & Drop, Highlight.js für Code-Highlighting) über schnelle Content Delivery Networks (CDNs). 
+
+Wenn du das Tool **komplett offline** (ohne jeglichen externen Internetverkehr) betreiben möchtest, kannst du die entsprechenden `.js` und `.css` Dateien manuell herunterladen, im Ordner `/opt/notiz-tool/static/` ablegen und die Pfade in der Datei `/opt/notiz-tool/templates/index.html` anpassen.
+
+**Wichtig bei Updates:** Wenn du später ein Update über das `setup.sh` Skript durchführst, wird die `index.html` wieder mit den Standard-CDN-Links überschrieben. Du musst deine lokalen Pfade in der HTML-Datei nach einem Update also manuell wieder nachtragen.
