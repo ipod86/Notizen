@@ -53,5 +53,4 @@ Das Tool lädt standardmäßig einige wenige externe Bibliotheken (z. B. Sortabl
 Wenn du das Tool **komplett offline** (ohne jeglichen externen Internetverkehr) betreiben möchtest, kannst du die entsprechenden `.js` und `.css` Dateien manuell herunterladen, im Ordner `/opt/notiz-tool/static/` ablegen und die Pfade in der Datei `/opt/notiz-tool/templates/index.html` anpassen.
 
 **Wichtig bei Updates:** Wenn du später ein Update über das `setup.sh` Skript durchführst, wird die `index.html` wieder mit den Standard-CDN-Links überschrieben. Du musst deine lokalen Pfade in der HTML-Datei nach einem Update also manuell wieder nachtragen.
-
-> > **Hinweis:** Dieses Projekt sowie die zugehörige Dokumentation wurden unter Zuhilfenahme von Künstlicher Intelligenz (Gemini) iterativ entwickelt und für den praktischen Einsatz optimiert.
+> **Hinweis:** Dieses Projekt sowie die zugehörige Dokumentation wurden unter Zuhilfenahme von Künstlicher Intelligenz (Gemini) iterativ entwickelt und für den praktischen Einsatz optimiert.
