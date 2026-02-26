@@ -2631,7 +2631,7 @@ window.onload = () => {
             renderTree(); 
             if (activeId) selectNode(activeId); 
         }
-    }, 30000);
+    }, 300000000000);
 };
 EOF
 
