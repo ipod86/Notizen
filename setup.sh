@@ -47,7 +47,7 @@ mkdir -p $INSTALL_DIR/static $INSTALL_DIR/templates $INSTALL_DIR/uploads $INSTAL
 
 # 7. Python Umgebung
 python3 -m venv $INSTALL_DIR/venv
-$INSTALL_DIR/venv/bin/pip install flask werkzeug
+$INSTALL_DIR/venv/bin/python3 -m pip install flask werkzeug
 
 # 8. Dateien schreiben
 
