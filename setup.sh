@@ -67,10 +67,8 @@ import base64
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
 
-# Erhöht auf 50MB Backend-Limit, das 20MB Limit wird im Frontend für den User durchgesetzt
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024 
 
-# Erlaubte Dateien großzügig erweitert
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'pdf', 'zip', 'tar', 'gz', 'rar', 'txt', 'csv', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'mp3', 'mp4', 'mkv', 'avi'}
 
 DATA_FILE = 'data.json'
@@ -955,6 +953,19 @@ input[type="checkbox"].task-check {
     padding: 15px; 
 }
 
+.reminder-icon {
+    color: #e74c3c;
+    margin-left: 6px;
+    font-size: 0.9em;
+    animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+    0% { opacity: 1; }
+    50% { opacity: 0.4; }
+    100% { opacity: 1; }
+}
+
 /* Sketch Modal CSS */
 #sketch-modal .modal { 
     width: 1000px;
@@ -1004,6 +1015,238 @@ input[type="checkbox"].task-check {
 .sketch-btn.active { background: var(--accent); color: white; border-color: var(--accent); }
 EOF
 
+# templates/login.html
+cat << 'EOF' > $INSTALL_DIR/templates/login.html
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1.0">
+    <title>Login - Notes</title>
+    <link rel="stylesheet" href="/static/style.css?v={{ v }}">
+    <style> 
+        body { 
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+        } 
+        
+        .login-box { 
+            background: var(--sidebar-bg); 
+            padding: 30px; 
+            border-radius: 8px; 
+            border: 1px solid var(--border-color); 
+            text-align: center; 
+            width: 300px; 
+            box-shadow: 0 5px 20px rgba(0,0,0,0.2); 
+        } 
+    </style>
+</head>
+<body data-theme="{{ theme }}">
+    <div class="login-box">
+        <h2 style="margin-top: 0">Login</h2>
+        {% if error %}<p style="color:#e74c3c; font-size: 0.9em; margin-bottom: 15px;">{{ error }}</p>{% endif %}
+        <form method="POST">
+            <input type="password" name="password" placeholder="Passwort eingeben" required autofocus>
+            <button type="submit" style="width:100%; background:{{ accent }} !important; color:white; padding:10px; border-radius:5px; margin-top:10px; font-weight:bold;">Einloggen</button>
+        </form>
+    </div>
+</body>
+</html>
+EOF
+
+# templates/index.html
+cat << 'EOF' > $INSTALL_DIR/templates/index.html
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1.0">
+    <title>Notes</title>
+    <link rel="stylesheet" href="/static/style.css?v={{ v }}">
+    <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/tomorrow-night-blue.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head>
+<body data-theme="dark">
+    <div class="header-actions">
+        <div class="dropdown">
+            <button onclick="toggleSettings(event)" style="font-size:1.4em">⚙️</button>
+            <div class="dropdown-content" id="dropdown-menu">
+                <div class="menu-row" onclick="toggleTheme()"><span>🌓 Theme wechseln</span></div>
+                <div class="menu-row"><span>🎨 Akzentfarbe</span><input type="color" id="accent-color-picker" onchange="updateGlobalAccent(this.value)" onclick="event.stopPropagation()"></div>
+                <div class="menu-row" onclick="exportData()"><span>📤 Backup laden (Vollständig)</span></div>
+                <div class="menu-row" onclick="document.getElementById('import-file').click()"><span>📥 Restore (tar.gz / json)</span></div>
+                <div class="menu-row" onclick="togglePassword()"><span id="pwd-toggle-text">🔒 Passwortschutz an</span></div>
+                <div class="menu-row" id="logout-btn" style="display:none; color:#e74c3c;" onclick="window.location.href='/logout'"><span>🚪 Abmelden</span></div>
+                <input type="file" id="import-file" style="display:none" onchange="importData(event)">
+            </div>
+        </div>
+    </div>
+    
+    <button id="mobile-toggle-btn" onclick="toggleSidebar()"><span>◀</span></button>
+    
+    <div id="sidebar">
+        <div class="sidebar-header">
+            <h3 style="margin:0">Notizen</h3>
+            <div style="display:flex; gap:8px;">
+                <button id="toggle-all-btn" onclick="toggleAllFolders()" title="Alle auf/zu">↔️</button>
+                <button id="sort-btn" onclick="confirmAutoSort()" title="Automatisch sortieren">⇅</button>
+                <button onclick="toggleEditMode()" title="Bearbeiten">✏️</button>
+            </div>
+        </div>
+        <div style="padding:15px; flex-shrink: 0;">
+            <div class="search-wrapper">
+                <input type="text" id="search-input" placeholder="Suchen..." oninput="filterTree()">
+                <span id="clear-search" onclick="clearSearch()">✕</span>
+            </div>
+            <button onclick="addItem()" style="width:100%;background:var(--accent) !important;color:white;padding:8px;border-radius:4px;font-weight:bold;">+ Hauptkategorie</button>
+        </div>
+        <div id="tree"></div>
+    </div>
+    
+    <div id="editor">
+        <div id="no-selection" style="margin-top:50px;text-align:center;opacity:0.5">Wähle eine Notiz aus.</div>
+        <div id="edit-area" style="display:none">
+            <div id="breadcrumb" style="font-size:0.8em;color:var(--accent);margin-bottom:15px;"></div>
+            
+            <div id="view-mode">
+                <div style="display:flex; align-items:center; gap:12px; margin-bottom:20px; flex-wrap:wrap;">
+                    <h1 id="view-title" style="margin:0"></h1>
+                    <span id="view-reminder-badge" style="display:none; color:#e74c3c; font-size:1.2em; animation: pulse 2s infinite;" title="Erinnerung aktiv!">⏰</span>
+                    <button id="view-reminder-ack" onclick="clearReminder()" style="display:none; background:#e74c3c !important; color:white; padding:4px 8px; border-radius:4px; font-size:0.8em; font-weight:bold;">Bestätigen</button>
+                    <button onclick="enableEdit()" style="font-size:1.2em; margin-left:auto;">✏️</button>
+                </div>
+                <div id="display-area"></div>
+            </div>
+            
+            <div id="edit-mode" style="display:none">
+                <div id="mention-dropdown"></div>
+
+                <div class="toolbar">
+                    <button class="tool-btn" onclick="saveChanges();disableEdit();" style="background:var(--accent) !important; color:white;"><i>💾</i><span>OK</span></button>
+                    <button class="tool-btn" onclick="cancelEdit()" style="color:#e74c3c;"><i>❌</i><span>Abbruch</span></button>
+                    
+                    <button class="tool-btn" onclick="wrapSelection('**','**', 'Fett')"><i><b>B</b></i><span>Fett</span></button>
+                    <button class="tool-btn" onclick="wrapSelection('_','_', 'Kursiv')"><i style="font-style:italic; font-family:serif;">I</i><span>Kursiv</span></button>
+                    <button class="tool-btn" onclick="wrapSelection('~~','~~', 'Text')"><i style="text-decoration:line-through;">S</i><span>Streich</span></button>
+                    
+                    <button class="tool-btn" onclick="wrapSelection('### ','', 'Überschrift')"><i style="font-weight:bold;">H</i><span>Titel</span></button>
+                    <button class="tool-btn" onclick="handleListAction('- ', 'Punkt')"><i style="font-weight:bold;">•—</i><span>Liste</span></button>
+                    <button class="tool-btn" onclick="handleListAction('- [ ] ', 'Aufgabe')"><i>☑</i><span>To-Do</span></button>
+                    
+                    <button class="tool-btn" onclick="wrapSelection('> ','', 'Zitat')"><i style="font-family:serif;">"</i><span>Zitat</span></button>
+                    <button class="tool-btn" onclick="wrapSelection('[s=Spoiler-Titel]\n','\n[/s]', 'Text hier...')"><i>👁️‍🗨️</i><span>Spoiler</span></button>
+                    <button class="tool-btn" onclick="wrapSelection('\n---\n','', '')"><i>—</i><span>Linie</span></button>
+
+                    <button class="tool-btn" onclick="insertCodeTag()"><i>💻</i><span>Code</span></button>
+                    <button class="tool-btn" onclick="uploadImage()"><i>🖼️</i><span>Bild</span></button>
+                    <button class="tool-btn" onclick="uploadGenericFile()"><i>📎</i><span>Datei</span></button>
+                    <button class="tool-btn" onclick="openSketch()"><i>🖌️</i><span>Skizze</span></button>
+                    <button class="tool-btn" onclick="triggerMentionButton()"><i>@</i><span>Verweis</span></button>
+                    <button class="tool-btn" onclick="wrapSelection('[','](https://)', 'Link-Text')"><i>🔗</i><span>Web-Link</span></button>
+                    
+                    <div class="tool-btn color-tool">
+                        <div class="color-row">
+                            <span onclick="applyColor()">🎨</span>
+                            <input type="color" id="text-color-input" value="#27ae60">
+                        </div>
+                        <span>Farbe</span>
+                    </div>
+                </div>
+
+                <div style="display:flex; gap:10px; margin-bottom:10px; align-items:stretch;">
+                    <input type="text" id="node-title" placeholder="Titel" style="margin-bottom:0; flex-grow:1;">
+                    <button class="tool-btn" onclick="openReminderModal()" style="margin:0; min-height:100%; flex-direction:row; gap:5px; padding:0 10px; width:auto;">
+                        <i>⏰</i><span id="edit-reminder-text">Erinnerung</span>
+                    </button>
+                    <button class="tool-btn" id="edit-reminder-clear" onclick="clearReminder()" style="display:none; margin:0; min-height:100%; flex-direction:row; gap:5px; padding:0 10px; width:auto; color:#e74c3c; border-color:#e74c3c;">
+                        <i>✖</i><span>Löschen</span>
+                    </button>
+                </div>
+
+                <textarea id="node-text" placeholder="Text oder Bild hier ablegen..." style="height:60vh"></textarea>
+            </div>
+            
+            <button onclick="addItem(activeId)" style="margin-top:20px;border:1px solid var(--accent) !important;color:var(--accent);padding:5px 10px;border-radius:4px;">+ Unter-Ebene</button>
+        </div>
+    </div>
+    
+    <div id="sketch-modal" class="modal-overlay">
+        <div class="modal">
+            <h3 style="margin-top:0">Skizzenblock</h3>
+            <div id="sketch-toolbar">
+                <div class="sketch-tool">
+                    <span>Hintergrund:</span>
+                    <select id="sketch-bg-select" onchange="setSketchBg(this.value)" style="padding:5px; border-radius:4px;">
+                        <option value="white">Weiß</option>
+                        <option value="black">Schwarz</option>
+                    </select>
+                </div>
+                <div class="sketch-tool">
+                    <span>Farbe:</span>
+                    <input type="color" onchange="sketchColor=this.value" value="#000000">
+                </div>
+                <div class="sketch-tool">
+                    <span>Dicke:</span>
+                    <input type="range" min="1" max="50" value="8" onchange="sketchWidth=this.value" style="width: 80px;">
+                </div>
+                
+                <button id="btn-pen" class="sketch-btn active" onclick="setSketchMode('pen')">✏️ Stift</button>
+                <button id="btn-highlighter" class="sketch-btn" onclick="setSketchMode('highlighter')">🖍️ Marker</button>
+                <button id="btn-eraser" class="sketch-btn" onclick="setSketchMode('eraser')">🧽 Radierer</button>
+                
+                <button class="sketch-btn" onclick="undoSketch()" style="color:#f39c12;">↩️ Zurück</button>
+                <button class="sketch-btn" onclick="sketchStrokes=[]; redrawSketch();" style="color:#e74c3c;">🗑️ Leeren</button>
+                
+                <div style="flex-grow:1; text-align:right;">
+                    <button class="btn-cancel" onclick="document.getElementById('sketch-modal').style.display='none'">Abbruch</button>
+                    <button class="btn-save" onclick="saveSketch()">Speichern</button>
+                </div>
+            </div>
+            
+            <div id="canvas-wrapper">
+                <canvas id="sketch-canvas"></canvas>
+            </div>
+            
+        </div>
+    </div>
+
+    <div id="reminder-modal" class="modal-overlay">
+        <div class="modal">
+            <h3 style="margin-top:0">Erinnerung setzen</h3>
+            <div style="margin-bottom:15px; text-align:left;">
+                <label style="display:block; margin-bottom:10px; cursor:pointer;">
+                    <input type="checkbox" id="reminder-has-time" onchange="toggleReminderInput()"> Mit fester Uhrzeit
+                </label>
+                <input type="date" id="reminder-date" style="display:block; width:100%;">
+                <input type="datetime-local" id="reminder-datetime" style="display:none; width:100%;">
+            </div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('reminder-modal').style.display='none'">Abbruch</button>
+                <button class="btn-save" onclick="saveReminder()">Speichern</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="custom-modal" class="modal-overlay">
+        <div class="modal">
+            <h3 id="modal-title"></h3>
+            <p id="modal-text" style="white-space: pre-wrap;"></p>
+            <input type="password" id="modal-input" style="display:none; margin-top: 15px; width: 100%; box-sizing: border-box;" placeholder="Passwort...">
+            <div class="modal-btns" id="modal-btns-container"></div>
+        </div>
+    </div>
+    
+    <div id="lightbox" onclick="closeLightbox()">
+        <img id="lightbox-img" src="">
+    </div>
+    
+    <script src="/static/script.js?v={{ v }}"></script>
+</body>
+</html>
+EOF
+
 # static/script.js
 cat << 'EOF' > $INSTALL_DIR/static/script.js
 var fullData = {content: [], settings: {accent: '#27ae60', theme: 'dark', password_enabled: false}};
@@ -1011,6 +1254,79 @@ var activeId = null;
 var collapsedIds = new Set();
 var sortables = [];
 var currentLastModified = 0;
+
+// --- ERINNERUNGEN LOGIK ---
+function isReminderActive(node) {
+    if (!node.reminder) return false;
+    return new Date(node.reminder) <= new Date();
+}
+
+function hasActiveReminderInChildren(node) {
+    if (isReminderActive(node)) return true;
+    if (node.children) {
+        for (let c of node.children) {
+            if (hasActiveReminderInChildren(c)) return true;
+        }
+    }
+    return false;
+}
+
+function openReminderModal() {
+    const node = findNode(fullData.content, activeId);
+    if(!node) return;
+    
+    document.getElementById('reminder-modal').style.display = 'flex';
+    const hasTimeCb = document.getElementById('reminder-has-time');
+    const dateInp = document.getElementById('reminder-date');
+    const dtInp = document.getElementById('reminder-datetime');
+    
+    if (node.reminder) {
+        if (node.reminder.includes('T')) {
+            hasTimeCb.checked = true;
+            dtInp.value = node.reminder;
+        } else {
+            hasTimeCb.checked = false;
+            dateInp.value = node.reminder;
+        }
+    } else {
+        hasTimeCb.checked = false;
+        dateInp.value = '';
+        dtInp.value = '';
+    }
+    toggleReminderInput();
+}
+
+function toggleReminderInput() {
+    const hasTime = document.getElementById('reminder-has-time').checked;
+    document.getElementById('reminder-date').style.display = hasTime ? 'none' : 'block';
+    document.getElementById('reminder-datetime').style.display = hasTime ? 'block' : 'none';
+}
+
+async function saveReminder() {
+    const node = findNode(fullData.content, activeId);
+    if(!node) return;
+    
+    const hasTime = document.getElementById('reminder-has-time').checked;
+    const val = hasTime ? document.getElementById('reminder-datetime').value : document.getElementById('reminder-date').value;
+    
+    if(val) {
+        node.reminder = val;
+        document.getElementById('reminder-modal').style.display = 'none';
+        await saveToServer();
+        renderTree();
+        selectNode(activeId); 
+    }
+}
+
+async function clearReminder() {
+    const node = findNode(fullData.content, activeId);
+    if(node && node.reminder) {
+        delete node.reminder;
+        await saveToServer();
+        renderTree();
+        selectNode(activeId);
+    }
+}
 
 // --- SKETCH LOGIK ---
 let sketchCanvas, sketchCtx, isDrawing = false, sketchStrokes = [], currentStroke = null;
@@ -1496,6 +1812,14 @@ function renderItems(items, parent) {
         const text = document.createElement('span'); 
         text.className = 'tree-text'; 
         text.innerText = item.title || 'Unbenannt'; 
+
+        if (hasActiveReminderInChildren(item)) {
+            const rSpan = document.createElement('span');
+            rSpan.className = 'reminder-icon';
+            rSpan.innerText = '⏰';
+            text.appendChild(rSpan);
+        }
+        
         text.onclick = (e) => { 
             e.stopPropagation(); 
             if (!isEdit) tryNavigation(item.id); 
@@ -1575,6 +1899,7 @@ function rebuildDataFromDOM() {
                 id: id, 
                 title: original ? original.title : 'Unbenannt', 
                 text: original ? original.text : '', 
+                reminder: original ? original.reminder : null,
                 children: parsedChildren 
             }; 
         }); 
@@ -1601,6 +1926,27 @@ function selectNode(id) {
         document.getElementById('node-title').value = node.title; 
         document.getElementById('node-text').value = node.text; 
         
+        const viewBadge = document.getElementById('view-reminder-badge');
+        const viewAck = document.getElementById('view-reminder-ack');
+        if (isReminderActive(node)) {
+            viewBadge.style.display = 'inline-block';
+            viewAck.style.display = 'inline-block';
+        } else {
+            viewBadge.style.display = 'none';
+            viewAck.style.display = 'none';
+        }
+
+        const editRemBtnText = document.getElementById('edit-reminder-text');
+        const editRemClearBtn = document.getElementById('edit-reminder-clear');
+        
+        if (node.reminder) {
+            editRemBtnText.innerText = node.reminder.replace('T', ' ');
+            editRemClearBtn.style.display = 'flex';
+        } else {
+            editRemBtnText.innerText = 'Erinnerung';
+            editRemClearBtn.style.display = 'none';
+        }
+
         const pathData = getPath(fullData.content, id) || []; 
         const breadcrumbEl = document.getElementById('breadcrumb'); 
         breadcrumbEl.innerHTML = '';
@@ -2279,211 +2625,14 @@ window.onload = () => {
     loadData(); 
     initDragAndDrop(); 
     initMentionSystem();
-    setInterval(checkAndReloadData, 30000);
+    setInterval(() => {
+        checkAndReloadData();
+        if (!document.body.classList.contains('edit-mode-active')) {
+            renderTree(); 
+            if (activeId) selectNode(activeId); 
+        }
+    }, 30000);
 };
-EOF
-
-# templates/login.html
-cat << 'EOF' > $INSTALL_DIR/templates/login.html
-<!DOCTYPE html>
-<html lang="de">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1.0">
-    <title>Login - Notes</title>
-    <link rel="stylesheet" href="/static/style.css?v={{ v }}">
-    <style> 
-        body { 
-            display: flex; 
-            justify-content: center; 
-            align-items: center; 
-        } 
-        
-        .login-box { 
-            background: var(--sidebar-bg); 
-            padding: 30px; 
-            border-radius: 8px; 
-            border: 1px solid var(--border-color); 
-            text-align: center; 
-            width: 300px; 
-            box-shadow: 0 5px 20px rgba(0,0,0,0.2); 
-        } 
-    </style>
-</head>
-<body data-theme="{{ theme }}">
-    <div class="login-box">
-        <h2 style="margin-top: 0">Login</h2>
-        {% if error %}<p style="color:#e74c3c; font-size: 0.9em; margin-bottom: 15px;">{{ error }}</p>{% endif %}
-        <form method="POST">
-            <input type="password" name="password" placeholder="Passwort eingeben" required autofocus>
-            <button type="submit" style="width:100%; background:{{ accent }} !important; color:white; padding:10px; border-radius:5px; margin-top:10px; font-weight:bold;">Einloggen</button>
-        </form>
-    </div>
-</body>
-</html>
-EOF
-
-# templates/index.html
-cat << 'EOF' > $INSTALL_DIR/templates/index.html
-<!DOCTYPE html>
-<html lang="de">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1.0">
-    <title>Notes</title>
-    <link rel="stylesheet" href="/static/style.css?v={{ v }}">
-    <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/tomorrow-night-blue.min.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-</head>
-<body data-theme="dark">
-    <div class="header-actions">
-        <div class="dropdown">
-            <button onclick="toggleSettings(event)" style="font-size:1.4em">⚙️</button>
-            <div class="dropdown-content" id="dropdown-menu">
-                <div class="menu-row" onclick="toggleTheme()"><span>🌓 Theme wechseln</span></div>
-                <div class="menu-row"><span>🎨 Akzentfarbe</span><input type="color" id="accent-color-picker" onchange="updateGlobalAccent(this.value)" onclick="event.stopPropagation()"></div>
-                <div class="menu-row" onclick="exportData()"><span>📤 Backup laden (Vollständig)</span></div>
-                <div class="menu-row" onclick="document.getElementById('import-file').click()"><span>📥 Restore (tar.gz / json)</span></div>
-                <div class="menu-row" onclick="togglePassword()"><span id="pwd-toggle-text">🔒 Passwortschutz an</span></div>
-                <div class="menu-row" id="logout-btn" style="display:none; color:#e74c3c;" onclick="window.location.href='/logout'"><span>🚪 Abmelden</span></div>
-                <input type="file" id="import-file" style="display:none" onchange="importData(event)">
-            </div>
-        </div>
-    </div>
-    
-    <button id="mobile-toggle-btn" onclick="toggleSidebar()"><span>◀</span></button>
-    
-    <div id="sidebar">
-        <div class="sidebar-header">
-            <h3 style="margin:0">Notizen</h3>
-            <div style="display:flex; gap:8px;">
-                <button id="toggle-all-btn" onclick="toggleAllFolders()" title="Alle auf/zu">↔️</button>
-                <button id="sort-btn" onclick="confirmAutoSort()" title="Automatisch sortieren">⇅</button>
-                <button onclick="toggleEditMode()" title="Bearbeiten">✏️</button>
-            </div>
-        </div>
-        <div style="padding:15px; flex-shrink: 0;">
-            <div class="search-wrapper">
-                <input type="text" id="search-input" placeholder="Suchen..." oninput="filterTree()">
-                <span id="clear-search" onclick="clearSearch()">✕</span>
-            </div>
-            <button onclick="addItem()" style="width:100%;background:var(--accent) !important;color:white;padding:8px;border-radius:4px;font-weight:bold;">+ Hauptkategorie</button>
-        </div>
-        <div id="tree"></div>
-    </div>
-    
-    <div id="editor">
-        <div id="no-selection" style="margin-top:50px;text-align:center;opacity:0.5">Wähle eine Notiz aus.</div>
-        <div id="edit-area" style="display:none">
-            <div id="breadcrumb" style="font-size:0.8em;color:var(--accent);margin-bottom:15px;"></div>
-            
-            <div id="view-mode">
-                <div style="display:flex; align-items:center; gap:12px; margin-bottom:20px;">
-                    <h1 id="view-title" style="margin:0"></h1>
-                    <button onclick="enableEdit()" style="font-size:1.2em">✏️</button>
-                </div>
-                <div id="display-area"></div>
-            </div>
-            
-            <div id="edit-mode" style="display:none">
-                <div id="mention-dropdown"></div>
-
-                <div class="toolbar">
-                    <button class="tool-btn" onclick="saveChanges();disableEdit();" style="background:var(--accent) !important; color:white;"><i>💾</i><span>OK</span></button>
-                    <button class="tool-btn" onclick="cancelEdit()" style="color:#e74c3c;"><i>❌</i><span>Abbruch</span></button>
-                    
-                    <button class="tool-btn" onclick="wrapSelection('**','**', 'Fett')"><i><b>B</b></i><span>Fett</span></button>
-                    <button class="tool-btn" onclick="wrapSelection('_','_', 'Kursiv')"><i style="font-style:italic; font-family:serif;">I</i><span>Kursiv</span></button>
-                    <button class="tool-btn" onclick="wrapSelection('~~','~~', 'Text')"><i style="text-decoration:line-through;">S</i><span>Streich</span></button>
-                    
-                    <button class="tool-btn" onclick="wrapSelection('### ','', 'Überschrift')"><i style="font-weight:bold;">H</i><span>Titel</span></button>
-                    <button class="tool-btn" onclick="handleListAction('- ', 'Punkt')"><i style="font-weight:bold;">•—</i><span>Liste</span></button>
-                    <button class="tool-btn" onclick="handleListAction('- [ ] ', 'Aufgabe')"><i>☑</i><span>To-Do</span></button>
-                    
-                    <button class="tool-btn" onclick="wrapSelection('> ','', 'Zitat')"><i style="font-family:serif;">"</i><span>Zitat</span></button>
-                    <button class="tool-btn" onclick="wrapSelection('[s=Spoiler-Titel]\n','\n[/s]', 'Text hier...')"><i>👁️‍🗨️</i><span>Spoiler</span></button>
-                    <button class="tool-btn" onclick="wrapSelection('\n---\n','', '')"><i>—</i><span>Linie</span></button>
-
-                    <button class="tool-btn" onclick="insertCodeTag()"><i>💻</i><span>Code</span></button>
-                    <button class="tool-btn" onclick="uploadImage()"><i>🖼️</i><span>Bild</span></button>
-                    <button class="tool-btn" onclick="uploadGenericFile()"><i>📎</i><span>Datei</span></button>
-                    <button class="tool-btn" onclick="openSketch()"><i>🖌️</i><span>Skizze</span></button>
-                    <button class="tool-btn" onclick="triggerMentionButton()"><i>@</i><span>Verweis</span></button>
-                    <button class="tool-btn" onclick="wrapSelection('[','](https://)', 'Link-Text')"><i>🔗</i><span>Web-Link</span></button>
-                    
-                    <div class="tool-btn color-tool">
-                        <div class="color-row">
-                            <span onclick="applyColor()">🎨</span>
-                            <input type="color" id="text-color-input" value="#27ae60">
-                        </div>
-                        <span>Farbe</span>
-                    </div>
-                </div>
-                <input type="text" id="node-title" placeholder="Titel">
-                <textarea id="node-text" placeholder="Text oder Bild hier ablegen..." style="height:60vh"></textarea>
-            </div>
-            
-            <button onclick="addItem(activeId)" style="margin-top:20px;border:1px solid var(--accent) !important;color:var(--accent);padding:5px 10px;border-radius:4px;">+ Unter-Ebene</button>
-        </div>
-    </div>
-    
-    <div id="sketch-modal" class="modal-overlay">
-        <div class="modal">
-            <h3 style="margin-top:0">Skizzenblock</h3>
-            <div id="sketch-toolbar">
-                <div class="sketch-tool">
-                    <span>Hintergrund:</span>
-                    <select id="sketch-bg-select" onchange="setSketchBg(this.value)" style="padding:5px; border-radius:4px;">
-                        <option value="white">Weiß</option>
-                        <option value="black">Schwarz</option>
-                    </select>
-                </div>
-                <div class="sketch-tool">
-                    <span>Farbe:</span>
-                    <input type="color" onchange="sketchColor=this.value" value="#000000">
-                </div>
-                <div class="sketch-tool">
-                    <span>Dicke:</span>
-                    <input type="range" min="1" max="50" value="8" onchange="sketchWidth=this.value" style="width: 80px;">
-                </div>
-                
-                <button id="btn-pen" class="sketch-btn active" onclick="setSketchMode('pen')">✏️ Stift</button>
-                <button id="btn-highlighter" class="sketch-btn" onclick="setSketchMode('highlighter')">🖍️ Marker</button>
-                <button id="btn-eraser" class="sketch-btn" onclick="setSketchMode('eraser')">🧽 Radierer</button>
-                
-                <button class="sketch-btn" onclick="undoSketch()" style="color:#f39c12;">↩️ Zurück</button>
-                <button class="sketch-btn" onclick="sketchStrokes=[]; redrawSketch();" style="color:#e74c3c;">🗑️ Leeren</button>
-                
-                <div style="flex-grow:1; text-align:right;">
-                    <button class="btn-cancel" onclick="document.getElementById('sketch-modal').style.display='none'">Abbruch</button>
-                    <button class="btn-save" onclick="saveSketch()">Speichern</button>
-                </div>
-            </div>
-            
-            <div id="canvas-wrapper">
-                <canvas id="sketch-canvas"></canvas>
-            </div>
-            
-        </div>
-    </div>
-
-    <div id="custom-modal" class="modal-overlay">
-        <div class="modal">
-            <h3 id="modal-title"></h3>
-            <p id="modal-text" style="white-space: pre-wrap;"></p>
-            <input type="password" id="modal-input" style="display:none; margin-top: 15px; width: 100%; box-sizing: border-box;" placeholder="Passwort...">
-            <div class="modal-btns" id="modal-btns-container"></div>
-        </div>
-    </div>
-    
-    <div id="lightbox" onclick="closeLightbox()">
-        <img id="lightbox-img" src="">
-    </div>
-    
-    <script src="/static/script.js?v={{ v }}"></script>
-</body>
-</html>
 EOF
 
 # Sicherheit & Rechte
