@@ -46,7 +46,6 @@ apt update && apt install -y python3 python3-pip python3-venv cron
 mkdir -p $INSTALL_DIR/static $INSTALL_DIR/templates $INSTALL_DIR/uploads $INSTALL_DIR/backups
 
 # 7. Python Umgebung (angepasst für Debian 13 / Trixie)
-# NEU: 'requests' hinzugefügt für die Webhook-Anfragen
 python3 -m venv $INSTALL_DIR/venv
 $INSTALL_DIR/venv/bin/python3 -m pip install flask werkzeug requests
 
@@ -82,7 +81,7 @@ UPLOAD_FOLDER = 'uploads'
 # In-Memory Sperre (Global)
 locks = {}
 
-# --- NEU: HINTERGRUND: WEBHOOK WÄCHTER ---
+# --- HINTERGRUND: WEBHOOK WÄCHTER ---
 def background_check():
     sent_reminders = set()
     print("[SYSTEM] Webhook-Wächter gestartet.", flush=True)
@@ -108,8 +107,6 @@ def background_check():
                                     else:
                                         r_dt = datetime.fromisoformat(r_str)
                                         
-                                    # Fix: Notiz-ID + Uhrzeit als Schlüssel
-                                    # Wenn sich die Uhrzeit ändert, wird neu gesendet
                                     sent_key = f"{n['id']}_{r}"
                                         
                                     if r_dt <= now and sent_key not in sent_reminders:
@@ -132,7 +129,6 @@ def background_check():
                                                     res = requests.get(final_url, timeout=10)
                                                     print(f"[WEBHOOK] ✅ GET Erfolg! Status Code: {res.status_code}", flush=True)
                                                 else:
-                                                    # Fix: Anführungszeichen für JSON maskieren
                                                     safe_title_json = title.replace('"', '\\"').replace('\n', ' ')
                                                     post_data = payload.replace('{{TITLE}}', safe_title_json).replace('{{TIME}}', r)
                                                     print(f"[WEBHOOK] 📦 Payload: {post_data}", flush=True)
@@ -249,12 +245,10 @@ def handle_lock():
     action = req.get('action')
     now = time.time()
 
-    # Abgelaufene Sperren aufräumen
     expired = [k for k, v in list(locks.items()) if v['expires'] < now]
     for k in expired: 
         del locks[k]
 
-    # Globaler Schlüssel für das gesamte System
     lock_key = 'global'
 
     if action == 'release':
@@ -1501,9 +1495,8 @@ window.addEventListener('beforeunload', () => {
         navigator.sendBeacon('/api/lock', blob);
     }
 });
-// --- ENDE SPERR-LOGIK ---
 
-// --- NEU: WEBHOOK UI LOGIK ---
+// --- WEBHOOK UI LOGIK ---
 function toggleWebhookModal() {
     document.getElementById('webhook-modal').style.display = 'flex';
     document.getElementById('webhook-enabled').checked = fullData.settings.webhook_enabled || false;
@@ -1527,7 +1520,6 @@ async function saveWebhook() {
     document.getElementById('webhook-modal').style.display = 'none';
     updateMenuUI();
 }
-// --- ENDE WEBHOOK UI LOGIK ---
 
 // --- ERINNERUNGEN LOGIK ---
 function isReminderActive(node) {
@@ -1602,7 +1594,7 @@ async function clearReminder() {
     }
 }
 
-// --- NEU: LIVE-UPDATE FÜR ERINNERUNGEN OHNE RELOAD ---
+// --- LIVE-UPDATE FÜR ERINNERUNGEN OHNE RELOAD ---
 function refreshVisualReminders() {
     if (!fullData || !fullData.content || document.body.classList.contains('edit-mode-active')) return;
     
@@ -1628,7 +1620,6 @@ function refreshVisualReminders() {
         renderTree();
     }
 }
-// --- ENDE LIVE-UPDATE ---
 
 // --- SKETCH LOGIK ---
 let sketchCanvas, sketchCtx, isDrawing = false, sketchStrokes = [], currentStroke = null;
@@ -1816,7 +1807,6 @@ async function saveSketch() {
         }
     });
 }
-// --- SKETCH LOGIK ENDE ---
 
 function cleanDataArray(arr) {
     if (!arr) return [];
@@ -2182,10 +2172,13 @@ function initSortables() {
     }); 
 }
 
+// --- NEU: PRE-SYNC VOR DEM BEARBEITEN DER STRUKTUR ---
 async function toggleEditMode() { 
     const isCurrentlyEdit = document.body.classList.contains('edit-mode-active'); 
     
     if (!isCurrentlyEdit) {
+        await checkAndReloadData();
+        
         const locked = await acquireLock();
         if (!locked) {
             showModal("System gesperrt", "Das Notizbuch wird gerade auf einem anderen Gerät bearbeitet.\n\nSperre ignorieren und erzwingen?", [
@@ -2697,20 +2690,38 @@ async function importData(e) {
     }
 }
 
+// --- NEU: PRE-SYNC VOR DEM BEARBEITEN EINER NOTIZ ---
 async function enableEdit() { 
     if (!activeId) return;
+    
+    await checkAndReloadData();
+
+    if (!findNode(fullData.content, activeId)) return;
     
     const locked = await acquireLock();
     if (!locked) {
         showModal("System gesperrt", "Das Notizbuch wird gerade auf einem anderen Gerät bearbeitet.\n\nSperre ignorieren und überschreiben?", [
             { label: "Ja, erzwingen", class: "btn-discard", action: async () => {
                 await acquireLock(true);
+                
+                const node = findNode(fullData.content, activeId);
+                if (node) {
+                    document.getElementById('node-title').value = node.title;
+                    document.getElementById('node-text').value = node.text;
+                }
                 showEditArea();
             }},
             { label: "Abbrechen", class: "btn-cancel", action: () => {} }
         ]);
         return;
     }
+
+    const node = findNode(fullData.content, activeId);
+    if (node) {
+        document.getElementById('node-title').value = node.title;
+        document.getElementById('node-text').value = node.text;
+    }
+
     showEditArea();
 }
 
@@ -2974,7 +2985,6 @@ async function applyAutoSort() {
 
 // --- TASTATUR-SHORTCUTS ---
 document.addEventListener('keydown', function(e) {
-    // Strg + S (oder Cmd + S) zum Speichern
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         if (document.getElementById('edit-mode').style.display === 'block') {
             e.preventDefault(); 
@@ -2983,7 +2993,6 @@ document.addEventListener('keydown', function(e) {
         }
     }
     
-    // Escape zum Schließen von Fenstern oder Abbrechen
     if (e.key === 'Escape') {
         if (document.getElementById('lightbox').style.display === 'flex') {
             closeLightbox();
@@ -3005,9 +3014,7 @@ window.onload = () => {
     loadData(); 
     initDragAndDrop(); 
     initMentionSystem();
-    // Hintergrund-Sync aufrufen
     setInterval(checkAndReloadData, 30000);
-    // NEU: Live-Update für Erinnerungs-Icons
     setInterval(refreshVisualReminders, 15000);
 };
 EOF
@@ -3029,7 +3036,6 @@ find $INSTALL_DIR -type f -exec chmod 640 {} \;
 
 chmod 750 $INSTALL_DIR/backup.sh
 chmod 750 $INSTALL_DIR/cleanup.py
-# NEU: app.py braucht Ausführrechte für den Systemd Service
 chmod +x $INSTALL_DIR/app.py
 
 # 10. Autostart Logik
