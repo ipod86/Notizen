@@ -74,6 +74,9 @@ ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 
 DATA_FILE = 'data.json'
 UPLOAD_FOLDER = 'uploads'
 
+# In-Memory Sperren für gleichzeitiges Bearbeiten
+locks = {}
+
 @app.after_request
 def add_header(response):
     if request.path.startswith('/uploads/'):
@@ -151,6 +154,39 @@ def set_password():
         json.dump(data, f, indent=4)
         
     return jsonify({"status": "success", "last_modified": int(os.path.getmtime(DATA_FILE) * 1000)})
+
+@app.route('/api/lock', methods=['POST'])
+def handle_lock():
+    req = request.json
+    item_id = req.get('id')
+    client_id = req.get('client_id')
+    action = req.get('action')
+    now = time.time()
+
+    expired = [k for k, v in list(locks.items()) if v['expires'] < now]
+    for k in expired: 
+        del locks[k]
+
+    if action == 'release':
+        if item_id in locks and locks[item_id]['client_id'] == client_id:
+            del locks[item_id]
+        return jsonify({"status": "released"})
+
+    if action in ['acquire', 'override']:
+        if action == 'override' or item_id not in locks or locks[item_id]['client_id'] == client_id:
+            locks[item_id] = {'client_id': client_id, 'expires': now + 30}
+            return jsonify({"status": "acquired"})
+        else:
+            return jsonify({"status": "locked"})
+
+    if action == 'heartbeat':
+        if item_id in locks and locks[item_id]['client_id'] == client_id:
+            locks[item_id]['expires'] = now + 30
+            return jsonify({"status": "acquired"})
+        else:
+            return jsonify({"status": "lost"})
+
+    return jsonify({"error": "invalid action"}), 400
 
 @app.route('/api/notes', methods=['GET', 'POST'])
 def handle_notes():
@@ -1255,6 +1291,86 @@ var collapsedIds = new Set();
 var sortables = [];
 var currentLastModified = 0;
 
+// --- SPERR-LOGIK (Pessimistic Locking) ---
+let myClientId = sessionStorage.getItem('clientId');
+if (!myClientId) {
+    myClientId = 'client_' + Math.random().toString(36).substring(2, 10);
+    sessionStorage.setItem('clientId', myClientId);
+}
+let lockInterval = null;
+let currentlyLockedId = null;
+
+async function acquireLock(id, override = false) {
+    try {
+        const res = await fetch('/api/lock', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({id: id, client_id: myClientId, action: override ? 'override' : 'acquire'})
+        });
+        const data = await res.json();
+        if (data.status === 'acquired') {
+            currentlyLockedId = id;
+            startHeartbeat(id);
+            return true;
+        }
+    } catch(e) { console.error(e); }
+    return false;
+}
+
+async function releaseLock() {
+    if (!currentlyLockedId) return;
+    const idToRelease = currentlyLockedId;
+    currentlyLockedId = null; 
+    if (lockInterval) {
+        clearInterval(lockInterval);
+        lockInterval = null;
+    }
+    try {
+        await fetch('/api/lock', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({id: idToRelease, client_id: myClientId, action: 'release'})
+        });
+    } catch(e) { console.error(e); }
+}
+
+function startHeartbeat(id) {
+    if (lockInterval) clearInterval(lockInterval);
+    lockInterval = setInterval(async () => {
+        try {
+            const res = await fetch('/api/lock', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id: id, client_id: myClientId, action: 'heartbeat'})
+            });
+            const data = await res.json();
+            if (data.status === 'lost') {
+                if (lockInterval) clearInterval(lockInterval);
+                lockInterval = null;
+                currentlyLockedId = null;
+                
+                showModal("Sperre verloren!", "Jemand anderes hat die Bearbeitung auf einem anderen Gerät erzwungen.", [
+                    {label: "Verstanden", class: "btn-cancel", action: () => { 
+                        if (id === 'tree') {
+                            deactivateTreeEdit();
+                        } else {
+                            disableEdit(); 
+                        }
+                    }}
+                ]);
+            }
+        } catch(e) { console.error(e); }
+    }, 10000);
+}
+
+window.addEventListener('beforeunload', () => {
+    if (currentlyLockedId) {
+        const blob = new Blob([JSON.stringify({id: currentlyLockedId, client_id: myClientId, action: 'release'})], {type: 'application/json'});
+        navigator.sendBeacon('/api/lock', blob);
+    }
+});
+// --- ENDE SPERR-LOGIK ---
+
 // --- ERINNERUNGEN LOGIK ---
 function isReminderActive(node) {
     if (!node.reminder) return false;
@@ -1876,13 +1992,38 @@ function initSortables() {
     }); 
 }
 
-function toggleEditMode() { 
-    const isNowEdit = document.body.classList.toggle('edit-mode-active'); 
-    if (!isNowEdit) { 
-        sortables.forEach(s => s.destroy()); 
-        sortables = []; 
+async function toggleEditMode() { 
+    const isCurrentlyEdit = document.body.classList.contains('edit-mode-active'); 
+    
+    if (!isCurrentlyEdit) {
+        const locked = await acquireLock('tree');
+        if (!locked) {
+            showModal("Ordner gesperrt", "Die Ordnerstruktur wird gerade auf einem anderen Gerät bearbeitet.\n\nSperre ignorieren und erzwingen?", [
+                { label: "Ja, erzwingen", class: "btn-discard", action: async () => {
+                    await acquireLock('tree', true);
+                    activateTreeEdit();
+                }},
+                { label: "Abbrechen", class: "btn-cancel", action: () => {} }
+            ]);
+            return;
+        }
+        activateTreeEdit();
+    } else {
+        deactivateTreeEdit();
     }
+}
+
+function activateTreeEdit() {
+    document.body.classList.add('edit-mode-active');
+    renderTree();
+}
+
+function deactivateTreeEdit() {
+    document.body.classList.remove('edit-mode-active');
+    sortables.forEach(s => s.destroy()); 
+    sortables = []; 
     renderTree(); 
+    releaseLock(); 
 }
 
 function rebuildDataFromDOM() { 
@@ -2366,7 +2507,24 @@ async function importData(e) {
     }
 }
 
-function enableEdit() { 
+async function enableEdit() { 
+    if (!activeId) return;
+    
+    const locked = await acquireLock(activeId);
+    if (!locked) {
+        showModal("Notiz gesperrt", "Diese Notiz wird gerade auf einem anderen Gerät bearbeitet.\n\nSperre ignorieren und überschreiben?", [
+            { label: "Ja, erzwingen", class: "btn-discard", action: async () => {
+                await acquireLock(activeId, true);
+                showEditArea();
+            }},
+            { label: "Abbrechen", class: "btn-cancel", action: () => {} }
+        ]);
+        return;
+    }
+    showEditArea();
+}
+
+function showEditArea() {
     document.getElementById('view-mode').style.display = 'none'; 
     document.getElementById('edit-mode').style.display = 'block'; 
 }
@@ -2380,6 +2538,7 @@ function disableEdit() {
     } 
     document.getElementById('view-mode').style.display = 'block'; 
     document.getElementById('edit-mode').style.display = 'none'; 
+    releaseLock(); 
 }
 
 function cancelEdit() {
