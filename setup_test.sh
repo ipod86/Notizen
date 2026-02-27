@@ -37,11 +37,13 @@ apt update && apt install -y python3 python3-pip python3-venv cron
 # 4. Verzeichnisse
 mkdir -p $INSTALL_DIR/static $INSTALL_DIR/templates $INSTALL_DIR/uploads $INSTALL_DIR/backups
 
-# 5. Python Umgebung & Requests
+# 5. Python Umgebung & Libraries (Requests für Webhooks hinzugefügt)
 python3 -m venv $INSTALL_DIR/venv
 $INSTALL_DIR/venv/bin/python3 -m pip install flask werkzeug requests
 
-# --- PYTHON BACKEND (app.py) ---
+# --- DATEIEN ERSTELLEN ---
+
+# 6. Python Backend (app.py) - TEIL 1 (Ohne Variablen)
 cat << 'EOF' > $INSTALL_DIR/app.py
 from flask import Flask, render_template, request, jsonify, send_from_directory, session, redirect, url_for, send_file
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -57,7 +59,7 @@ DATA_FILE = 'data.json'
 UPLOAD_FOLDER = 'uploads'
 locks = {}
 
-# --- WEBHOOK WÄCHTER ---
+# --- WEBHOOK WÄCHTER (HINTERGRUND) ---
 def background_check():
     sent_reminders = set()
     print("[SYSTEM] Webhook-Wächter gestartet.", flush=True)
@@ -83,7 +85,8 @@ def background_check():
                                     else:
                                         r_dt = datetime.fromisoformat(r_str)
                                     
-                                    # Fix: Notiz-ID + Uhrzeit als Schlüssel
+                                    # Fix: Notiz-ID + spezifische Uhrzeit als Schlüssel, 
+                                    # damit der Webhook bei Uhrzeit-Änderung neu feuert.
                                     sent_key = f"{n['id']}_{r}"
                                     
                                     if r_dt <= now and sent_key not in sent_reminders:
@@ -95,28 +98,32 @@ def background_check():
                                         print(f"[WEBHOOK] ⏰ Termin fällig für: '{title}'", flush=True)
                                         
                                         if url:
+                                            # URL-sichere Strings für GET
                                             safe_title_url = urllib.parse.quote(title)
                                             safe_time_url = urllib.parse.quote(r)
                                             final_url = url.replace('{{TITLE}}', safe_title_url).replace('{{TIME}}', safe_time_url)
+                                            
                                             print(f"[WEBHOOK] 🌐 Sende {method} Anfrage an: {final_url}", flush=True)
                                             
                                             try:
                                                 if method == 'GET':
                                                     res = requests.get(final_url, timeout=10)
-                                                    print(f"[WEBHOOK] ✅ GET Erfolg! Status Code: {res.status_code}", flush=True)
+                                                    print(f"[WEBHOOK] ✅ GET Erfolg! Status: {res.status_code}", flush=True)
                                                 else:
-                                                    # Fix: Anführungszeichen und Umbrüche maskieren für sauberes JSON
+                                                    # JSON-sichere Strings für POST (Escaping von Quotes und Umbrüchen)
                                                     safe_title_json = title.replace('"', '\\"').replace('\n', ' ')
                                                     post_data = payload.replace('{{TITLE}}', safe_title_json).replace('{{TIME}}', r)
+                                                    
                                                     print(f"[WEBHOOK] 📦 Payload: {post_data}", flush=True)
                                                     
                                                     try:
                                                         json_data = json.loads(post_data)
                                                         res = requests.post(final_url, json=json_data, timeout=10)
                                                     except:
+                                                        # Fallback auf reinen Text, wenn JSON fehlerhaft ist
                                                         res = requests.post(final_url, data=post_data.encode('utf-8'), headers={'Content-Type': 'application/json'}, timeout=10)
                                                     
-                                                    print(f"[WEBHOOK] ✅ POST Erfolg! Status Code: {res.status_code}, Antwort: {res.text[:100]}", flush=True)
+                                                    print(f"[WEBHOOK] ✅ POST Erfolg! Status: {res.status_code}, Antwort: {res.text[:100]}", flush=True)
                                                     
                                             except Exception as req_e:
                                                 print(f"[WEBHOOK] ❌ Fehler beim Senden: {req_e}", flush=True)
@@ -144,26 +151,33 @@ def add_header(response):
     response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     return response
 
-def allowed_file(filename): return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+def allowed_file(filename): 
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def check_auth():
     if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, 'r') as f: data = json.load(f)
-        if data.get('settings', {}).get('password_enabled') and not session.get('logged_in'): return False
+        with open(DATA_FILE, 'r') as f: 
+            data = json.load(f)
+        if data.get('settings', {}).get('password_enabled') and not session.get('logged_in'): 
+            return False
     return True
 
 @app.before_request
 def require_login():
-    if request.endpoint in ['login', 'static']: return
+    if request.endpoint in ['login', 'static']: 
+        return
     if not check_auth():
-        if request.path.startswith('/api/'): return jsonify({"error": "Unauthorized"}), 401
+        if request.path.startswith('/api/'): 
+            return jsonify({"error": "Unauthorized"}), 401
         return redirect(url_for('login'))
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
-    with open(DATA_FILE, 'r') as f: data = json.load(f)
+    with open(DATA_FILE, 'r') as f: 
+        data = json.load(f)
     settings = data.get('settings', {})
-    if not settings.get('password_enabled'): return redirect(url_for('index'))
+    if not settings.get('password_enabled'): 
+        return redirect(url_for('index'))
     if request.method == 'POST':
         if check_password_hash(settings.get('password_hash', ''), request.form.get('password')):
             session['logged_in'] = True
@@ -171,19 +185,25 @@ def login():
     return render_template('login.html', theme=settings.get('theme', 'dark'), accent=settings.get('accent', '#27ae60'), v=str(time.time()))
 
 @app.route('/logout')
-def logout(): session.pop('logged_in', None); return redirect(url_for('login'))
+def logout(): 
+    session.pop('logged_in', None)
+    return redirect(url_for('login'))
 
 @app.route('/')
-def index(): return render_template('index.html', v=str(time.time()))
+def index(): 
+    return render_template('index.html', v=str(time.time()))
 
 @app.route('/api/password', methods=['POST'])
 def set_password():
     req = request.json
-    with open(DATA_FILE, 'r') as f: data = json.load(f)
-    if not data.get('settings'): data['settings'] = {}
+    with open(DATA_FILE, 'r') as f: 
+        data = json.load(f)
+    if not data.get('settings'): 
+        data['settings'] = {}
     data['settings']['password_enabled'] = bool(req.get('enabled'))
     data['settings']['password_hash'] = generate_password_hash(req.get('password')) if req.get('enabled') else ""
-    with open(DATA_FILE, 'w') as f: json.dump(data, f, indent=4)
+    with open(DATA_FILE, 'w') as f: 
+        json.dump(data, f, indent=4)
     return jsonify({"status": "success", "last_modified": int(os.path.getmtime(DATA_FILE) * 1000)})
 
 @app.route('/api/lock', methods=['POST'])
@@ -193,11 +213,13 @@ def handle_lock():
     action = req.get('action')
     now = time.time()
     expired = [k for k, v in list(locks.items()) if v['expires'] < now]
-    for k in expired: del locks[k]
+    for k in expired: 
+        del locks[k]
     lock_key = 'global'
 
     if action == 'release':
-        if lock_key in locks and locks[lock_key]['client_id'] == client_id: del locks[lock_key]
+        if lock_key in locks and locks[lock_key]['client_id'] == client_id: 
+            del locks[lock_key]
         return jsonify({"status": "released"})
     if action in ['acquire', 'override']:
         if action == 'override' or lock_key not in locks or locks[lock_key]['client_id'] == client_id:
@@ -219,7 +241,8 @@ def handle_notes():
         if os.path.exists(DATA_FILE) and client_time is not None:
             if int(os.path.getmtime(DATA_FILE) * 1000) > client_time + 100:
                 return jsonify({"status": "error", "message": "Konflikt"}), 409
-        with open(DATA_FILE, 'w') as f: json.dump(req_data, f, indent=4)
+        with open(DATA_FILE, 'w') as f: 
+            json.dump(req_data, f, indent=4)
         return jsonify({"status": "success", "last_modified": int(os.path.getmtime(DATA_FILE) * 1000)})
     with open(DATA_FILE, 'r') as f:
         data = json.load(f)
@@ -227,7 +250,8 @@ def handle_notes():
         return jsonify(data)
 
 @app.route('/uploads/<filename>')
-def uploaded_file(filename): return send_from_directory(UPLOAD_FOLDER, filename)
+def uploaded_file(filename): 
+    return send_from_directory(UPLOAD_FOLDER, filename)
 
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
@@ -244,15 +268,18 @@ def save_sketch():
     data = request.json
     sketch_id = data.get('id') or uuid.uuid4().hex
     png_data = data['image'].split(',')[1]
-    with open(os.path.join(UPLOAD_FOLDER, f"sketch_{sketch_id}.png"), "wb") as fh: fh.write(base64.b64decode(png_data))
-    with open(os.path.join(UPLOAD_FOLDER, f"sketch_{sketch_id}.json"), "w") as fh: json.dump({"bg": data['bg'], "strokes": data['strokes']}, fh)
+    with open(os.path.join(UPLOAD_FOLDER, f"sketch_{sketch_id}.png"), "wb") as fh: 
+        fh.write(base64.b64decode(png_data))
+    with open(os.path.join(UPLOAD_FOLDER, f"sketch_{sketch_id}.json"), "w") as fh: 
+        json.dump({"bg": data['bg'], "strokes": data['strokes']}, fh)
     return jsonify({"id": sketch_id})
 
 @app.route('/api/sketch/<sketch_id>', methods=['GET'])
 def load_sketch(sketch_id):
     path = os.path.join(UPLOAD_FOLDER, f"sketch_{sketch_id}.json")
     if os.path.exists(path):
-        with open(path, 'r') as f: return jsonify(json.load(f))
+        with open(path, 'r') as f: 
+            return jsonify(json.load(f))
     return jsonify({"error": "not found"}), 404
 
 @app.route('/api/export', methods=['GET'])
@@ -260,14 +287,16 @@ def export_backup():
     memory_file = io.BytesIO()
     with tarfile.open(fileobj=memory_file, mode='w:gz') as tar:
         tar.add(DATA_FILE, arcname='data.json')
-        if os.path.exists(UPLOAD_FOLDER): tar.add(UPLOAD_FOLDER, arcname='uploads')
+        if os.path.exists(UPLOAD_FOLDER): 
+            tar.add(UPLOAD_FOLDER, arcname='uploads')
     memory_file.seek(0)
     return send_file(memory_file, download_name='notes_backup.tar.gz', as_attachment=True)
 
 @app.route('/api/import', methods=['POST'])
 def import_backup():
     file = request.files.get('file')
-    if not file: return jsonify({"error": "Keine Datei"}), 400
+    if not file: 
+        return jsonify({"error": "Keine Datei"}), 400
     if file.filename.lower().endswith('.json'):
         file.save(DATA_FILE)
         return jsonify({"status": "success"})
@@ -280,17 +309,24 @@ def import_backup():
                 except: pass
             for member in tar.getmembers():
                 if member.name.endswith('data.json'):
-                    with open(DATA_FILE, "wb") as target: shutil.copyfileobj(tar.extractfile(member), target)
+                    with open(DATA_FILE, "wb") as target: 
+                        shutil.copyfileobj(tar.extractfile(member), target)
                 elif 'uploads/' in member.name and member.isfile():
-                    with open(os.path.join(UPLOAD_FOLDER, os.path.basename(member.name)), "wb") as target: shutil.copyfileobj(tar.extractfile(member), target)
+                    with open(os.path.join(UPLOAD_FOLDER, os.path.basename(member.name)), "wb") as target: 
+                        shutil.copyfileobj(tar.extractfile(member), target)
         return jsonify({"status": "success"})
-    except Exception as e: return jsonify({"error": str(e)}), 500
+    except Exception as e: 
+        return jsonify({"error": str(e)}), 500
+EOF
+
+# 6. Python Backend - TEIL 2 (Der wichtige Fix mit Variablen-Auflösung)
+cat << EOF >> $INSTALL_DIR/app.py
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=$USER_PORT, debug=False)
 EOF
 
-# --- CLEANUP & BACKUP ---
+# 7. Cleanup & Backup Skripte
 cat << 'EOF' > $INSTALL_DIR/cleanup.py
 import json, os
 DATA_FILE, UPLOAD_FOLDER = '/opt/notiz-tool/data.json', '/opt/notiz-tool/uploads'
@@ -321,13 +357,52 @@ cd /opt/notiz-tool
 if [ -f data.json ]; then tar -czf backups/backup_$(date +%u).tar.gz data.json uploads/; fi
 EOF
 
-# --- CSS ---
+# 8. Unminifiziertes CSS
 cat << 'EOF' > $INSTALL_DIR/static/style.css
-:root { --bg-color: #1a1a1a; --sidebar-bg: #252525; --text-color: #e0e0e0; --accent: #27ae60; --accent-rgb: 39, 174, 96; --border-color: #333; --sidebar-width: 300px; --code-bg: #2d2d2d; --code-text: #f8f8f2; }
-[data-theme="light"] { --bg-color: #f5f5f5; --sidebar-bg: #ffffff; --text-color: #333; --border-color: #ddd; --code-bg: #f0f0f0; --code-text: #222; }
+:root { 
+    --bg-color: #1a1a1a; 
+    --sidebar-bg: #252525; 
+    --text-color: #e0e0e0; 
+    --accent: #27ae60; 
+    --accent-rgb: 39, 174, 96; 
+    --border-color: #333; 
+    --sidebar-width: 300px; 
+    --code-bg: #2d2d2d; 
+    --code-text: #f8f8f2; 
+}
+[data-theme="light"] { 
+    --bg-color: #f5f5f5; 
+    --sidebar-bg: #ffffff; 
+    --text-color: #333; 
+    --border-color: #ddd; 
+    --code-bg: #f0f0f0; 
+    --code-text: #222; 
+}
 html { overscroll-behavior: none; }
-body { margin: 0; display: flex; font-family: sans-serif; background: var(--bg-color); color: var(--text-color); overflow: hidden; height: 100dvh; width: 100vw; position: fixed; top: 0; left: 0; }
-#sidebar { width: var(--sidebar-width); height: 100%; background: var(--sidebar-bg); border-right: 1px solid var(--border-color); display: flex; flex-direction: column; transition: margin-left 0.3s ease; flex-shrink: 0; z-index: 10; }
+body { 
+    margin: 0; 
+    display: flex; 
+    font-family: sans-serif; 
+    background: var(--bg-color); 
+    color: var(--text-color); 
+    overflow: hidden; 
+    height: 100dvh; 
+    width: 100vw; 
+    position: fixed; 
+    top: 0; 
+    left: 0; 
+}
+#sidebar { 
+    width: var(--sidebar-width); 
+    height: 100%; 
+    background: var(--sidebar-bg); 
+    border-right: 1px solid var(--border-color); 
+    display: flex; 
+    flex-direction: column; 
+    transition: margin-left 0.3s ease; 
+    flex-shrink: 0; 
+    z-index: 10; 
+}
 body.sidebar-hidden #sidebar { margin-left: calc(-1 * var(--sidebar-width)); }
 .sidebar-header { height: 60px; min-height: 60px; flex-shrink: 0; display: flex; justify-content: space-between; align-items: center; padding: 0 15px; border-bottom: 1px solid var(--border-color); box-sizing: border-box; background: var(--sidebar-bg); }
 #tree { flex-grow: 1; overflow-y: auto; padding: 10px 0 50px 0; }
@@ -422,7 +497,7 @@ input[type="checkbox"].task-check { width: 16px; height: 16px; margin: 0; cursor
 .sketch-btn.active { background: var(--accent); color: white; border-color: var(--accent); }
 EOF
 
-# --- HTML TEMPLATES ---
+# 9. HTML Templates
 cat << 'EOF' > $INSTALL_DIR/templates/login.html
 <!DOCTYPE html>
 <html lang="de">
@@ -671,7 +746,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
 </html>
 EOF
 
-# --- JAVASCRIPT ---
+# 10. Unminifiziertes JavaScript
 cat << 'EOF' > $INSTALL_DIR/static/script.js
 var fullData = {content: [], settings: {accent: '#27ae60', theme: 'dark', password_enabled: false}};
 var activeId = null;
@@ -707,7 +782,10 @@ async function acquireLock(override = false) {
 async function releaseLock() {
     if (!currentlyLocked) return;
     currentlyLocked = false; 
-    if (lockInterval) { clearInterval(lockInterval); lockInterval = null; }
+    if (lockInterval) { 
+        clearInterval(lockInterval); 
+        lockInterval = null; 
+    }
     try {
         await fetch('/api/lock', {
             method: 'POST',
@@ -791,10 +869,12 @@ function hasActiveReminderInChildren(node) {
 function openReminderModal() {
     const node = findNode(fullData.content, activeId);
     if(!node) return;
+    
     document.getElementById('reminder-modal').style.display = 'flex';
     const hasTimeCb = document.getElementById('reminder-has-time');
     const dateInp = document.getElementById('reminder-date');
     const dtInp = document.getElementById('reminder-datetime');
+    
     if (node.reminder) {
         if (node.reminder.includes('T')) {
             hasTimeCb.checked = true;
@@ -820,8 +900,10 @@ function toggleReminderInput() {
 async function saveReminder() {
     const node = findNode(fullData.content, activeId);
     if(!node) return;
+    
     const hasTime = document.getElementById('reminder-has-time').checked;
     const val = hasTime ? document.getElementById('reminder-datetime').value : document.getElementById('reminder-date').value;
+    
     if(val) {
         node.reminder = val;
         document.getElementById('reminder-modal').style.display = 'none';
@@ -847,62 +929,104 @@ let sketchColor = '#000000', sketchWidth = 8, sketchMode = 'pen', sketchBg = 'wh
 function initSketcher() {
     sketchCanvas = document.getElementById('sketch-canvas');
     sketchCtx = sketchCanvas.getContext('2d');
-    sketchCanvas.width = 1200; sketchCanvas.height = 900;
+    sketchCanvas.width = 1200; 
+    sketchCanvas.height = 900;
+    
     const getPos = (e) => {
         const r = sketchCanvas.getBoundingClientRect();
-        const scaleX = sketchCanvas.width / r.width, scaleY = sketchCanvas.height / r.height;
+        const scaleX = sketchCanvas.width / r.width;
+        const scaleY = sketchCanvas.height / r.height;
         let cx = e.clientX, cy = e.clientY;
-        if(e.touches && e.touches.length > 0) { cx = e.touches[0].clientX; cy = e.touches[0].clientY; }
+        if(e.touches && e.touches.length > 0) { 
+            cx = e.touches[0].clientX; 
+            cy = e.touches[0].clientY; 
+        }
         return { x: (cx - r.left) * scaleX, y: (cy - r.top) * scaleY };
     };
+    
     const startDraw = (e) => {
-        e.preventDefault(); isDrawing = true; 
-        currentStroke = { color: sketchMode === 'eraser' ? sketchBg : sketchColor, width: sketchWidth, mode: sketchMode, points: [getPos(e)] };
+        e.preventDefault(); 
+        isDrawing = true; 
+        currentStroke = { 
+            color: sketchMode === 'eraser' ? sketchBg : sketchColor, 
+            width: sketchWidth, 
+            mode: sketchMode, 
+            points: [getPos(e)] 
+        };
         sketchStrokes.push(currentStroke);
     };
+    
     const draw = (e) => {
-        if (!isDrawing) return; e.preventDefault();
-        currentStroke.points.push(getPos(e)); redrawSketch();
+        if (!isDrawing) return; 
+        e.preventDefault();
+        currentStroke.points.push(getPos(e)); 
+        redrawSketch();
     };
+    
     const endDraw = () => { isDrawing = false; };
-    sketchCanvas.addEventListener('mousedown', startDraw); sketchCanvas.addEventListener('mousemove', draw); window.addEventListener('mouseup', endDraw);
-    sketchCanvas.addEventListener('touchstart', startDraw, {passive: false}); sketchCanvas.addEventListener('touchmove', draw, {passive: false}); window.addEventListener('touchend', endDraw);
+    
+    sketchCanvas.addEventListener('mousedown', startDraw); 
+    sketchCanvas.addEventListener('mousemove', draw); 
+    window.addEventListener('mouseup', endDraw);
+    sketchCanvas.addEventListener('touchstart', startDraw, {passive: false}); 
+    sketchCanvas.addEventListener('touchmove', draw, {passive: false}); 
+    window.addEventListener('touchend', endDraw);
 }
 
 function redrawSketch() {
-    sketchCtx.globalAlpha = 1.0; sketchCtx.fillStyle = sketchBg; sketchCtx.fillRect(0, 0, sketchCanvas.width, sketchCanvas.height);
-    sketchCtx.lineCap = 'round'; sketchCtx.lineJoin = 'round';
+    sketchCtx.globalAlpha = 1.0; 
+    sketchCtx.fillStyle = sketchBg; 
+    sketchCtx.fillRect(0, 0, sketchCanvas.width, sketchCanvas.height);
+    sketchCtx.lineCap = 'round'; 
+    sketchCtx.lineJoin = 'round';
+    
     for (let s of sketchStrokes) {
         if (s.points.length < 2) continue;
         sketchCtx.globalAlpha = s.mode === 'highlighter' ? 0.4 : 1.0;
-        sketchCtx.beginPath(); sketchCtx.strokeStyle = s.color; sketchCtx.lineWidth = s.width;
+        sketchCtx.beginPath(); 
+        sketchCtx.strokeStyle = s.color; 
+        sketchCtx.lineWidth = s.width;
         sketchCtx.moveTo(s.points[0].x, s.points[0].y);
+        
         for (let i = 1; i < s.points.length - 1; i++) {
-            let xc = (s.points[i].x + s.points[i + 1].x) / 2, yc = (s.points[i].y + s.points[i + 1].y) / 2;
+            let xc = (s.points[i].x + s.points[i + 1].x) / 2;
+            let yc = (s.points[i].y + s.points[i + 1].y) / 2;
             sketchCtx.quadraticCurveTo(s.points[i].x, s.points[i].y, xc, yc);
         }
-        sketchCtx.lineTo(s.points[s.points.length - 1].x, s.points[s.points.length - 1].y); sketchCtx.stroke();
+        sketchCtx.lineTo(s.points[s.points.length - 1].x, s.points[s.points.length - 1].y); 
+        sketchCtx.stroke();
     }
     sketchCtx.globalAlpha = 1.0;
 }
 
-function undoSketch() { if (sketchStrokes.length > 0) { sketchStrokes.pop(); redrawSketch(); } }
+function undoSketch() { 
+    if (sketchStrokes.length > 0) { 
+        sketchStrokes.pop(); 
+        redrawSketch(); 
+    } 
+}
 
 async function openSketch(id = null) {
     document.getElementById('sketch-modal').style.display = 'flex';
     if(!sketchCanvas) initSketcher();
-    activeSketchId = id; sketchStrokes = [];
+    activeSketchId = id; 
+    sketchStrokes = [];
+    
     if (id) {
         try {
             const res = await fetch(`/api/sketch/${id}`);
             if(res.ok) {
                 const data = await res.json();
-                sketchBg = data.bg || 'white'; document.getElementById('sketch-bg-select').value = sketchBg;
+                sketchBg = data.bg || 'white'; 
+                document.getElementById('sketch-bg-select').value = sketchBg;
                 sketchStrokes = data.strokes || [];
             }
         } catch(e) {}
-    } else { sketchBg = document.getElementById('sketch-bg-select').value; }
-    setSketchMode('pen'); redrawSketch();
+    } else { 
+        sketchBg = document.getElementById('sketch-bg-select').value; 
+    }
+    setSketchMode('pen'); 
+    redrawSketch();
 }
 
 function setSketchMode(mode) {
@@ -916,7 +1040,9 @@ function setSketchBg(bg) {
     sketchBg = bg;
     sketchStrokes.forEach(s => { 
         if (s.mode === 'eraser') s.color = bg; 
-        else if (!s.mode && (s.color === 'white' || s.color === 'black')) { if (s.color !== bg && sketchMode === 'eraser') s.color = bg; }
+        else if (!s.mode && (s.color === 'white' || s.color === 'black')) { 
+            if (s.color !== bg && sketchMode === 'eraser') s.color = bg; 
+        }
     });
     redrawSketch();
 }
@@ -931,12 +1057,23 @@ async function saveSketch() {
     const payload = { id: activeSketchId, bg: sketchBg, strokes: sketchStrokes, image: dataUrl };
     const res = await fetch('/api/sketch', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
     const data = await res.json();
-    if (!activeSketchId && data.id) wrapSelection(`[sketch:${data.id}]`, '', '');
+    
+    if (!activeSketchId && data.id) {
+        wrapSelection(`[sketch:${data.id}]`, '', '');
+    }
+    
     document.getElementById('sketch-modal').style.display = 'none';
     const ta = document.getElementById('node-text');
-    if (ta) { ta.value = ta.value.replace(`[sketch:${data.id}]`, `[sketch:${data.id}] `).trim(); updateCurrentNode(); }
+    
+    if (ta) { 
+        ta.value = ta.value.replace(`[sketch:${data.id}]`, `[sketch:${data.id}] `).trim(); 
+        updateCurrentNode(); 
+    }
+    
     document.querySelectorAll('.sketch-img').forEach(img => {
-        if (img.src.includes(data.id)) img.src = `/uploads/sketch_${data.id}.png?v=` + Date.now();
+        if (img.src.includes(data.id)) {
+            img.src = `/uploads/sketch_${data.id}.png?v=` + Date.now();
+        }
     });
 }
 
@@ -948,23 +1085,38 @@ function cleanDataArray(arr) {
 }
 
 async function loadData() { 
-    if (localStorage.getItem('sidebarState') === 'closed') document.body.classList.add('sidebar-hidden'); 
+    if (localStorage.getItem('sidebarState') === 'closed') {
+        document.body.classList.add('sidebar-hidden'); 
+    }
     const savedCollapsed = localStorage.getItem('collapsedNodes');
-    if (savedCollapsed) collapsedIds = new Set(JSON.parse(savedCollapsed));
+    if (savedCollapsed) {
+        collapsedIds = new Set(JSON.parse(savedCollapsed));
+    }
+    
     try { 
         const res = await fetch('/api/notes?_t=' + Date.now()); 
         const data = await res.json(); 
         currentLastModified = data.last_modified || 0;
         fullData = data && data.content ? data : {content: [], settings: {accent: '#27ae60', theme: 'dark', password_enabled: false}}; 
-        if(!fullData.settings) fullData.settings = {accent: '#27ae60', theme: 'dark', password_enabled: false}; 
+        
+        if(!fullData.settings) {
+            fullData.settings = {accent: '#27ae60', theme: 'dark', password_enabled: false}; 
+        }
+        
         fullData.content = cleanDataArray(fullData.content);
         document.body.setAttribute('data-theme', fullData.settings.theme || 'dark'); 
         applyAccentColor(fullData.settings.accent); 
         updateMenuUI();
-        if (!savedCollapsed && fullData.content.length > 0) initAllCollapsed(fullData.content);
+        
+        if (!savedCollapsed && fullData.content.length > 0) {
+            initAllCollapsed(fullData.content);
+        }
+        
         renderTree(); 
         const lastId = localStorage.getItem('lastActiveId'); 
-        if (lastId && findNode(fullData.content, lastId)) selectNode(lastId); 
+        if (lastId && findNode(fullData.content, lastId)) {
+            selectNode(lastId); 
+        }
     } catch (e) { console.error(e); } 
 }
 
@@ -974,12 +1126,19 @@ async function checkAndReloadData() {
         const res = await fetch('/api/notes?_t=' + Date.now());
         if (!res.ok) return;
         const data = await res.json();
+        
         if (data.last_modified && data.last_modified > currentLastModified) {
             currentLastModified = data.last_modified;
             fullData = data && data.content ? data : {content: [], settings: {accent: '#27ae60', theme: 'dark', password_enabled: false}}; 
-            if(!fullData.settings) fullData.settings = {accent: '#27ae60', theme: 'dark', password_enabled: false}; 
+            
+            if(!fullData.settings) {
+                fullData.settings = {accent: '#27ae60', theme: 'dark', password_enabled: false}; 
+            }
+            
             fullData.content = cleanDataArray(fullData.content);
-            updateMenuUI(); renderTree();
+            updateMenuUI(); 
+            renderTree();
+            
             if (activeId) {
                 const n = findNode(fullData.content, activeId);
                 if (n) {
@@ -997,7 +1156,10 @@ async function checkAndReloadData() {
 }
 
 function updateMenuUI() {
-    const pwdBtn = document.getElementById('pwd-toggle-text'), logoutBtn = document.getElementById('logout-btn'), whToggleText = document.getElementById('webhook-toggle-text');
+    const pwdBtn = document.getElementById('pwd-toggle-text');
+    const logoutBtn = document.getElementById('logout-btn');
+    const whToggleText = document.getElementById('webhook-toggle-text');
+    
     if(pwdBtn) pwdBtn.innerText = fullData.settings.password_enabled ? '🔓 Passwortschutz aus' : '🔒 Passwortschutz an';
     if(logoutBtn) logoutBtn.style.display = fullData.settings.password_enabled ? 'flex' : 'none';
     if(whToggleText) whToggleText.innerText = fullData.settings.webhook_enabled ? '🔔 Webhook (Aktiviert)' : '🔕 Webhook (Deaktiviert)';
@@ -1008,8 +1170,10 @@ function togglePassword() {
         showModal("Passwortschutz", "Deaktivieren?", [
             { label: "Ja", class: "btn-discard", action: async () => {
                 const res = await fetch('/api/password', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({enabled: false}) });
-                const data = await res.json(); if(data.status === 'success') currentLastModified = data.last_modified;
-                fullData.settings.password_enabled = false; updateMenuUI();
+                const data = await res.json(); 
+                if(data.status === 'success') currentLastModified = data.last_modified;
+                fullData.settings.password_enabled = false; 
+                updateMenuUI();
             }}, 
             { label: "Abbruch", class: "btn-cancel", action: () => {} }
         ]);
@@ -1019,8 +1183,10 @@ function togglePassword() {
                 const pwd = document.getElementById('modal-input').value;
                 if(pwd) {
                     const res = await fetch('/api/password', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({enabled: true, password: pwd}) });
-                    const data = await res.json(); if(data.status === 'success') currentLastModified = data.last_modified;
-                    fullData.settings.password_enabled = true; updateMenuUI();
+                    const data = await res.json(); 
+                    if(data.status === 'success') currentLastModified = data.last_modified;
+                    fullData.settings.password_enabled = true; 
+                    updateMenuUI();
                 }
             }}, 
             { label: "Abbruch", class: "btn-cancel", action: () => {} }
@@ -1029,42 +1195,84 @@ function togglePassword() {
 }
 
 function initAllCollapsed(items) { 
-    items.forEach(item => { if (item.children && item.children.length > 0) { collapsedIds.add(item.id); initAllCollapsed(item.children); } }); 
+    items.forEach(item => { 
+        if (item.children && item.children.length > 0) { 
+            collapsedIds.add(item.id); 
+            initAllCollapsed(item.children); 
+        } 
+    }); 
     saveCollapsedToLocal(); 
 }
 
-function saveCollapsedToLocal() { localStorage.setItem('collapsedNodes', JSON.stringify(Array.from(collapsedIds))); }
+function saveCollapsedToLocal() { 
+    localStorage.setItem('collapsedNodes', JSON.stringify(Array.from(collapsedIds))); 
+}
 
 function toggleAllFolders() {
     const searchTerm = document.getElementById('search-input').value;
     let totalFolders = 0;
-    function countFolders(items) { items.forEach(i => { if (i.children && i.children.length > 0) { totalFolders++; countFolders(i.children); } }); }
+    
+    function countFolders(items) { 
+        items.forEach(i => { 
+            if (i.children && i.children.length > 0) { 
+                totalFolders++; 
+                countFolders(i.children); 
+            } 
+        }); 
+    }
+    
     countFolders(fullData.content);
-    if (collapsedIds.size >= totalFolders / 2 && totalFolders > 0) collapsedIds.clear();
-    else {
-        function collect(items) { items.forEach(i => { if(i.children && i.children.length > 0) { collapsedIds.add(i.id); collect(i.children); } }); } 
+    
+    if (collapsedIds.size >= totalFolders / 2 && totalFolders > 0) {
+        collapsedIds.clear();
+    } else {
+        function collect(items) { 
+            items.forEach(i => { 
+                if(i.children && i.children.length > 0) { 
+                    collapsedIds.add(i.id); 
+                    collect(i.children); 
+                } 
+            }); 
+        } 
         collect(fullData.content);
     }
     saveCollapsedToLocal(); 
     if (searchTerm) filterTree(); else renderTree();
 }
 
-function clearSearch() { document.getElementById('search-input').value = ''; document.getElementById('clear-search').style.display = 'none'; renderTree(); }
+function clearSearch() { 
+    document.getElementById('search-input').value = ''; 
+    document.getElementById('clear-search').style.display = 'none'; 
+    renderTree(); 
+}
 
 function filterTree() {
     const term = document.getElementById('search-input').value.toLowerCase(); 
     const clearBtn = document.getElementById('clear-search');
-    if (!term) { clearBtn.style.display = 'none'; renderTree(); return; }
+    
+    if (!term) { 
+        clearBtn.style.display = 'none'; 
+        renderTree(); 
+        return; 
+    }
+    
     clearBtn.style.display = 'flex'; 
-    const container = document.getElementById('tree'); container.innerHTML = '';
-    const rootGroup = document.createElement('div'); rootGroup.className = 'tree-group'; container.appendChild(rootGroup);
+    const container = document.getElementById('tree'); 
+    container.innerHTML = '';
+    
+    const rootGroup = document.createElement('div'); 
+    rootGroup.className = 'tree-group'; 
+    container.appendChild(rootGroup);
+    
     function getFilteredItems(items) { 
         let results = []; 
         items.forEach(item => { 
             const matchInTitle = item.title && item.title.toLowerCase().includes(term); 
             const matchInText = item.text && item.text.toLowerCase().includes(term); 
             const filteredChildren = item.children ? getFilteredItems(item.children) : []; 
-            if (matchInTitle || matchInText || filteredChildren.length > 0) results.push({ ...item, children: filteredChildren }); 
+            if (matchInTitle || matchInText || filteredChildren.length > 0) {
+                results.push({ ...item, children: filteredChildren }); 
+            }
         }); 
         return results; 
     }
@@ -1075,55 +1283,130 @@ function applyAccentColor(hex) {
     document.documentElement.style.setProperty('--accent', hex); 
     const r = parseInt(hex.slice(1,3), 16), g = parseInt(hex.slice(3,5), 16), b = parseInt(hex.slice(5,7), 16); 
     document.documentElement.style.setProperty('--accent-rgb', `${r}, ${g}, ${b}`); 
-    const p = document.getElementById('accent-color-picker'); if(p) p.value = hex; 
+    const p = document.getElementById('accent-color-picker'); 
+    if(p) p.value = hex; 
 }
 
-function updateGlobalAccent(hex) { fullData.settings.accent = hex; applyAccentColor(hex); saveToServer(); }
-function toggleTheme() { const newTheme = document.body.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'; fullData.settings.theme = newTheme; document.body.setAttribute('data-theme', newTheme); saveToServer(); }
+function updateGlobalAccent(hex) { 
+    fullData.settings.accent = hex; 
+    applyAccentColor(hex); 
+    saveToServer(); 
+}
+
+function toggleTheme() { 
+    const newTheme = document.body.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'; 
+    fullData.settings.theme = newTheme; 
+    document.body.setAttribute('data-theme', newTheme); 
+    saveToServer(); 
+}
 
 function renderTree() { 
-    const container = document.getElementById('tree'); container.innerHTML = ''; 
-    const rootGroup = document.createElement('div'); rootGroup.className = 'tree-group'; container.appendChild(rootGroup); 
+    const container = document.getElementById('tree'); 
+    container.innerHTML = ''; 
+    const rootGroup = document.createElement('div'); 
+    rootGroup.className = 'tree-group'; 
+    container.appendChild(rootGroup); 
     renderItems(fullData.content, rootGroup); 
-    if (document.body.classList.contains('edit-mode-active')) initSortables(); 
+    if (document.body.classList.contains('edit-mode-active')) {
+        initSortables(); 
+    }
 }
 
 function renderItems(items, parent) { 
     const isEdit = document.body.classList.contains('edit-mode-active'); 
     items.forEach(item => { 
         if (!item) return;
+        
         const isFolder = item.children && item.children.length > 0; 
         const isCollapsed = isEdit ? false : collapsedIds.has(item.id); 
-        const div = document.createElement('div'); div.className = 'tree-item-container'; div.setAttribute('data-id', item.id); 
-        const wrapper = document.createElement('div'); wrapper.className = 'tree-item' + (item.id === activeId ? ' active' : ''); 
-        const handle = document.createElement('span'); handle.className = 'drag-handle'; handle.innerHTML = '⋮⋮';
-        const icon = document.createElement('span'); icon.className = 'tree-icon'; icon.innerText = isFolder ? (isCollapsed ? '📁' : '📂') : '📄'; 
+        const div = document.createElement('div'); 
+        div.className = 'tree-item-container'; 
+        div.setAttribute('data-id', item.id); 
+        
+        const wrapper = document.createElement('div'); 
+        wrapper.className = 'tree-item' + (item.id === activeId ? ' active' : ''); 
+        
+        const handle = document.createElement('span'); 
+        handle.className = 'drag-handle'; 
+        handle.innerHTML = '⋮⋮';
+        
+        const icon = document.createElement('span'); 
+        icon.className = 'tree-icon'; 
+        icon.innerText = isFolder ? (isCollapsed ? '📁' : '📂') : '📄'; 
+        
         icon.onclick = (e) => { 
             e.stopPropagation(); 
             if (!isEdit && isFolder) { 
-                if (collapsedIds.has(item.id)) collapsedIds.delete(item.id); else collapsedIds.add(item.id); 
+                if (collapsedIds.has(item.id)) collapsedIds.delete(item.id); 
+                else collapsedIds.add(item.id); 
                 saveCollapsedToLocal(); 
-                if (document.getElementById('search-input').value) filterTree(); else renderTree(); 
+                if (document.getElementById('search-input').value) filterTree(); 
+                else renderTree(); 
             } 
         }; 
-        const text = document.createElement('span'); text.className = 'tree-text'; text.innerText = item.title || 'Unbenannt'; 
+        
+        const text = document.createElement('span'); 
+        text.className = 'tree-text'; 
+        text.innerText = item.title || 'Unbenannt'; 
+        
         if (hasActiveReminderInChildren(item)) {
-            const rSpan = document.createElement('span'); rSpan.className = 'reminder-icon'; rSpan.innerText = '⏰'; text.appendChild(rSpan);
+            const rSpan = document.createElement('span'); 
+            rSpan.className = 'reminder-icon'; 
+            rSpan.innerText = '⏰'; 
+            text.appendChild(rSpan);
         }
-        text.onclick = (e) => { e.stopPropagation(); if (!isEdit) tryNavigation(item.id); }; 
-        const addBtn = document.createElement('button'); addBtn.className = 'add-sub-btn'; addBtn.innerText = '+'; addBtn.onclick = (e) => { e.stopPropagation(); addItem(item.id); }; 
-        const delBtn = document.createElement('button'); delBtn.className = 'delete-btn'; delBtn.innerText = '×'; delBtn.onclick = (e) => { e.stopPropagation(); deleteItem(item.id); }; 
-        wrapper.append(handle, icon, text, addBtn, delBtn); div.appendChild(wrapper); 
-        const childGroup = document.createElement('div'); childGroup.className = 'tree-group'; 
-        if (isFolder && !isCollapsed) renderItems(item.children, childGroup); 
-        div.appendChild(childGroup); parent.appendChild(div); 
+        
+        text.onclick = (e) => { 
+            e.stopPropagation(); 
+            if (!isEdit) tryNavigation(item.id); 
+        }; 
+        
+        const addBtn = document.createElement('button'); 
+        addBtn.className = 'add-sub-btn'; 
+        addBtn.innerText = '+'; 
+        addBtn.onclick = (e) => { 
+            e.stopPropagation(); 
+            addItem(item.id); 
+        }; 
+        
+        const delBtn = document.createElement('button'); 
+        delBtn.className = 'delete-btn'; 
+        delBtn.innerText = '×'; 
+        delBtn.onclick = (e) => { 
+            e.stopPropagation(); 
+            deleteItem(item.id); 
+        }; 
+        
+        wrapper.append(handle, icon, text, addBtn, delBtn); 
+        div.appendChild(wrapper); 
+        
+        const childGroup = document.createElement('div'); 
+        childGroup.className = 'tree-group'; 
+        
+        if (isFolder && !isCollapsed) {
+            renderItems(item.children, childGroup); 
+        }
+        
+        div.appendChild(childGroup); 
+        parent.appendChild(div); 
     }); 
 }
 
 function initSortables() { 
-    sortables.forEach(s => s.destroy()); sortables = []; 
+    sortables.forEach(s => s.destroy()); 
+    sortables = []; 
     document.querySelectorAll('.tree-group').forEach(el => { 
-        sortables.push(new Sortable(el, { group: 'nested', animation: 150, handle: '.drag-handle', fallbackOnBody: true, onEnd: (evt) => { if (evt.oldIndex !== evt.newIndex || evt.to !== evt.from) rebuildDataFromDOM(); } })); 
+        sortables.push(new Sortable(el, { 
+            group: 'nested', 
+            animation: 150, 
+            handle: '.drag-handle', 
+            fallbackOnBody: true, 
+            onEnd: (evt) => { 
+                if (evt.oldIndex !== evt.newIndex || evt.to !== evt.from) {
+                    rebuildDataFromDOM(); 
+                }
+            } 
+        })); 
     }); 
 }
 
@@ -1138,77 +1421,159 @@ async function toggleEditMode() {
             return;
         }
         activateTreeEdit();
-    } else { deactivateTreeEdit(); }
+    } else { 
+        deactivateTreeEdit(); 
+    }
 }
 
-function activateTreeEdit() { document.body.classList.add('edit-mode-active'); renderTree(); }
-function deactivateTreeEdit() { document.body.classList.remove('edit-mode-active'); sortables.forEach(s => s.destroy()); sortables = []; renderTree(); releaseLock(); }
+function activateTreeEdit() { 
+    document.body.classList.add('edit-mode-active'); 
+    renderTree(); 
+}
+
+function deactivateTreeEdit() { 
+    document.body.classList.remove('edit-mode-active'); 
+    sortables.forEach(s => s.destroy()); 
+    sortables = []; 
+    renderTree(); 
+    releaseLock(); 
+}
 
 function rebuildDataFromDOM() { 
     if (!document.body.classList.contains('edit-mode-active')) return;
+    
     function parse(container) { 
         return Array.from(container.querySelectorAll(':scope > .tree-item-container')).map(div => { 
-            const id = div.getAttribute('data-id'), original = findNode(fullData.content, id), sub = div.querySelector(':scope > .tree-group'); 
+            const id = div.getAttribute('data-id');
+            const original = findNode(fullData.content, id);
+            const sub = div.querySelector(':scope > .tree-group'); 
             let parsedChildren = sub ? parse(sub) : [];
-            if (parsedChildren.length === 0 && original && original.children && original.children.length > 0 && collapsedIds.has(id)) parsedChildren = original.children;
-            return { id: id, title: original ? original.title : 'Unbenannt', text: original ? original.text : '', reminder: original ? original.reminder : null, children: parsedChildren }; 
+            
+            if (parsedChildren.length === 0 && original && original.children && original.children.length > 0 && collapsedIds.has(id)) {
+                parsedChildren = original.children;
+            }
+            
+            return { 
+                id: id, 
+                title: original ? original.title : 'Unbenannt', 
+                text: original ? original.text : '', 
+                reminder: original ? original.reminder : null, 
+                children: parsedChildren 
+            }; 
         }); 
     } 
+    
     const rg = document.querySelector('#tree > .tree-group'); 
     if(rg) { 
         const newData = parse(rg);
-        if (newData.length >= (fullData.content.length / 2) || fullData.content.length === 0) { fullData.content = newData; saveToServer(); }
+        if (newData.length >= (fullData.content.length / 2) || fullData.content.length === 0) { 
+            fullData.content = newData; 
+            saveToServer(); 
+        }
     } 
 }
 
 function selectNode(id) { 
-    activeId = id; localStorage.setItem('lastActiveId', id); const node = findNode(fullData.content, id); 
+    activeId = id; 
+    localStorage.setItem('lastActiveId', id); 
+    const node = findNode(fullData.content, id); 
+    
     if (node) { 
-        document.getElementById('no-selection').style.display = 'none'; document.getElementById('edit-area').style.display = 'block'; 
-        document.getElementById('node-title').value = node.title; document.getElementById('node-text').value = node.text; 
+        document.getElementById('no-selection').style.display = 'none'; 
+        document.getElementById('edit-area').style.display = 'block'; 
+        document.getElementById('node-title').value = node.title; 
+        document.getElementById('node-text').value = node.text; 
         
-        const viewBadge = document.getElementById('view-reminder-badge'), viewAck = document.getElementById('view-reminder-ack');
-        if (isReminderActive(node)) { viewBadge.style.display = 'inline-block'; viewAck.style.display = 'inline-block'; } 
-        else { viewBadge.style.display = 'none'; viewAck.style.display = 'none'; }
+        const viewBadge = document.getElementById('view-reminder-badge');
+        const viewAck = document.getElementById('view-reminder-ack');
+        
+        if (isReminderActive(node)) { 
+            viewBadge.style.display = 'inline-block'; 
+            viewAck.style.display = 'inline-block'; 
+        } else { 
+            viewBadge.style.display = 'none'; 
+            viewAck.style.display = 'none'; 
+        }
 
-        const editRemBtnText = document.getElementById('edit-reminder-text'), editRemClearBtn = document.getElementById('edit-reminder-clear');
-        if (node.reminder) { editRemBtnText.innerText = node.reminder.replace('T', ' '); editRemClearBtn.style.display = 'flex'; } 
-        else { editRemBtnText.innerText = 'Erinnerung'; editRemClearBtn.style.display = 'none'; }
+        const editRemBtnText = document.getElementById('edit-reminder-text');
+        const editRemClearBtn = document.getElementById('edit-reminder-clear');
+        
+        if (node.reminder) { 
+            editRemBtnText.innerText = node.reminder.replace('T', ' '); 
+            editRemClearBtn.style.display = 'flex'; 
+        } else { 
+            editRemBtnText.innerText = 'Erinnerung'; 
+            editRemClearBtn.style.display = 'none'; 
+        }
 
-        const pathData = getPath(fullData.content, id) || []; const breadcrumbEl = document.getElementById('breadcrumb'); breadcrumbEl.innerHTML = '';
+        const pathData = getPath(fullData.content, id) || []; 
+        const breadcrumbEl = document.getElementById('breadcrumb'); 
+        breadcrumbEl.innerHTML = '';
+        
         pathData.forEach((p, idx) => { 
-            const span = document.createElement('span'); span.innerText = p.title; span.style.cursor = 'pointer'; 
-            span.onclick = () => tryNavigation(p.id); span.onmouseover = () => span.style.textDecoration = 'underline'; span.onmouseout = () => span.style.textDecoration = 'none'; 
-            breadcrumbEl.appendChild(span); if(idx < pathData.length - 1) breadcrumbEl.appendChild(document.createTextNode(' / ')); 
+            const span = document.createElement('span'); 
+            span.innerText = p.title; 
+            span.style.cursor = 'pointer'; 
+            span.onclick = () => tryNavigation(p.id); 
+            span.onmouseover = () => span.style.textDecoration = 'underline'; 
+            span.onmouseout = () => span.style.textDecoration = 'none'; 
+            breadcrumbEl.appendChild(span); 
+            if(idx < pathData.length - 1) breadcrumbEl.appendChild(document.createTextNode(' / ')); 
         });
+        
         disableEdit(); 
         document.querySelectorAll('.tree-item').forEach(el => el.classList.remove('active')); 
-        const activeEl = document.querySelector(`.tree-item-container[data-id="${id}"] > .tree-item`); if(activeEl) activeEl.classList.add('active'); 
+        const activeEl = document.querySelector(`.tree-item-container[data-id="${id}"] > .tree-item`); 
+        if(activeEl) activeEl.classList.add('active'); 
     } 
 }
 
 async function saveChanges() { 
     const node = findNode(fullData.content, activeId); 
-    if (node) { node.title = document.getElementById('node-title').value; node.text = document.getElementById('node-text').value; await saveToServer(); renderTree(); } 
+    if (node) { 
+        node.title = document.getElementById('node-title').value; 
+        node.text = document.getElementById('node-text').value; 
+        await saveToServer(); 
+        renderTree(); 
+    } 
 }
 
 async function saveToServer() { 
     fullData.last_modified = currentLastModified; 
     const res = await fetch('/api/notes', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(fullData) }); 
     if (res.status === 409) { 
-        showModal("⚠️ Achtung!", "Geändert auf anderem Gerät! Lade neu (F5).", [{ label: "OK", class: "btn-cancel", action: () => {} }]); return false; 
+        showModal("⚠️ Achtung!", "Geändert auf anderem Gerät! Lade neu (F5).", [{ label: "OK", class: "btn-cancel", action: () => {} }]); 
+        return false; 
     }
     const data = await res.json(); 
-    if (data.status === 'success') { currentLastModified = data.last_modified; return true; } 
+    if (data.status === 'success') { 
+        currentLastModified = data.last_modified; 
+        return true; 
+    } 
     return false;
 }
 
 function findNode(items, id) { 
-    for (let item of items) { if (item.id === id) return item; if (item.children) { const f = findNode(item.children, id); if (f) return f; } } return null; 
+    for (let item of items) { 
+        if (item.id === id) return item; 
+        if (item.children) { 
+            const f = findNode(item.children, id); 
+            if (f) return f; 
+        } 
+    } 
+    return null; 
 }
 
 function getPath(items, id, path = []) { 
-    for (let item of items) { const n = [...path, {title: item.title, id: item.id}]; if (item.id === id) return n; if (item.children) { const r = getPath(item.children, id, n); if (r) return r; } } return null; 
+    for (let item of items) { 
+        const n = [...path, {title: item.title, id: item.id}]; 
+        if (item.id === id) return n; 
+        if (item.children) { 
+            const r = getPath(item.children, id, n); 
+            if (r) return r; 
+        } 
+    } 
+    return null; 
 }
 
 function tryNavigation(id) { 
@@ -1227,25 +1592,36 @@ function tryNavigation(id) {
 }
 
 window.toggleTask = async function(targetIdx, currentlyChecked) {
-    const node = findNode(fullData.content, activeId); if(!node) return;
+    const node = findNode(fullData.content, activeId); 
+    if(!node) return;
+    
     let tIndex = 0, lines = node.text.split('\n');
     for (let i = 0; i < lines.length; i++) {
         let t = lines[i].trim();
         if (t.startsWith('- [ ] ') || t.startsWith('- [x] ') || t.startsWith('- [X] ')) {
             if (tIndex === targetIdx) { 
-                if (currentlyChecked) lines[i] = lines[i].replace(/- \[[xX]\] /, '- [ ] '); else lines[i] = lines[i].replace(/- \[ \] /, '- [x] '); 
+                if (currentlyChecked) {
+                    lines[i] = lines[i].replace(/- \[[xX]\] /, '- [ ] '); 
+                } else {
+                    lines[i] = lines[i].replace(/- \[ \] /, '- [x] '); 
+                }
                 break; 
             } 
             tIndex++;
         }
     }
-    node.text = lines.join('\n'); const ta = document.getElementById('node-text'); if(ta) ta.value = node.text;
-    disableEdit(); await saveToServer();
+    node.text = lines.join('\n'); 
+    const ta = document.getElementById('node-text'); 
+    if(ta) ta.value = node.text;
+    
+    disableEdit(); 
+    await saveToServer();
 };
 
 function renderMarkdown(text) { 
     if (!text) return ''; 
     let html = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); 
+    
     html = html.replace(/\[img:(.*?)\]/g, '<img src="/uploads/$1" class="note-img" onclick="openLightbox(this.src)">');
     html = html.replace(/\[sketch:([a-zA-Z0-9]+)\]/g, '<img src="/uploads/sketch_$1.png?v='+Date.now()+'" class="note-img sketch-img" title="Skizze bearbeiten" onclick="openSketch(\'$1\')">');
     html = html.replace(/\[file:([a-zA-Z0-9.\-]+)\|([^\]]+)\]/g, '<a href="/uploads/$1" target="_blank" class="note-link">📎 $2</a>');
@@ -1260,15 +1636,21 @@ function renderMarkdown(text) {
     while (last !== html) { 
         last = html; 
         html = html.replace(/\[(#[0-9a-fA-F]{6})\]([\s\S]*?)\[\/#\]/g, '<span style="color:$1">$2</span>'); 
-        html = html.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>'); html = html.replace(/_(.*?)_/g, '<i>$1</i>'); html = html.replace(/~~(.*?)~~/g, '<s>$1</s>'); 
+        html = html.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>'); 
+        html = html.replace(/_(.*?)_/g, '<i>$1</i>'); 
+        html = html.replace(/~~(.*?)~~/g, '<s>$1</s>'); 
     } 
     
-    let parts = html.split("'''"), res = ''; window.taskIndexCounter = 0; 
+    let parts = html.split("'''"), res = ''; 
+    window.taskIndexCounter = 0; 
     
     for (let i = 0; i < parts.length; i++) { 
         if (i % 2 === 1) { 
             let content = parts[i].trim(), lines = content.split('\n'), langClass = ''; 
-            if (lines.length > 0 && lines[0].length < 15 && /^[a-z0-9]+$/.test(lines[0].trim())) { langClass = ' class="language-' + lines[0].trim() + '"'; content = lines.slice(1).join('\n'); } 
+            if (lines.length > 0 && lines[0].length < 15 && /^[a-z0-9]+$/.test(lines[0].trim())) { 
+                langClass = ' class="language-' + lines[0].trim() + '"'; 
+                content = lines.slice(1).join('\n'); 
+            } 
             res += '<div class="code-container"><button class="copy-badge" onclick="copyToClipboard(this)">Copy</button><pre><code' + langClass + '>' + content + '</code></pre></div>'; 
         } else { 
             res += parts[i].split('\n').map(line => {
@@ -1278,20 +1660,48 @@ function renderMarkdown(text) {
                 if (t.startsWith('### ')) return '<h3>' + line.substring(4) + '</h3>'; 
                 if (t.startsWith('## ')) return '<h2>' + line.substring(3) + '</h2>'; 
                 if (t.startsWith('# ')) return '<h1>' + line.substring(2) + '</h1>';
-                if (t.startsWith('&gt;')) { let quoteText = line.substring(line.indexOf('&gt;') + 4); if(quoteText.startsWith(' ')) quoteText = quoteText.substring(1); return '<blockquote>' + quoteText + '</blockquote>'; }
+                
+                if (t.startsWith('&gt;')) { 
+                    let quoteText = line.substring(line.indexOf('&gt;') + 4); 
+                    if(quoteText.startsWith(' ')) quoteText = quoteText.substring(1); 
+                    return '<blockquote>' + quoteText + '</blockquote>'; 
+                }
+                
                 if (t.startsWith('[s=')) { 
                     let endIdx = t.indexOf(']'); 
                     if (endIdx !== -1) { 
                         let title = t.substring(3, endIdx) || 'Spoiler', rest = t.substring(endIdx + 1).trim(); 
                         let out = '<details class="spoiler"><summary>' + title + '</summary><div class="spoiler-content">'; 
-                        if (rest) { if (rest.endsWith('[/s]')) out += rest.substring(0, rest.length - 4) + '</div></details>'; else out += rest; } 
+                        if (rest) { 
+                            if (rest.endsWith('[/s]')) out += rest.substring(0, rest.length - 4) + '</div></details>'; 
+                            else out += rest; 
+                        } 
                         return out; 
                     } 
                 }
-                if (t.endsWith('[/s]')) { let rest = t.substring(0, t.length - 4).trim(), out = ''; if (rest) out = '<div>' + rest + '</div>'; return out + '</div></details>'; }
-                if (t.startsWith('- [ ] ')) { let text = line.substring(line.indexOf('- [ ] ') + 6); let idx = window.taskIndexCounter++; return '<div class="task-list-item"><input type="checkbox" class="task-check" onclick="toggleTask(' + idx + ', false)"> <span>' + text + '</span></div>'; }
-                if (t.startsWith('- [x] ') || t.startsWith('- [X] ')) { let text = line.substring(line.indexOf('] ') + 2); let idx = window.taskIndexCounter++; return '<div class="task-list-item"><input type="checkbox" class="task-check" checked onclick="toggleTask(' + idx + ', true)"> <span><del>' + text + '</del></span></div>'; }
-                if (t.startsWith('- ')) return '<div style="margin-left: 20px;">• ' + line.substring(line.indexOf('- ')+2) + '</div>'; 
+                
+                if (t.endsWith('[/s]')) { 
+                    let rest = t.substring(0, t.length - 4).trim(), out = ''; 
+                    if (rest) out = '<div>' + rest + '</div>'; 
+                    return out + '</div></details>'; 
+                }
+                
+                if (t.startsWith('- [ ] ')) { 
+                    let text = line.substring(line.indexOf('- [ ] ') + 6); 
+                    let idx = window.taskIndexCounter++; 
+                    return '<div class="task-list-item"><input type="checkbox" class="task-check" onclick="toggleTask(' + idx + ', false)"> <span>' + text + '</span></div>'; 
+                }
+                
+                if (t.startsWith('- [x] ') || t.startsWith('- [X] ')) { 
+                    let text = line.substring(line.indexOf('] ') + 2); 
+                    let idx = window.taskIndexCounter++; 
+                    return '<div class="task-list-item"><input type="checkbox" class="task-check" checked onclick="toggleTask(' + idx + ', true)"> <span><del>' + text + '</del></span></div>'; 
+                }
+                
+                if (t.startsWith('- ')) {
+                    return '<div style="margin-left: 20px;">• ' + line.substring(line.indexOf('- ')+2) + '</div>'; 
+                }
+                
                 return '<div>' + line + '</div>';
             }).join(''); 
         } 
@@ -1300,15 +1710,27 @@ function renderMarkdown(text) {
 }
 
 function showModal(title, text, buttons, showInput=false) { 
-    document.getElementById('modal-title').innerText = title; document.getElementById('modal-text').innerText = text; 
-    const inp = document.getElementById('modal-input'); inp.style.display = showInput ? 'block' : 'none'; inp.value = ''; 
-    const container = document.getElementById('modal-btns-container'); container.innerHTML = ''; 
+    document.getElementById('modal-title').innerText = title; 
+    document.getElementById('modal-text').innerText = text; 
+    const inp = document.getElementById('modal-input'); 
+    inp.style.display = showInput ? 'block' : 'none'; 
+    inp.value = ''; 
+    const container = document.getElementById('modal-btns-container'); 
+    container.innerHTML = ''; 
+    
     buttons.forEach(btn => { 
-        const b = document.createElement('button'); b.innerText = btn.label; b.className = btn.class; 
-        b.onclick = () => { document.getElementById('custom-modal').style.display = 'none'; btn.action(); }; 
+        const b = document.createElement('button'); 
+        b.innerText = btn.label; 
+        b.className = btn.class; 
+        b.onclick = () => { 
+            document.getElementById('custom-modal').style.display = 'none'; 
+            btn.action(); 
+        }; 
         container.appendChild(b); 
     }); 
-    document.getElementById('custom-modal').style.display = 'flex'; if (showInput) setTimeout(() => inp.focus(), 100); 
+    
+    document.getElementById('custom-modal').style.display = 'flex'; 
+    if (showInput) setTimeout(() => inp.focus(), 100); 
 }
 
 function deleteItem(id) { 
@@ -1327,59 +1749,118 @@ function removeFromArr(arr, id) {
 }
 
 async function addItem(parentId) { 
-    document.getElementById('search-input').value = ''; document.getElementById('clear-search').style.display = 'none';
-    const newId = Date.now().toString() + Math.random().toString(36).substring(2, 6); const newItem = { id: newId, title: 'Neu', text: '', children: [] }; 
+    document.getElementById('search-input').value = ''; 
+    document.getElementById('clear-search').style.display = 'none';
+    const newId = Date.now().toString() + Math.random().toString(36).substring(2, 6); 
+    const newItem = { id: newId, title: 'Neu', text: '', children: [] }; 
+    
     if (parentId) { 
         const p = findNode(fullData.content, parentId); 
-        if(p) { if(!p.children) p.children = []; p.children.push(newItem); collapsedIds.delete(parentId); saveCollapsedToLocal(); } 
-    } else { fullData.content.push(newItem); }
-    renderTree(); selectNode(newItem.id); enableEdit(); await saveToServer();
+        if(p) { 
+            if(!p.children) p.children = []; 
+            p.children.push(newItem); 
+            collapsedIds.delete(parentId); 
+            saveCollapsedToLocal(); 
+        } 
+    } else { 
+        fullData.content.push(newItem); 
+    }
+    
+    renderTree(); 
+    selectNode(newItem.id); 
+    enableEdit(); 
+    await saveToServer();
 }
 
 function wrapSelection(b, a, p = "") { 
     const ta = document.getElementById('node-text'), s = ta.selectionStart, e = ta.selectionEnd, txt = ta.value.substring(s, e) || p; 
     ta.value = ta.value.substring(0, s) + b + txt + a + ta.value.substring(e); 
-    ta.focus(); ta.setSelectionRange(s + b.length, s + b.length + txt.length); 
+    ta.focus(); 
+    ta.setSelectionRange(s + b.length, s + b.length + txt.length); 
 }
 
 function handleListAction(prefix, placeholder) {
     const ta = document.getElementById('node-text'), start = ta.selectionStart, end = ta.selectionEnd, text = ta.value, selectedText = text.substring(start, end);
     if (selectedText.includes('\n')) {
         const lines = selectedText.split('\n');
-        const newLines = lines.map(line => { if (line.trim() === '' || line.trim().startsWith(prefix.trim())) return line; return prefix + line; });
-        const newText = newLines.join('\n'); ta.value = text.substring(0, start) + newText + text.substring(end);
-        ta.setSelectionRange(start, start + newText.length); ta.focus(); return;
+        const newLines = lines.map(line => { 
+            if (line.trim() === '' || line.trim().startsWith(prefix.trim())) return line; 
+            return prefix + line; 
+        });
+        const newText = newLines.join('\n'); 
+        ta.value = text.substring(0, start) + newText + text.substring(end);
+        ta.setSelectionRange(start, start + newText.length); 
+        ta.focus(); 
+        return;
     }
+    
     const textBefore = text.substring(0, start);
     if (selectedText === placeholder && textBefore.endsWith(prefix)) {
-        const insertStr = '\n' + prefix + placeholder; ta.value = text.substring(0, end) + insertStr + text.substring(end);
-        const newStart = end + '\n'.length + prefix.length; ta.setSelectionRange(newStart, newStart + placeholder.length); ta.focus(); return;
+        const insertStr = '\n' + prefix + placeholder; 
+        ta.value = text.substring(0, end) + insertStr + text.substring(end);
+        const newStart = end + '\n'.length + prefix.length; 
+        ta.setSelectionRange(newStart, newStart + placeholder.length); 
+        ta.focus(); 
+        return;
     }
-    let insertPrefix = prefix; if (textBefore.length > 0 && !textBefore.endsWith('\n')) insertPrefix = '\n' + prefix;
-    const insertStr = insertPrefix + (selectedText || placeholder); ta.value = text.substring(0, start) + insertStr + text.substring(end);
-    const selectStart = start + insertPrefix.length; ta.setSelectionRange(selectStart, selectStart + (selectedText || placeholder).length); ta.focus();
+    
+    let insertPrefix = prefix; 
+    if (textBefore.length > 0 && !textBefore.endsWith('\n')) insertPrefix = '\n' + prefix;
+    
+    const insertStr = insertPrefix + (selectedText || placeholder); 
+    ta.value = text.substring(0, start) + insertStr + text.substring(end);
+    const selectStart = start + insertPrefix.length; 
+    ta.setSelectionRange(selectStart, selectStart + (selectedText || placeholder).length); 
+    ta.focus();
 }
 
-function applyColor() { wrapSelection(`[${document.getElementById('text-color-input').value}]`, `[/#]`, "Farbe"); }
-function insertCodeTag() { wrapSelection("'''\n", "\n'''", "CODE"); }
+function applyColor() { 
+    wrapSelection(`[${document.getElementById('text-color-input').value}]`, `[/#]`, "Farbe"); 
+}
+
+function insertCodeTag() { 
+    wrapSelection("'''\n", "\n'''", "CODE"); 
+}
 
 function copyToClipboard(btn) { 
-    const code = btn.nextElementSibling.innerText, el = document.createElement('textarea'); el.value = code; document.body.appendChild(el); 
-    el.select(); document.execCommand('copy'); document.body.removeChild(el); btn.innerText = 'Copied!'; setTimeout(() => btn.innerText = 'Copy', 2000); 
+    const code = btn.nextElementSibling.innerText, el = document.createElement('textarea'); 
+    el.value = code; 
+    document.body.appendChild(el); 
+    el.select(); 
+    document.execCommand('copy'); 
+    document.body.removeChild(el); 
+    btn.innerText = 'Copied!'; 
+    setTimeout(() => btn.innerText = 'Copy', 2000); 
 }
 
-function toggleSettings(e) { e.stopPropagation(); const m = document.getElementById('dropdown-menu'); m.style.display = m.style.display === 'block' ? 'none' : 'block'; }
-document.addEventListener('click', () => { const m = document.getElementById('dropdown-menu'); if (m) m.style.display = 'none'; });
+function toggleSettings(e) { 
+    e.stopPropagation(); 
+    const m = document.getElementById('dropdown-menu'); 
+    m.style.display = m.style.display === 'block' ? 'none' : 'block'; 
+}
+
+document.addEventListener('click', () => { 
+    const m = document.getElementById('dropdown-menu'); 
+    if (m) m.style.display = 'none'; 
+});
 
 function exportData() { window.location.href = '/api/export'; }
 
 async function importData(e) { 
-    const f = e.target.files[0]; if (!f) return; 
-    const fd = new FormData(); fd.append('file', f); document.getElementById('import-file').value = '';
+    const f = e.target.files[0]; 
+    if (!f) return; 
+    const fd = new FormData(); 
+    fd.append('file', f); 
+    document.getElementById('import-file').value = '';
+    
     try { 
         const res = await fetch('/api/import', { method: 'POST', body: fd }); 
-        if(res.ok) location.reload(); 
-        else { const errData = await res.json(); showModal("Fehler", "Fehler: " + (errData.error || "?"), [{ label: "OK", class: "btn-cancel", action: () => {} }]); } 
+        if(res.ok) {
+            location.reload(); 
+        } else { 
+            const errData = await res.json(); 
+            showModal("Fehler", "Fehler: " + (errData.error || "?"), [{ label: "OK", class: "btn-cancel", action: () => {} }]); 
+        } 
     } catch(e) {}
 }
 
@@ -1396,64 +1877,136 @@ async function enableEdit() {
     showEditArea();
 }
 
-function showEditArea() { document.getElementById('view-mode').style.display = 'none'; document.getElementById('edit-mode').style.display = 'block'; }
+function showEditArea() { 
+    document.getElementById('view-mode').style.display = 'none'; 
+    document.getElementById('edit-mode').style.display = 'block'; 
+}
 
 function disableEdit() { 
     const n = findNode(fullData.content, activeId); 
-    if (n) { document.getElementById('view-title').innerText = n.title; document.getElementById('display-area').innerHTML = renderMarkdown(n.text); if(window.hljs) hljs.highlightAll(); } 
-    document.getElementById('view-mode').style.display = 'block'; document.getElementById('edit-mode').style.display = 'none'; releaseLock(); 
+    if (n) { 
+        document.getElementById('view-title').innerText = n.title; 
+        document.getElementById('display-area').innerHTML = renderMarkdown(n.text); 
+        if(window.hljs) hljs.highlightAll(); 
+    } 
+    document.getElementById('view-mode').style.display = 'block'; 
+    document.getElementById('edit-mode').style.display = 'none'; 
+    releaseLock(); 
 }
 
-function cancelEdit() { const n = findNode(fullData.content, activeId); if (n) { document.getElementById('node-title').value = n.title; document.getElementById('node-text').value = n.text; } disableEdit(); }
-function toggleSidebar() { const h = document.body.classList.toggle('sidebar-hidden'); localStorage.setItem('sidebarState', h ? 'closed' : 'open'); document.querySelector('#mobile-toggle-btn span').innerText = h ? '▶' : '◀'; }
+function cancelEdit() { 
+    const n = findNode(fullData.content, activeId); 
+    if (n) { 
+        document.getElementById('node-title').value = n.title; 
+        document.getElementById('node-text').value = n.text; 
+    } 
+    disableEdit(); 
+}
+
+function toggleSidebar() { 
+    const h = document.body.classList.toggle('sidebar-hidden'); 
+    localStorage.setItem('sidebarState', h ? 'closed' : 'open'); 
+    document.querySelector('#mobile-toggle-btn span').innerText = h ? '▶' : '◀'; 
+}
 
 async function uploadImage() { 
-    const input = document.createElement('input'); input.type = 'file'; input.accept = 'image/*'; 
+    const input = document.createElement('input'); 
+    input.type = 'file'; 
+    input.accept = 'image/*'; 
+    
     input.onchange = async (e) => { 
-        const file = e.target.files[0]; if (!file) return; 
-        const fd = new FormData(); fd.append('image', file); 
+        const file = e.target.files[0]; 
+        if (!file) return; 
+        const fd = new FormData(); 
+        fd.append('image', file); 
+        
         try { 
-            const res = await fetch('/api/upload', { method: 'POST', body: fd }); const data = await res.json(); 
-            if(data.filename) wrapSelection(`[img:${data.filename}]`, '', ''); else showModal("Fehler", "Fehler", [{ label: "OK", class: "btn-cancel", action: () => {} }]); 
+            const res = await fetch('/api/upload', { method: 'POST', body: fd }); 
+            const data = await res.json(); 
+            if(data.filename) {
+                wrapSelection(`[img:${data.filename}]`, '', ''); 
+            } else {
+                showModal("Fehler", "Fehler", [{ label: "OK", class: "btn-cancel", action: () => {} }]); 
+            }
         } catch(err) {} 
     }; 
     input.click(); 
 }
 
 async function uploadGenericFile() { 
-    const input = document.createElement('input'); input.type = 'file'; 
+    const input = document.createElement('input'); 
+    input.type = 'file'; 
+    
     input.onchange = async (e) => { 
-        const file = e.target.files[0]; if (!file) return; 
-        if (file.size > 20 * 1024 * 1024) { showModal("Zu groß", "Max. 20 MB", [{ label: "OK", class: "btn-cancel", action: () => {} }]); return; }
-        const fd = new FormData(); fd.append('file', file); 
+        const file = e.target.files[0]; 
+        if (!file) return; 
+        if (file.size > 20 * 1024 * 1024) { 
+            showModal("Zu groß", "Max. 20 MB", [{ label: "OK", class: "btn-cancel", action: () => {} }]); 
+            return; 
+        }
+        
+        const fd = new FormData(); 
+        fd.append('file', file); 
+        
         try { 
-            const res = await fetch('/api/upload', { method: 'POST', body: fd }); const data = await res.json(); 
-            if(data.filename) { const isImg = file.type.startsWith('image/'); if (isImg) wrapSelection(`[img:${data.filename}]`, '', ''); else wrapSelection(`[file:${data.filename}|${data.original}]`, '', ''); } 
-            else showModal("Fehler", "Fehler", [{ label: "OK", class: "btn-cancel", action: () => {} }]); 
+            const res = await fetch('/api/upload', { method: 'POST', body: fd }); 
+            const data = await res.json(); 
+            
+            if(data.filename) { 
+                const isImg = file.type.startsWith('image/'); 
+                if (isImg) wrapSelection(`[img:${data.filename}]`, '', ''); 
+                else wrapSelection(`[file:${data.filename}|${data.original}]`, '', ''); 
+            } else {
+                showModal("Fehler", "Fehler", [{ label: "OK", class: "btn-cancel", action: () => {} }]); 
+            }
         } catch(err) {} 
     }; 
     input.click(); 
 }
 
-function openLightbox(src) { document.getElementById('lightbox-img').src = src; document.getElementById('lightbox').style.display = 'flex'; }
-function closeLightbox() { document.getElementById('lightbox').style.display = 'none'; document.getElementById('lightbox-img').src = ''; }
+function openLightbox(src) { 
+    document.getElementById('lightbox-img').src = src; 
+    document.getElementById('lightbox').style.display = 'flex'; 
+}
+
+function closeLightbox() { 
+    document.getElementById('lightbox').style.display = 'none'; 
+    document.getElementById('lightbox-img').src = ''; 
+}
 
 function initDragAndDrop() { 
     const ta = document.getElementById('node-text'); 
-    ta.addEventListener('dragover', e => { e.preventDefault(); ta.style.border = '1px dashed var(--accent)'; }); 
-    ta.addEventListener('dragleave', e => { e.preventDefault(); ta.style.border = '1px solid var(--border-color)'; }); 
+    ta.addEventListener('dragover', e => { 
+        e.preventDefault(); 
+        ta.style.border = '1px dashed var(--accent)'; 
+    }); 
+    ta.addEventListener('dragleave', e => { 
+        e.preventDefault(); 
+        ta.style.border = '1px solid var(--border-color)'; 
+    }); 
     ta.addEventListener('drop', async e => { 
-        e.preventDefault(); ta.style.border = '1px solid var(--border-color)'; 
+        e.preventDefault(); 
+        ta.style.border = '1px solid var(--border-color)'; 
         if(e.dataTransfer.files && e.dataTransfer.files.length > 0) { 
             const f = e.dataTransfer.files[0]; 
-            if (f.size > 20 * 1024 * 1024) { showModal("Zu groß", "Max 20 MB", [{label: "OK", class: "btn-cancel", action: () => {}}]); return; }
-            const fd = new FormData(); fd.append('file', f); 
+            if (f.size > 20 * 1024 * 1024) { 
+                showModal("Zu groß", "Max 20 MB", [{label: "OK", class: "btn-cancel", action: () => {}}]); 
+                return; 
+            }
+            const fd = new FormData(); 
+            fd.append('file', f); 
+            
             try { 
-                const res = await fetch('/api/upload', { method: 'POST', body: fd }); const data = await res.json(); 
+                const res = await fetch('/api/upload', { method: 'POST', body: fd }); 
+                const data = await res.json(); 
+                
                 if(data.filename) { 
-                    const isImg = f.type.startsWith('image/'); const txt = isImg ? `[img:${data.filename}]` : `[file:${data.filename}|${data.original}]`; 
-                    const s = ta.selectionStart, end = ta.selectionEnd; ta.value = ta.value.substring(0, s) + txt + ta.value.substring(end); 
-                    ta.focus(); ta.setSelectionRange(s + txt.length, s + txt.length); 
+                    const isImg = f.type.startsWith('image/'); 
+                    const txt = isImg ? `[img:${data.filename}]` : `[file:${data.filename}|${data.original}]`; 
+                    const s = ta.selectionStart, end = ta.selectionEnd; 
+                    ta.value = ta.value.substring(0, s) + txt + ta.value.substring(end); 
+                    ta.focus(); 
+                    ta.setSelectionRange(s + txt.length, s + txt.length); 
                 } 
             } catch(err) {} 
         } 
@@ -1463,69 +2016,118 @@ function initDragAndDrop() {
 function getAllNotesFlat(nodes, path="") { 
     let res = []; 
     nodes.forEach(n => { 
-        let currentPath = path ? path + " / " + n.title : n.title; res.push({id: n.id, title: n.title, path: currentPath}); 
-        if(n.children) res = res.concat(getAllNotesFlat(n.children, currentPath)); 
+        let currentPath = path ? path + " / " + n.title : n.title; 
+        res.push({id: n.id, title: n.title, path: currentPath}); 
+        if(n.children) {
+            res = res.concat(getAllNotesFlat(n.children, currentPath)); 
+        }
     }); 
     return res; 
 }
 
 function initMentionSystem() {
-    const ta = document.getElementById('node-text'), dropdown = document.getElementById('mention-dropdown');
+    const ta = document.getElementById('node-text');
+    const dropdown = document.getElementById('mention-dropdown');
+    
     ta.addEventListener('input', function() {
-        let cursor = ta.selectionStart, textBefore = ta.value.substring(0, cursor), match = textBefore.match(/(?:^|\s)@([^\n]{0,30})$/);
+        let cursor = ta.selectionStart;
+        let textBefore = ta.value.substring(0, cursor);
+        let match = textBefore.match(/(?:^|\s)@([^\n]{0,30})$/);
+        
         if (match) {
-            let search = match[1].toLowerCase(), allNotes = getAllNotesFlat(fullData.content).filter(n => n.id !== activeId), filtered = allNotes.filter(n => n.title.toLowerCase().includes(search) || n.path.toLowerCase().includes(search));
+            let search = match[1].toLowerCase();
+            let allNotes = getAllNotesFlat(fullData.content).filter(n => n.id !== activeId);
+            let filtered = allNotes.filter(n => n.title.toLowerCase().includes(search) || n.path.toLowerCase().includes(search));
+            
             if (filtered.length > 0) {
                 dropdown.innerHTML = '';
                 filtered.forEach(n => { 
-                    let div = document.createElement('div'); div.className = 'mention-item'; div.innerHTML = `<strong>${n.title}</strong><span class="mention-path">${n.path}</span>`; 
-                    div.onclick = () => insertMention(n.id, n.title, match[1].length + 1); dropdown.appendChild(div); 
+                    let div = document.createElement('div'); 
+                    div.className = 'mention-item'; 
+                    div.innerHTML = `<strong>${n.title}</strong><span class="mention-path">${n.path}</span>`; 
+                    div.onclick = () => insertMention(n.id, n.title, match[1].length + 1); 
+                    dropdown.appendChild(div); 
                 });
                 dropdown.style.display = 'block';
-            } else dropdown.style.display = 'none'; 
-        } else dropdown.style.display = 'none'; 
+            } else {
+                dropdown.style.display = 'none'; 
+            }
+        } else {
+            dropdown.style.display = 'none'; 
+        }
     });
-    document.addEventListener('click', (e) => { if(e.target !== ta && !dropdown.contains(e.target)) dropdown.style.display = 'none'; });
+    
+    document.addEventListener('click', (e) => { 
+        if(e.target !== ta && !dropdown.contains(e.target)) {
+            dropdown.style.display = 'none'; 
+        }
+    });
 }
 
 function insertMention(id, title, replaceLength) {
-    let ta = document.getElementById('node-text'), cursor = ta.selectionStart, start = cursor - replaceLength, text = ta.value, linkCode = `[note:${id}|${title}] `; 
-    ta.value = text.substring(0, start) + linkCode + text.substring(cursor); ta.focus();
-    let newCursor = start + linkCode.length; ta.setSelectionRange(newCursor, newCursor); document.getElementById('mention-dropdown').style.display = 'none';
+    let ta = document.getElementById('node-text');
+    let cursor = ta.selectionStart;
+    let start = cursor - replaceLength;
+    let text = ta.value;
+    let linkCode = `[note:${id}|${title}] `; 
+    
+    ta.value = text.substring(0, start) + linkCode + text.substring(cursor); 
+    ta.focus();
+    let newCursor = start + linkCode.length; 
+    ta.setSelectionRange(newCursor, newCursor); 
+    document.getElementById('mention-dropdown').style.display = 'none';
 }
 
 function triggerMentionButton() {
-    let ta = document.getElementById('node-text'), s = ta.selectionStart, prefix = (s === 0 || ta.value.charAt(s - 1) === '\n' || ta.value.charAt(s - 1) === ' ') ? '@' : ' @';
-    ta.value = ta.value.substring(0, s) + prefix + ta.value.substring(ta.selectionEnd); ta.focus(); ta.setSelectionRange(s + prefix.length, s + prefix.length); ta.dispatchEvent(new Event('input'));
+    let ta = document.getElementById('node-text');
+    let s = ta.selectionStart;
+    let prefix = (s === 0 || ta.value.charAt(s - 1) === '\n' || ta.value.charAt(s - 1) === ' ') ? '@' : ' @';
+    
+    ta.value = ta.value.substring(0, s) + prefix + ta.value.substring(ta.selectionEnd); 
+    ta.focus(); 
+    ta.setSelectionRange(s + prefix.length, s + prefix.length); 
+    ta.dispatchEvent(new Event('input'));
 }
 
 function confirmAutoSort() { 
-    showModal("Sortieren?", "Automatisch sortieren?", [ { label: "Ja", class: "btn-discard", action: async () => { await applyAutoSort(); } }, { label: "Abbrechen", class: "btn-cancel", action: () => {} } ]); 
+    showModal("Sortieren?", "Automatisch sortieren?", [ 
+        { label: "Ja", class: "btn-discard", action: async () => { await applyAutoSort(); } }, 
+        { label: "Abbrechen", class: "btn-cancel", action: () => {} } 
+    ]); 
 }
 
 async function applyAutoSort() { 
     const sortRecursive = (list) => { 
         list.sort((a, b) => { 
-            const aIsFolder = a.children && a.children.length > 0, bIsFolder = b.children && b.children.length > 0; 
-            if (aIsFolder && !bIsFolder) return -1; if (!aIsFolder && bIsFolder) return 1; 
+            const aIsFolder = a.children && a.children.length > 0;
+            const bIsFolder = b.children && b.children.length > 0; 
+            if (aIsFolder && !bIsFolder) return -1; 
+            if (!aIsFolder && bIsFolder) return 1; 
             return a.title.localeCompare(b.title, undefined, {numeric: true, sensitivity: 'base'}); 
         }); 
-        list.forEach(item => { if(item.children) sortRecursive(item.children); }); 
+        list.forEach(item => { 
+            if(item.children) sortRecursive(item.children); 
+        }); 
     }; 
-    sortRecursive(fullData.content); await saveToServer(); renderTree(); 
+    sortRecursive(fullData.content); 
+    await saveToServer(); 
+    renderTree(); 
 }
 
 // FIX: UI-Update ohne Reload
 function refreshVisualReminders() {
     if (!fullData || !fullData.content || document.body.classList.contains('edit-mode-active')) return;
+    
     let needsRedraw = false;
     const now = new Date();
+    
     if (activeId) {
         const node = findNode(fullData.content, activeId);
         if (node && node.reminder) {
             const isDue = new Date(node.reminder) <= now;
             const viewBadge = document.getElementById('view-reminder-badge');
             const viewAck = document.getElementById('view-reminder-ack');
+            
             if (isDue && viewBadge && viewBadge.style.display === 'none') {
                 viewBadge.style.display = 'inline-block';
                 viewAck.style.display = 'inline-block';
@@ -1533,12 +2135,19 @@ function refreshVisualReminders() {
             }
         }
     }
-    if (needsRedraw) renderTree();
+    
+    if (needsRedraw) {
+        renderTree();
+    }
 }
 
 document.addEventListener('keydown', function(e) {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
-        if (document.getElementById('edit-mode').style.display === 'block') { e.preventDefault(); saveChanges(); disableEdit(); }
+        if (document.getElementById('edit-mode').style.display === 'block') { 
+            e.preventDefault(); 
+            saveChanges(); 
+            disableEdit(); 
+        }
     }
     if (e.key === 'Escape') {
         if (document.getElementById('lightbox').style.display === 'flex') closeLightbox();
@@ -1551,25 +2160,31 @@ document.addEventListener('keydown', function(e) {
 });
 
 window.onload = () => { 
-    loadData(); initDragAndDrop(); initMentionSystem();
+    loadData(); 
+    initDragAndDrop(); 
+    initMentionSystem();
     setInterval(checkAndReloadData, 30000);
     setInterval(refreshVisualReminders, 15000);
 };
 EOF
 
-# Rechte
+# --- BERECHTIGUNGEN ---
 echo "--- Richte Berechtigungen ein ---"
-if ! id -u notizen > /dev/null 2>&1; then useradd -r -s /bin/false notizen; fi
+if ! id -u notizen > /dev/null 2>&1; then 
+    useradd -r -s /bin/false notizen
+fi
+
 if [ ! -f $INSTALL_DIR/data.json ]; then 
     echo '{"settings": {"accent": "#27ae60", "theme": "dark", "password_enabled": false, "password_hash": ""}, "content": []}' > $INSTALL_DIR/data.json
 fi
+
 chown -R notizen:notizen $INSTALL_DIR
 find $INSTALL_DIR -type d -exec chmod 750 {} \;
 find $INSTALL_DIR -type f -exec chmod 640 {} \;
 chmod 750 $INSTALL_DIR/backup.sh $INSTALL_DIR/cleanup.py
 chmod +x $INSTALL_DIR/app.py
 
-# Systemd
+# --- SYSTEMD ---
 if [[ "$AUTOSTART_CONFIRM" =~ ^[Yy]$ ]]; then
     echo "--- Erstelle Systemd Service ---"
     cat << EOF > /etc/systemd/system/$SERVICE_NAME
@@ -1592,11 +2207,15 @@ EOF
     systemctl restart $SERVICE_NAME
 fi
 
-# Cron
+# --- CRONJOBS ---
 if [[ "$CRON_CONFIRM" =~ ^[Yy]$ ]] || [[ "$BACKUP_CONFIRM" =~ ^[Yy]$ ]]; then
     rm -f /etc/cron.d/notizen-tool
-    if [[ "$CRON_CONFIRM" =~ ^[Yy]$ ]]; then echo "0 3 * * * notizen /usr/bin/python3 $INSTALL_DIR/cleanup.py" >> /etc/cron.d/notizen-tool; fi
-    if [[ "$BACKUP_CONFIRM" =~ ^[Yy]$ ]]; then echo "0 4 * * * notizen $INSTALL_DIR/backup.sh" >> /etc/cron.d/notizen-tool; fi
+    if [[ "$CRON_CONFIRM" =~ ^[Yy]$ ]]; then 
+        echo "0 3 * * * notizen /usr/bin/python3 $INSTALL_DIR/cleanup.py" >> /etc/cron.d/notizen-tool
+    fi
+    if [[ "$BACKUP_CONFIRM" =~ ^[Yy]$ ]]; then 
+        echo "0 4 * * * notizen $INSTALL_DIR/backup.sh" >> /etc/cron.d/notizen-tool
+    fi
     chmod 644 /etc/cron.d/notizen-tool
 fi
 
