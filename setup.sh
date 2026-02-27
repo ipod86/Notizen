@@ -1154,11 +1154,11 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
     <div id="editor">
         <div id="no-selection" style="margin-top:50px;text-align:center;opacity:0.5">Wähle eine Notiz aus.</div>
         <div id="edit-area" style="display:none">
-            <div id="breadcrumb" style="font-size:0.8em;color:var(--accent);margin-bottom:15px;"></div>
+            <div id="breadcrumb" style="font-size:0.8em;color:var(--accent);margin-bottom:15px;overflow-wrap:anywhere;word-break:break-word;"></div>
             
             <div id="view-mode">
                 <div style="display:flex; align-items:center; gap:12px; margin-bottom:20px; flex-wrap:wrap;">
-                    <h1 id="view-title" style="margin:0"></h1>
+                    <h1 id="view-title" style="margin:0; overflow-wrap:anywhere; word-break:break-word; max-width:100%;"></h1>
                     <span id="view-reminder-badge" style="display:none; color:#e74c3c; font-size:1.2em; animation: pulse 2s infinite;" title="Erinnerung aktiv!">⏰</span>
                     <button id="view-reminder-ack" onclick="clearReminder()" style="display:none; background:#e74c3c !important; color:white; padding:4px 8px; border-radius:4px; font-size:0.8em; font-weight:bold;">Bestätigen</button>
                     <button onclick="enableEdit()" style="font-size:1.2em; margin-left:auto;">✏️</button>
