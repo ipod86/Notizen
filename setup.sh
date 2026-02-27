@@ -551,6 +551,8 @@ body.edit-mode-active #sort-btn {
 .tree-text { 
     flex-grow: 1; 
     padding: 2px 5px; 
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 
 button { 
@@ -909,7 +911,12 @@ body.sidebar-hidden #mobile-toggle-btn {
     transition: all 0.2s; 
     cursor: pointer; 
     display: inline-block; 
-    margin: 0 2px; 
+    margin: 0 2px;
+    max-width: 100%;
+    box-sizing: border-box;
+    overflow-wrap: anywhere;
+    word-break: break-all;
+    white-space: normal;
 }
 
 .note-link:hover { 
