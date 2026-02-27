@@ -1372,8 +1372,8 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
                 
                 <div style="font-size:0.8em; color:#aaa; margin-top:10px; background:rgba(255,255,255,0.05); padding:10px; border-radius:4px; line-height:1.5;">
                     <b>Verfügbare Variablen:</b><br>
-                    {{TITLE}} - Der Titel der fälligen Notiz<br>
-                    {{TIME}} - Zeitpunkt des Termins
+                    <code>&#123;&#123;TITLE&#125;&#125;</code> - Der Titel der fälligen Notiz<br>
+                    <code>&#123;&#123;TIME&#125;&#125;</code> - Zeitpunkt des Termins
                 </div>
             </div>
             <div class="modal-btns">
