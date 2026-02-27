@@ -45,7 +45,7 @@ apt update && apt install -y python3 python3-pip python3-venv cron
 # 6. Verzeichnisstruktur erstellen
 mkdir -p $INSTALL_DIR/static $INSTALL_DIR/templates $INSTALL_DIR/uploads $INSTALL_DIR/backups
 
-# 7. Python Umgebung
+# 7. Python Umgebung (angepasst für Debian 13 / Trixie)
 python3 -m venv $INSTALL_DIR/venv
 $INSTALL_DIR/venv/bin/python3 -m pip install flask werkzeug
 
@@ -1567,7 +1567,9 @@ async function loadData() {
 }
 
 async function checkAndReloadData() {
+    // Wenn der User tippt ODER die Ordner sortiert -> Nichts tun, um UI nicht zurückzusetzen!
     if (document.getElementById('edit-mode').style.display === 'block') return;
+    if (document.body.classList.contains('edit-mode-active')) return;
     
     try {
         const res = await fetch('/api/notes?_t=' + Date.now());
@@ -2621,17 +2623,39 @@ async function applyAutoSort() {
     renderTree(); 
 }
 
+// --- TASTATUR-SHORTCUTS ---
+document.addEventListener('keydown', function(e) {
+    // Strg + S (oder Cmd + S) zum Speichern
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+        if (document.getElementById('edit-mode').style.display === 'block') {
+            e.preventDefault(); // Verhindert den Browser-Speichern-Dialog
+            saveChanges();
+            disableEdit();
+        }
+    }
+    
+    // Escape zum Schließen von Fenstern oder Abbrechen des Bearbeitungsmodus
+    if (e.key === 'Escape') {
+        if (document.getElementById('lightbox').style.display === 'flex') {
+            closeLightbox();
+        } else if (document.getElementById('sketch-modal').style.display === 'flex') {
+            document.getElementById('sketch-modal').style.display = 'none';
+        } else if (document.getElementById('custom-modal').style.display === 'flex') {
+            document.getElementById('custom-modal').style.display = 'none';
+        } else if (document.getElementById('reminder-modal').style.display === 'flex') {
+            document.getElementById('reminder-modal').style.display = 'none';
+        } else if (document.getElementById('edit-mode').style.display === 'block') {
+            cancelEdit();
+        }
+    }
+});
+
 window.onload = () => { 
     loadData(); 
     initDragAndDrop(); 
     initMentionSystem();
-    setInterval(() => {
-        checkAndReloadData();
-        if (!document.body.classList.contains('edit-mode-active')) {
-            renderTree(); 
-            if (activeId) selectNode(activeId); 
-        }
-    }, 3000000000000);
+    // Nur Hintergrund-Sync aufrufen, keine UI-Modi mehr kaputt machen!
+    setInterval(checkAndReloadData, 30000);
 };
 EOF
 
