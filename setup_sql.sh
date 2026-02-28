@@ -13,6 +13,12 @@ if [ -z "$USER_PORT" ]; then
     USER_PORT=8080
 fi
 
+echo "Soll das Tool als Systemdienst eingerichtet und beim Systemstart automatisch geladen werden? (Y/n)"
+read -p "Autostart: " AUTOSTART_CONFIRM
+if [ -z "$AUTOSTART_CONFIRM" ]; then 
+    AUTOSTART_CONFIRM="y"
+fi
+
 echo "Soll ein nächtlicher Cleanup-Cronjob (03:00 Uhr) angelegt werden? (Y/n)"
 read -p "Cleanup-Cronjob: " CRON_CONFIRM
 if [ -z "$CRON_CONFIRM" ]; then 
@@ -2410,19 +2416,17 @@ async function uploadGenericFile() {
             const data = await res.json(); 
             
             if(data.filename) { 
+                let txt = "";
                 if (file.type.startsWith('image/')) {
-                    wrapSelection(`[img:${data.filename}]`, '', ''); 
+                    txt = `[img:${data.filename}]`;
                 } else {
-                    wrapSelection(`[file:${data.filename}|${data.original}]`, '', ''); 
+                    txt = `[file:${data.filename}|${data.original}]`;
                 }
-            } else { 
-                showModal("Fehler", "Fehler.", [
-                    { 
-                        label: "OK", 
-                        class: "btn-cancel", 
-                        action: () => {} 
-                    }
-                ]); 
+                
+                const s = ta.selectionStart; 
+                ta.value = ta.value.substring(0, s) + txt + ta.value.substring(ta.selectionEnd); 
+                ta.focus(); 
+                ta.setSelectionRange(s + txt.length, s + txt.length); 
             } 
         } catch(err) {
             console.error(err);
@@ -2890,7 +2894,7 @@ chmod 750 $INSTALL_DIR/backup.sh
 chmod 750 $INSTALL_DIR/cleanup.py
 chmod +x $INSTALL_DIR/app.py
 
-# Systemd Autostart
+# Systemd Autostart konfigurieren
 if [[ "$AUTOSTART_CONFIRM" =~ ^[Yy]$ ]]; then
     cat << EOF > /etc/systemd/system/$SERVICE_NAME
 [Unit]
@@ -2924,7 +2928,11 @@ if [[ "$CRON_CONFIRM" =~ ^[Yy]$ ]] || [[ "$BACKUP_CONFIRM" =~ ^[Yy]$ ]]; then
     chmod 644 /etc/cron.d/notizen-tool
 fi
 
-# Neustart erzwingen
-systemctl restart $SERVICE_NAME
-
-echo "--- V2 Setup abgeschlossen! ---"
+# Neustart erzwingen (nur wenn Autostart auch angelegt wurde)
+if [[ "$AUTOSTART_CONFIRM" =~ ^[Yy]$ ]]; then
+    systemctl restart $SERVICE_NAME
+    echo "--- V2 Setup abgeschlossen! Tool ist unter Port $USER_PORT als Systemdienst aktiv. ---"
+else
+    echo "--- V2 Setup abgeschlossen! ---"
+    echo "HINWEIS: Du hast den Autostart deaktiviert. Du musst die App manuell mit 'python3 /opt/notiz-tool/app.py' starten!"
+fi
