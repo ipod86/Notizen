@@ -126,9 +126,11 @@ def init_db():
             conn.execute("INSERT INTO settings (key, value) VALUES ('password_enabled', 'false')")
             conn.execute("INSERT INTO settings (key, value) VALUES ('tree_last_modified', '0')")
             
+        # FIX: Ein globaler Trigger für alle Updates auf der Tabelle
+        conn.execute('DROP TRIGGER IF EXISTS update_tree_mod')
         conn.execute('''
-            CREATE TRIGGER IF NOT EXISTS update_tree_mod 
-            AFTER UPDATE OF parent_id, sort_order, title, reminder ON notes 
+            CREATE TRIGGER update_tree_mod 
+            AFTER UPDATE ON notes 
             BEGIN 
                 UPDATE settings SET value = strftime('%s', 'now') WHERE key = 'tree_last_modified'; 
             END;
@@ -392,7 +394,15 @@ def handle_lock(note_id):
                 conn.execute("UPDATE notes SET locked_by=NULL, locked_at=NULL WHERE id=?", (note_id,))
             return jsonify({"status": "released"})
             
-        elif action in ['acquire', 'override', 'heartbeat']:
+        # FIX: Heartbeat getrennt behandeln, damit "lost" gesendet wird, wenn die Sperre gestohlen wurde
+        elif action == 'heartbeat':
+            if c_owner == cid:
+                conn.execute("UPDATE notes SET locked_at=? WHERE id=?", (now, note_id))
+                return jsonify({"status": "acquired"})
+            else:
+                return jsonify({"status": "lost"})
+                
+        elif action in ['acquire', 'override']:
             if action == 'override' or not is_locked or c_owner == cid:
                 conn.execute("UPDATE notes SET locked_by=?, locked_at=? WHERE id=?", (cid, now, note_id))
                 return jsonify({"status": "acquired"})
@@ -455,6 +465,7 @@ def export_backup():
             
     mem.seek(0)
     filename = f'notes_backup_{datetime.now().strftime("%Y%m%d_%H%M")}.tar.gz'
+    # FIX: Mimetype ergänzt
     return send_file(mem, download_name=filename, as_attachment=True, mimetype='application/gzip')
 
 @app.route('/api/backups', methods=['GET'])
@@ -520,7 +531,6 @@ def restore_backup():
             if os.path.exists(DB_FILE):
                 shutil.copy2(DB_FILE, DB_FILE + '.pre-restore')
             
-            # WAL und SHM löschen, sonst zerschießt SQLite das Backup beim Lesen!
             for ext in ['-wal', '-shm']:
                 if os.path.exists(DB_FILE + ext):
                     try:
@@ -538,7 +548,6 @@ def restore_backup():
             elif not os.path.exists(UPLOAD_FOLDER):
                 os.makedirs(UPLOAD_FOLDER)
 
-        # Neustart auslösen, um 500er Fehler durch verwaiste DB-Verbindungen zu vermeiden
         def restart_app():
             time.sleep(1.5)
             os._exit(0)
@@ -1541,6 +1550,7 @@ var fullTree = {
     content: [], 
     settings: {}
 };
+
 var activeId = null;
 var activeNoteData = null; 
 var collapsedIds = new Set();
@@ -1645,8 +1655,8 @@ function startHeartbeat(noteId) {
                         label: "Verstanden", 
                         class: "btn-cancel", 
                         action: () => { 
-                            disableEdit(); 
-                            if(document.getElementById('sketch-modal').style.display === 'flex') {
+                            cancelEdit(); 
+                            if (document.getElementById('sketch-modal').style.display === 'flex') {
                                 closeSketch();
                             }
                         }
@@ -1692,6 +1702,16 @@ async function checkAndReloadData() {
             
             if (!document.body.classList.contains('edit-mode-active')) {
                 renderTree();
+            }
+
+            // NEU: Wenn eine Notiz geöffnet ist (aber nicht im Bearbeitungsmodus),
+            // lade den Text neu, falls er im Hintergrund geändert wurde
+            if (activeId && document.getElementById('edit-mode').style.display !== 'block') {
+                const freshData = await fetchNoteData(activeId);
+                if (freshData) {
+                    activeNoteData = freshData;
+                    renderDisplayArea();
+                }
             }
         }
     } catch (e) { 
@@ -2078,270 +2098,20 @@ window.toggleTask = async function(targetIdx, currentlyChecked) {
     renderDisplayArea();
 };
 
-async function openSketch(id = null) {
-    const isEdit = document.getElementById('edit-mode').style.display === 'block';
+function hasActiveReminder(node) {
+    if (isReminderActive(node)) {
+        return true;
+    }
     
-    if (!isEdit && !await acquireLock(activeId)) { 
-        showModal("Gesperrt", "Skizze kann nicht geöffnet werden.", [
-            { 
-                label: "OK", 
-                class: "btn-cancel", 
-                action: () => {} 
+    if (node.children) {
+        for (let child of node.children) {
+            if (hasActiveReminder(child)) {
+                return true;
             }
-        ]); 
-        return; 
-    }
-
-    document.getElementById('sketch-modal').style.display = 'flex';
-    
-    if(!sketchCanvas) {
-        initSketcher();
-    }
-    
-    activeSketchId = id; 
-    sketchStrokes = [];
-    
-    if (id) { 
-        try { 
-            const res = await fetch(`/api/sketch/${id}`); 
-            
-            if(res.ok) { 
-                const data = await res.json(); 
-                sketchBg = data.bg || 'white'; 
-                document.getElementById('sketch-bg-select').value = sketchBg; 
-                sketchStrokes = data.strokes || []; 
-            } 
-        } catch(e) {
-            console.error(e);
-        } 
-    } else { 
-        sketchBg = document.getElementById('sketch-bg-select').value; 
-    }
-    
-    setSketchMode('pen'); 
-    redrawSketch();
-}
-
-function closeSketch() { 
-    document.getElementById('sketch-modal').style.display = 'none'; 
-    
-    if (document.getElementById('edit-mode').style.display !== 'block') {
-        releaseLock();
-    }
-}
-
-async function saveSketch() {
-    const payload = { 
-        id: activeSketchId, 
-        bg: sketchBg, 
-        strokes: sketchStrokes, 
-        image: sketchCanvas.toDataURL("image/png") 
-    };
-    
-    const res = await fetch('/api/sketch', { 
-        method: 'POST', 
-        headers: {
-            'Content-Type': 'application/json'
-        }, 
-        body: JSON.stringify(payload) 
-    }); 
-    
-    const data = await res.json();
-    
-    if (!activeSketchId && data.id) {
-        wrapSelection(`[sketch:${data.id}]`, '', '');
-    }
-    
-    document.getElementById('sketch-modal').style.display = 'none';
-    
-    const ta = document.getElementById('node-text'); 
-    
-    if (ta) {
-        ta.value = ta.value.replace(`[sketch:${data.id}]`, `[sketch:${data.id}] `).trim();
-    }
-    
-    document.querySelectorAll('.sketch-img').forEach(img => { 
-        if (img.src.includes(data.id)) {
-            img.src = `/uploads/sketch_${data.id}.png?v=` + Date.now();
         }
-    });
-
-    if (document.getElementById('edit-mode').style.display !== 'block') {
-        releaseLock();
-    }
-}
-
-async function addItem(parentId) { 
-    const newId = Date.now().toString() + Math.random().toString(36).substring(2, 6); 
-    
-    const payload = { 
-        id: newId, 
-        parent_id: parentId, 
-        title: 'Neu', 
-        text: '' 
-    };
-    
-    await fetch('/api/notes', { 
-        method: 'POST', 
-        headers: {
-            'Content-Type': 'application/json'
-        }, 
-        body: JSON.stringify(payload) 
-    });
-    
-    if (parentId) { 
-        collapsedIds.delete(parentId); 
-        saveCollapsedToLocal(); 
     }
     
-    await checkAndReloadData(); 
-    selectNode(newId); 
-    enableEdit(); 
-}
-
-function deleteItem(id) { 
-    showModal("Löschen", "Sicher?", [ 
-        { 
-            label: "Löschen", 
-            class: "btn-discard", 
-            action: async () => { 
-                await fetch(`/api/notes/${id}`, { 
-                    method: 'DELETE' 
-                }); 
-                
-                if (activeId === id) { 
-                    activeId = null; 
-                    document.getElementById('edit-area').style.display = 'none'; 
-                } 
-                
-                await checkAndReloadData(); 
-            } 
-        }, 
-        { 
-            label: "Abbruch", 
-            class: "btn-cancel", 
-            action: () => {} 
-        } 
-    ]); 
-}
-
-function findNode(items, id) { 
-    for (let i of items) { 
-        if (i.id === id) {
-            return i; 
-        }
-        
-        if (i.children) { 
-            const f = findNode(i.children, id); 
-            
-            if (f) {
-                return f;
-            } 
-        } 
-    } 
-    
-    return null; 
-}
-
-function getPath(items, id, path = []) { 
-    for (let i of items) { 
-        const n = [...path, {title: i.title, id: i.id}]; 
-        
-        if (i.id === id) {
-            return n; 
-        }
-        
-        if (i.children) { 
-            const r = getPath(i.children, id, n); 
-            
-            if (r) {
-                return r;
-            } 
-        } 
-    } 
-    
-    return null; 
-}
-
-function applyAccentColor(hex) { 
-    document.documentElement.style.setProperty('--accent', hex); 
-    
-    const r = parseInt(hex.slice(1,3), 16);
-    const g = parseInt(hex.slice(3,5), 16);
-    const b = parseInt(hex.slice(5,7), 16); 
-    
-    document.documentElement.style.setProperty('--accent-rgb', `${r}, ${g}, ${b}`); 
-    
-    const p = document.getElementById('accent-color-picker'); 
-    
-    if(p) {
-        p.value = hex; 
-    }
-}
-
-async function updateGlobalAccent(hex) { 
-    await fetch('/api/settings', { 
-        method: 'POST', 
-        headers: {
-            'Content-Type': 'application/json'
-        }, 
-        body: JSON.stringify({
-            accent: hex
-        })
-    }); 
-    
-    fullTree.settings.accent = hex; 
-    applyAccentColor(hex); 
-}
-
-async function toggleTheme() { 
-    const newTheme = document.body.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'; 
-    
-    await fetch('/api/settings', { 
-        method: 'POST', 
-        headers: {
-            'Content-Type': 'application/json'
-        }, 
-        body: JSON.stringify({
-            theme: newTheme
-        })
-    }); 
-    
-    fullTree.settings.theme = newTheme; 
-    document.body.setAttribute('data-theme', newTheme); 
-}
-
-function updateMenuUI() {
-    const pwdBtn = document.getElementById('pwd-toggle-text'); 
-    const logoutBtn = document.getElementById('logout-btn'); 
-    const whToggleText = document.getElementById('webhook-toggle-text');
-    
-    if(pwdBtn) {
-        pwdBtn.innerText = fullTree.settings.password_enabled ? '🔓 Passwortschutz aus' : '🔒 Passwortschutz an';
-    }
-    
-    if(logoutBtn) {
-        logoutBtn.style.display = fullTree.settings.password_enabled ? 'flex' : 'none';
-    }
-    
-    if(whToggleText) {
-        whToggleText.innerText = fullTree.settings.webhook_enabled ? '🔔 Webhook (Aktiviert)' : '🔕 Webhook (Deaktiviert)';
-    }
-}
-
-function renderTree() { 
-    const container = document.getElementById('tree'); 
-    container.innerHTML = ''; 
-    
-    const rootGroup = document.createElement('div'); 
-    rootGroup.className = 'tree-group'; 
-    container.appendChild(rootGroup); 
-    
-    renderItems(fullTree.content, rootGroup); 
-    
-    if (document.body.classList.contains('edit-mode-active')) {
-        initSortables(); 
-    }
+    return false;
 }
 
 function renderItems(items, parent) { 
@@ -2394,7 +2164,7 @@ function renderItems(items, parent) {
         text.className = 'tree-text'; 
         text.innerText = item.title || 'Unbenannt'; 
         
-        if (isReminderActive(item)) { 
+        if (hasActiveReminder(item)) { 
             const rSpan = document.createElement('span'); 
             rSpan.className = 'reminder-icon'; 
             rSpan.innerText = '⏰'; 
