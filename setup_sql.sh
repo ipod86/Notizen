@@ -455,7 +455,7 @@ def export_backup():
             
     mem.seek(0)
     filename = f'notes_backup_{datetime.now().strftime("%Y%m%d_%H%M")}.tar.gz'
-    return send_file(mem, download_name=filename, as_attachment=True)
+    return send_file(mem, download_name=filename, as_attachment=True, mimetype='application/gzip')
 
 @app.route('/api/backups', methods=['GET'])
 def list_backups():
