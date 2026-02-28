@@ -282,8 +282,11 @@ def handle_notes():
             if int(os.path.getmtime(DATA_FILE) * 1000) > client_time + 100:
                 return jsonify({"status": "error", "message": "Konflikt"}), 409
                 
-        with open(DATA_FILE, 'w') as f: 
+        # FIX: Atomares Speichern (Stromausfall-Schutz)
+        tmp_file = DATA_FILE + '.tmp'
+        with open(tmp_file, 'w') as f: 
             json.dump(req_data, f, indent=4)
+        os.replace(tmp_file, DATA_FILE)
             
         return jsonify({"status": "success", "last_modified": int(os.path.getmtime(DATA_FILE) * 1000)})
         
@@ -1328,7 +1331,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
                 <button class="sketch-btn" onclick="sketchStrokes=[]; redrawSketch();" style="color:#e74c3c;">🗑️ Leeren</button>
                 
                 <div style="flex-grow:1; text-align:right;">
-                    <button class="btn-cancel" onclick="document.getElementById('sketch-modal').style.display='none'">Abbruch</button>
+                    <button class="btn-cancel" onclick="closeSketch()">Abbruch</button>
                     <button class="btn-save" onclick="saveSketch()">Speichern</button>
                 </div>
             </div>
@@ -1462,6 +1465,7 @@ async function releaseLock() {
 
 function startHeartbeat() {
     if (lockInterval) clearInterval(lockInterval);
+    // FIX: Intervall auf 5 Sekunden reduziert
     lockInterval = setInterval(async () => {
         try {
             const res = await fetch('/api/lock', {
@@ -1486,7 +1490,7 @@ function startHeartbeat() {
                 ]);
             }
         } catch(e) { console.error(e); }
-    }, 5000);
+    }, 5000); 
 }
 
 window.addEventListener('beforeunload', () => {
@@ -1721,7 +1725,20 @@ function undoSketch() {
     }
 }
 
+// FIX: Skizze verlangt nun die Sperre, falls aus Lesemodus geöffnet
 async function openSketch(id = null) {
+    const isCurrentlyEdit = document.getElementById('edit-mode').style.display === 'block';
+    
+    if (!isCurrentlyEdit) {
+        const locked = await acquireLock();
+        if (!locked) {
+            showModal("Gesperrt", "Jemand bearbeitet das Notizbuch gerade. Skizze kann nicht geöffnet werden.", [
+                { label: "Verstanden", class: "btn-cancel", action: () => {} }
+            ]);
+            return;
+        }
+    }
+
     document.getElementById('sketch-modal').style.display = 'flex';
     if(!sketchCanvas) initSketcher();
     activeSketchId = id;
@@ -1744,6 +1761,15 @@ async function openSketch(id = null) {
     }
     setSketchMode('pen');
     redrawSketch();
+}
+
+// FIX: Eigene Abbruch-Funktion, die die Sperre wieder freigibt
+function closeSketch() {
+    document.getElementById('sketch-modal').style.display = 'none';
+    
+    if (document.getElementById('edit-mode').style.display !== 'block') {
+        releaseLock();
+    }
 }
 
 function setSketchMode(mode) {
@@ -1772,6 +1798,7 @@ function updateCurrentNode() {
     }
 }
 
+// FIX: Speichern gibt die Sperre frei, wenn aus Lese-Ansicht
 async function saveSketch() {
     const dataUrl = sketchCanvas.toDataURL("image/png");
     const payload = { 
@@ -1806,7 +1833,12 @@ async function saveSketch() {
             img.src = `/uploads/sketch_${data.id}.png?v=` + Date.now();
         }
     });
+
+    if (document.getElementById('edit-mode').style.display !== 'block') {
+        releaseLock();
+    }
 }
+// --- SKETCH LOGIK ENDE ---
 
 function cleanDataArray(arr) {
     if (!arr) return [];
@@ -2172,7 +2204,7 @@ function initSortables() {
     }); 
 }
 
-// --- NEU: PRE-SYNC VOR DEM BEARBEITEN DER STRUKTUR ---
+// FIX: Sync-Boost vor dem Bearbeiten der Struktur
 async function toggleEditMode() { 
     const isCurrentlyEdit = document.body.classList.contains('edit-mode-active'); 
     
@@ -2369,9 +2401,25 @@ function tryNavigation(id) {
     selectNode(id); 
 }
 
+// FIX: Checkbox Sperre & Sync-Boost
 window.toggleTask = async function(targetIdx, currentlyChecked) {
+    const locked = await acquireLock();
+    if (!locked) {
+        showModal("Gesperrt", "Jemand bearbeitet die Notizen gerade. Checkbox kann nicht geändert werden.", [
+            { label: "Verstanden", class: "btn-cancel", action: () => {} }
+        ]);
+        renderTree(); 
+        selectNode(activeId);
+        return;
+    }
+
+    await checkAndReloadData();
+
     const node = findNode(fullData.content, activeId); 
-    if(!node) return;
+    if(!node) {
+        releaseLock();
+        return;
+    }
     
     let tIndex = 0;
     let lines = node.text.split('\n');
@@ -2397,6 +2445,8 @@ window.toggleTask = async function(targetIdx, currentlyChecked) {
     
     disableEdit(); 
     await saveToServer();
+    
+    releaseLock();
 };
 
 function renderMarkdown(text) { 
@@ -2690,7 +2740,7 @@ async function importData(e) {
     }
 }
 
-// --- NEU: PRE-SYNC VOR DEM BEARBEITEN EINER NOTIZ ---
+// FIX: Sync-Boost vor dem Bearbeiten einer Notiz
 async function enableEdit() { 
     if (!activeId) return;
     
@@ -2997,7 +3047,8 @@ document.addEventListener('keydown', function(e) {
         if (document.getElementById('lightbox').style.display === 'flex') {
             closeLightbox();
         } else if (document.getElementById('sketch-modal').style.display === 'flex') {
-            document.getElementById('sketch-modal').style.display = 'none';
+            // FIX: Auch über ESC wird die Sperre sauber freigegeben
+            closeSketch();
         } else if (document.getElementById('custom-modal').style.display === 'flex') {
             document.getElementById('custom-modal').style.display = 'none';
         } else if (document.getElementById('reminder-modal').style.display === 'flex') {
