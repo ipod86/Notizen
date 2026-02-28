@@ -126,7 +126,6 @@ def init_db():
             conn.execute("INSERT INTO settings (key, value) VALUES ('password_enabled', 'false')")
             conn.execute("INSERT INTO settings (key, value) VALUES ('tree_last_modified', '0')")
             
-        # FIX: Ein globaler Trigger für alle Updates auf der Tabelle
         conn.execute('DROP TRIGGER IF EXISTS update_tree_mod')
         conn.execute('''
             CREATE TRIGGER update_tree_mod 
@@ -151,34 +150,6 @@ def init_db():
                 UPDATE settings SET value = strftime('%s', 'now') WHERE key = 'tree_last_modified'; 
             END;
         ''')
-
-    if os.path.exists(OLD_JSON):
-        print("[MIGRATION] Konvertiere data.json zu SQLite...", flush=True)
-        try:
-            with open(OLD_JSON, 'r') as f: 
-                data = json.load(f)
-                
-            with get_db() as conn:
-                for k, v in data.get('settings', {}).items():
-                    val_str = str(v).lower() if isinstance(v, bool) else str(v)
-                    conn.execute("REPLACE INTO settings (key, value) VALUES (?, ?)", (k, val_str))
-                
-                def import_nodes(nodes, parent_id=None):
-                    for idx, n in enumerate(nodes):
-                        conn.execute('''
-                            INSERT OR IGNORE INTO notes (id, parent_id, sort_order, title, text, reminder) 
-                            VALUES (?, ?, ?, ?, ?, ?)
-                        ''', (n['id'], parent_id, idx, n.get('title', 'Neu'), n.get('text', ''), n.get('reminder')))
-                        if 'children' in n: 
-                            import_nodes(n['children'], n['id'])
-                
-                import_nodes(data.get('content', []))
-                conn.execute("UPDATE settings SET value = strftime('%s', 'now') WHERE key = 'tree_last_modified'")
-            
-            os.rename(OLD_JSON, OLD_JSON + '.bak')
-            print("[MIGRATION] Erfolgreich!", flush=True)
-        except Exception as e: 
-            print(f"[MIGRATION] Fehler: {e}", flush=True)
 
 def webhook_worker():
     sent_reminders = set()
@@ -294,9 +265,17 @@ def get_tree():
         rows = conn.execute("SELECT id, parent_id, sort_order, title, reminder FROM notes ORDER BY sort_order").fetchall()
         sets = get_settings()
         
+        # Geister-Notizen Fix: Alle existierenden IDs sammeln
+        all_ids = {r['id'] for r in rows}
+        
         nodes_by_parent = {}
         for r in rows:
             pid = r['parent_id']
+            
+            # Wenn die parent_id nicht Null ist, aber der Parent in der Datenbank fehlt -> Rettung ins Root-Verzeichnis
+            if pid is not None and pid not in all_ids:
+                pid = None
+                
             if pid not in nodes_by_parent: 
                 nodes_by_parent[pid] = []
             nodes_by_parent[pid].append(dict(r))
@@ -342,10 +321,26 @@ def create_note():
 @app.route('/api/notes/<note_id>', methods=['PUT'])
 def update_note(note_id):
     data = request.json
+    cid = data.get('client_id')
+    now = time.time()
+    
     with get_db() as conn:
+        # Blind-Save (TOCTOU) Fix: Gehört uns die Sperre überhaupt noch?
+        row = conn.execute("SELECT locked_by, locked_at FROM notes WHERE id=?", (note_id,)).fetchone()
+        if row:
+            lock_owner = row['locked_by']
+            lock_time = row['locked_at'] or 0
+            is_locked = lock_owner and (now - lock_time) < 30
+            
+            # Wenn es gesperrt ist, aber nicht von UNSERER Client-ID -> 403 Forbidden
+            if is_locked and lock_owner != cid:
+                return jsonify({"error": "Locked by another client"}), 403
+
+        # Speichern ist sicher!
         conn.execute('''
             UPDATE notes SET title=?, text=?, reminder=? WHERE id=?
         ''', (data.get('title'), data.get('text'), data.get('reminder'), note_id))
+        
     return jsonify({"status": "success"})
 
 @app.route('/api/notes/<note_id>', methods=['DELETE'])
@@ -394,7 +389,6 @@ def handle_lock(note_id):
                 conn.execute("UPDATE notes SET locked_by=NULL, locked_at=NULL WHERE id=?", (note_id,))
             return jsonify({"status": "released"})
             
-        # FIX: Heartbeat getrennt behandeln, damit "lost" gesendet wird, wenn die Sperre gestohlen wurde
         elif action == 'heartbeat':
             if c_owner == cid:
                 conn.execute("UPDATE notes SET locked_at=? WHERE id=?", (now, note_id))
@@ -465,7 +459,6 @@ def export_backup():
             
     mem.seek(0)
     filename = f'notes_backup_{datetime.now().strftime("%Y%m%d_%H%M")}.tar.gz'
-    # FIX: Mimetype ergänzt
     return send_file(mem, download_name=filename, as_attachment=True, mimetype='application/gzip')
 
 @app.route('/api/backups', methods=['GET'])
@@ -564,7 +557,7 @@ def restore_backup():
             os.remove(tar_path)
 
 if __name__ == '__main__':
-    pass
+    app.run(host='0.0.0.0', port=8080, debug=False)
 EOF
 
 echo "app.run(host='0.0.0.0', port=$USER_PORT, debug=False)" >> $INSTALL_DIR/app.py
@@ -1823,12 +1816,23 @@ async function saveChanges() {
     activeNoteData.title = document.getElementById('node-title').value; 
     activeNoteData.text = document.getElementById('node-text').value; 
     
+    // FIX: Wir schicken unsere Client-ID als Ausweis mit!
+    activeNoteData.client_id = myClientId; 
+    
     try {
-        await fetch(`/api/notes/${activeId}`, { 
+        const res = await fetch(`/api/notes/${activeId}`, { 
             method: 'PUT', 
             headers: { 'Content-Type': 'application/json' }, 
             body: JSON.stringify(activeNoteData) 
         });
+        
+        // Wenn der Server 403 (Forbidden) wirft, wurde uns die Sperre gestohlen
+        if (res.status === 403) {
+            showModal("Speichern blockiert", "Die Notiz wird mittlerweile von einem anderen Gerät bearbeitet. Deine Änderungen wurden NICHT gespeichert, um ein Überschreiben zu verhindern.", [
+                { label: "Verstanden", class: "btn-cancel", action: () => {} }
+            ]);
+            return; // Wir brechen ab und laden die Seite neu
+        }
     } catch(e) {
         console.error("Fehler beim Speichern:", e);
     }
@@ -2017,13 +2021,17 @@ window.toggleTask = async function(targetIdx, currentlyChecked) {
     }
     
     activeNoteData.text = lines.join('\n'); 
+    activeNoteData.client_id = myClientId; // FIX: Ausweis mitgeben
     
     try {
-        await fetch(`/api/notes/${activeId}`, { 
+        const res = await fetch(`/api/notes/${activeId}`, { 
             method: 'PUT', 
             headers: { 'Content-Type': 'application/json' }, 
             body: JSON.stringify(activeNoteData) 
         });
+        if (res.status === 403) {
+            alert("Checkbox konnte nicht gespeichert werden, die Sperre gehört einem anderen Gerät.");
+        }
     } catch(e) {
         console.error(e);
     }
@@ -2288,8 +2296,16 @@ async function saveReminder() {
     
     if(val) { 
         activeNoteData.reminder = val; 
+        activeNoteData.client_id = myClientId; // FIX
+        
         document.getElementById('reminder-modal').style.display = 'none'; 
-        await fetch(`/api/notes/${activeId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(activeNoteData) }); 
+        
+        await fetch(`/api/notes/${activeId}`, { 
+            method: 'PUT', 
+            headers: { 'Content-Type': 'application/json' }, 
+            body: JSON.stringify(activeNoteData) 
+        }); 
+        
         await checkAndReloadData(); 
         renderDisplayArea(); 
     }
@@ -2298,7 +2314,14 @@ async function saveReminder() {
 async function clearReminder() { 
     if(activeNoteData && activeNoteData.reminder) { 
         activeNoteData.reminder = null; 
-        await fetch(`/api/notes/${activeId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(activeNoteData) }); 
+        activeNoteData.client_id = myClientId; // FIX
+        
+        await fetch(`/api/notes/${activeId}`, { 
+            method: 'PUT', 
+            headers: { 'Content-Type': 'application/json' }, 
+            body: JSON.stringify(activeNoteData) 
+        }); 
+        
         await checkAndReloadData(); 
         renderDisplayArea(); 
     } 
