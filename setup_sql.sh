@@ -1546,16 +1546,12 @@ EOF
 
 # static/script.js (UNMINIFIED UND KOMPLETT EXPANDIERT)
 cat << 'EOF' > $INSTALL_DIR/static/script.js
-var fullTree = {
-    content: [], 
-    settings: {}
-};
-
+var fullTree = { content: [], settings: {} };
 var activeId = null;
 var activeNoteData = null; 
 var collapsedIds = new Set();
 var sortables = [];
-var currentTreeLastMod = 0;
+var currentTreeLastMod = null;
 
 let myClientId = sessionStorage.getItem('clientId');
 if (!myClientId) {
@@ -1570,34 +1566,23 @@ async function acquireLock(noteId, override = false) {
     try {
         const res = await fetch(`/api/lock/${noteId}`, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                client_id: myClientId, 
-                action: override ? 'override' : 'acquire'
-            })
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ client_id: myClientId, action: override ? 'override' : 'acquire' })
         });
-        
         const data = await res.json();
-        
         if (data.status === 'acquired') {
             currentLockedNote = noteId;
             startHeartbeat(noteId);
             return true;
         }
     } catch(e) { 
-        console.error(e); 
+        console.error("Lock-Fehler:", e); 
     }
-    
     return false;
 }
 
 async function releaseLock() {
-    if (!currentLockedNote) {
-        return;
-    }
-    
+    if (!currentLockedNote) return;
     let nidToRelease = currentLockedNote;
     currentLockedNote = null; 
     
@@ -1609,16 +1594,11 @@ async function releaseLock() {
     try {
         await fetch(`/api/lock/${nidToRelease}`, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                client_id: myClientId, 
-                action: 'release'
-            })
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ client_id: myClientId, action: 'release' })
         });
-    } catch(e) {
-        console.error(e);
+    } catch(e) { 
+        console.error(e); 
     }
 }
 
@@ -1631,22 +1611,13 @@ function startHeartbeat(noteId) {
         try {
             const res = await fetch(`/api/lock/${noteId}`, {
                 method: 'POST', 
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    client_id: myClientId, 
-                    action: 'heartbeat'
-                })
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ client_id: myClientId, action: 'heartbeat' })
             });
-            
             const data = await res.json();
             
             if (data.status === 'lost') {
-                if (lockInterval) {
-                    clearInterval(lockInterval);
-                }
-                
+                if (lockInterval) clearInterval(lockInterval);
                 lockInterval = null;
                 currentLockedNote = null;
                 
@@ -1671,12 +1642,7 @@ function startHeartbeat(noteId) {
 
 window.addEventListener('beforeunload', () => {
     if (currentLockedNote) {
-        const blob = new Blob([JSON.stringify({
-            client_id: myClientId, 
-            action: 'release'
-        })], {
-            type: 'application/json'
-        });
+        const blob = new Blob([JSON.stringify({ client_id: myClientId, action: 'release' })], { type: 'application/json' });
         navigator.sendBeacon(`/api/lock/${currentLockedNote}`, blob);
     }
 });
@@ -1684,16 +1650,27 @@ window.addEventListener('beforeunload', () => {
 async function checkAndReloadData() {
     try {
         const res = await fetch('/api/tree?_t=' + Date.now());
-        
         if (!res.ok) {
+            console.error("Fehler vom Server:", res.status);
             return;
         }
         
         const data = await res.json();
         
-        if (data.last_modified && data.last_modified > currentTreeLastMod) {
+        // Kugelsicherer Vergleich: Wir konvertieren beides explizit zu Strings
+        const serverMod = String(data.last_modified);
+        const localMod = String(currentTreeLastMod);
+        
+        if (currentTreeLastMod === null || serverMod !== localMod) {
             currentTreeLastMod = data.last_modified;
-            fullTree.content = cleanDataArray(data.content || []);
+            
+            // Verhindern, dass kaputte Daten den Baum zerschießen
+            if (Array.isArray(data.content)) {
+                fullTree.content = cleanDataArray(data.content);
+            } else {
+                fullTree.content = [];
+            }
+            
             fullTree.settings = data.settings || {};
             
             document.body.setAttribute('data-theme', fullTree.settings.theme || 'dark'); 
@@ -1703,10 +1680,12 @@ async function checkAndReloadData() {
             if (!document.body.classList.contains('edit-mode-active')) {
                 renderTree();
             }
+        }
 
-            // NEU: Wenn eine Notiz geöffnet ist (aber nicht im Bearbeitungsmodus),
-            // lade den Text neu, falls er im Hintergrund geändert wurde
-            if (activeId && document.getElementById('edit-mode').style.display !== 'block') {
+        // Sicherer Auto-Refresh des Texts in der Mitte
+        if (activeId) {
+            const editModeEl = document.getElementById('edit-mode');
+            if (editModeEl && editModeEl.style.display !== 'block') {
                 const freshData = await fetchNoteData(activeId);
                 if (freshData) {
                     activeNoteData = freshData;
@@ -1722,41 +1701,41 @@ async function checkAndReloadData() {
 async function fetchNoteData(id) {
     try {
         const res = await fetch(`/api/notes/${id}?_t=` + Date.now());
-        
         if(res.ok) {
             return await res.json();
         }
     } catch(e) { 
         console.error("Fehler beim Laden der Notiz:", e); 
     }
-    
     return null;
 }
 
 function cleanDataArray(arr) {
-    if (!arr) {
+    if (!arr || !Array.isArray(arr)) {
         return [];
     }
-    
     return arr.map(item => {
-        return {
+        if (!item) return null;
+        return { 
             ...item, 
-            children: cleanDataArray(item.children)
+            children: cleanDataArray(item.children) 
         };
-    });
+    }).filter(item => item !== null);
 }
 
 async function loadData() { 
     const sState = localStorage.getItem('sidebarState') || 'closed'; 
-    
     if (sState === 'closed') {
         document.body.classList.add('sidebar-hidden'); 
     }
     
     const savedCollapsed = localStorage.getItem('collapsedNodes');
-    
     if (savedCollapsed) {
-        collapsedIds = new Set(JSON.parse(savedCollapsed));
+        try {
+            collapsedIds = new Set(JSON.parse(savedCollapsed));
+        } catch(e) {
+            collapsedIds = new Set();
+        }
     }
     
     await checkAndReloadData();
@@ -1768,20 +1747,19 @@ async function loadData() {
     renderTree(); 
     
     const lastId = localStorage.getItem('lastActiveId'); 
-    
     if (lastId && findNode(fullTree.content, lastId)) {
         selectNode(lastId); 
     }
 }
 
 function initAllCollapsed(items) { 
+    if (!Array.isArray(items)) return;
     items.forEach(item => { 
-        if (item.children && item.children.length > 0) { 
+        if (item && item.children && item.children.length > 0) { 
             collapsedIds.add(item.id); 
             initAllCollapsed(item.children); 
         } 
     }); 
-    
     saveCollapsedToLocal(); 
 }
 
@@ -1790,19 +1768,15 @@ function saveCollapsedToLocal() {
 }
 
 async function enableEdit() { 
-    if (!activeId) {
-        return;
-    }
+    if (!activeId) return;
     
     activeNoteData = await fetchNoteData(activeId);
-    
     if (!activeNoteData) { 
         alert("Notiz nicht gefunden!"); 
         return; 
     }
     
     const locked = await acquireLock(activeId);
-    
     if (!locked) {
         showModal("System gesperrt", "Diese Notiz wird gerade auf einem anderen Gerät bearbeitet.\n\nSperre erzwingen?", [
             { 
@@ -1821,7 +1795,6 @@ async function enableEdit() {
         ]);
         return;
     }
-    
     showEditArea();
 }
 
@@ -1845,24 +1818,23 @@ function showEditArea() {
 }
 
 async function saveChanges() { 
-    if (!activeId || !activeNoteData) {
-        return;
-    }
+    if (!activeId || !activeNoteData) return;
     
     activeNoteData.title = document.getElementById('node-title').value; 
     activeNoteData.text = document.getElementById('node-text').value; 
     
-    await fetch(`/api/notes/${activeId}`, { 
-        method: 'PUT', 
-        headers: {
-            'Content-Type': 'application/json'
-        }, 
-        body: JSON.stringify(activeNoteData) 
-    });
+    try {
+        await fetch(`/api/notes/${activeId}`, { 
+            method: 'PUT', 
+            headers: { 'Content-Type': 'application/json' }, 
+            body: JSON.stringify(activeNoteData) 
+        });
+    } catch(e) {
+        console.error("Fehler beim Speichern:", e);
+    }
     
     await releaseLock();
     await checkAndReloadData(); 
-    
     renderDisplayArea();
 }
 
@@ -1872,11 +1844,9 @@ function cancelEdit() {
 }
 
 function renderDisplayArea() {
-    if (!activeNoteData) {
-        return;
-    }
+    if (!activeNoteData) return;
     
-    document.getElementById('view-title').innerText = activeNoteData.title; 
+    document.getElementById('view-title').innerText = activeNoteData.title || 'Unbenannt'; 
     document.getElementById('display-area').innerHTML = renderMarkdown(activeNoteData.text); 
     
     if(window.hljs) {
@@ -1927,7 +1897,6 @@ async function selectNode(id) {
             return; 
         } 
     }
-    
     doSelectNode(id);
 }
 
@@ -1936,35 +1905,23 @@ async function doSelectNode(id) {
     localStorage.setItem('lastActiveId', id); 
     
     activeNoteData = await fetchNoteData(id);
-    
-    if (!activeNoteData) {
-        return;
-    }
+    if (!activeNoteData) return;
     
     document.getElementById('no-selection').style.display = 'none'; 
     document.getElementById('edit-area').style.display = 'block'; 
     
     const pathData = getPath(fullTree.content, id) || []; 
     const breadcrumbEl = document.getElementById('breadcrumb'); 
-    
     breadcrumbEl.innerHTML = '';
     
     pathData.forEach((p, idx) => { 
         const span = document.createElement('span'); 
-        span.innerText = p.title; 
+        span.innerText = p.title || 'Unbenannt'; 
         span.style.cursor = 'pointer'; 
         
-        span.onclick = () => {
-            selectNode(p.id);
-        }; 
-        
-        span.onmouseover = () => {
-            span.style.textDecoration = 'underline';
-        }; 
-        
-        span.onmouseout = () => {
-            span.style.textDecoration = 'none';
-        }; 
+        span.onclick = () => selectNode(p.id);
+        span.onmouseover = () => span.style.textDecoration = 'underline';
+        span.onmouseout = () => span.style.textDecoration = 'none';
         
         breadcrumbEl.appendChild(span); 
         
@@ -1975,12 +1932,8 @@ async function doSelectNode(id) {
     
     renderDisplayArea();
     
-    document.querySelectorAll('.tree-item').forEach(el => {
-        el.classList.remove('active');
-    }); 
-    
+    document.querySelectorAll('.tree-item').forEach(el => el.classList.remove('active')); 
     const activeEl = document.querySelector(`.tree-item-container[data-id="${id}"] > .tree-item`); 
-    
     if(activeEl) {
         activeEl.classList.add('active'); 
     }
@@ -1992,73 +1945,54 @@ function toggleEditMode() {
         renderTree(); 
     } else { 
         document.body.classList.remove('edit-mode-active'); 
-        
-        sortables.forEach(s => {
-            s.destroy();
-        }); 
-        
+        sortables.forEach(s => s.destroy()); 
         sortables = []; 
         renderTree(); 
     }
 }
 
 async function rebuildDataFromDOM() { 
-    if (!document.body.classList.contains('edit-mode-active')) {
-        return;
-    }
+    if (!document.body.classList.contains('edit-mode-active')) return;
     
     let flatUpdates = [];
     
     function parse(container, parentId) { 
         Array.from(container.querySelectorAll(':scope > .tree-item-container')).forEach((div, index) => { 
             const id = div.getAttribute('data-id'); 
-            
-            flatUpdates.push({ 
-                id: id, 
-                parent_id: parentId, 
-                sort_order: index 
-            });
-            
-            const sub = div.querySelector(':scope > .tree-group'); 
-            
-            if(sub) {
-                parse(sub, id);
+            if (id) {
+                flatUpdates.push({ id: id, parent_id: parentId, sort_order: index });
+                const sub = div.querySelector(':scope > .tree-group'); 
+                if(sub) parse(sub, id);
             }
         }); 
     } 
     
     const rg = document.querySelector('#tree > .tree-group'); 
-    
     if(rg) { 
         parse(rg, null); 
-        
-        await fetch('/api/tree', { 
-            method: 'POST', 
-            headers: {
-                'Content-Type': 'application/json'
-            }, 
-            body: JSON.stringify(flatUpdates) 
-        }); 
-        
-        await checkAndReloadData(); 
+        try {
+            await fetch('/api/tree', { 
+                method: 'POST', 
+                headers: { 'Content-Type': 'application/json' }, 
+                body: JSON.stringify(flatUpdates) 
+            }); 
+            await checkAndReloadData(); 
+        } catch(e) {
+            console.error("Fehler beim Baum-Update:", e);
+        }
     } 
 }
 
 window.toggleTask = async function(targetIdx, currentlyChecked) {
     if (!await acquireLock(activeId)) { 
         showModal("Gesperrt", "Checkbox kann nicht geändert werden (Notiz wird bearbeitet).", [
-            { 
-                label: "OK", 
-                class: "btn-cancel", 
-                action: () => {} 
-            }
+            { label: "OK", class: "btn-cancel", action: () => {} }
         ]); 
         renderDisplayArea(); 
         return; 
     }
     
     activeNoteData = await fetchNoteData(activeId);
-    
     if(!activeNoteData) { 
         releaseLock(); 
         return; 
@@ -2069,7 +2003,6 @@ window.toggleTask = async function(targetIdx, currentlyChecked) {
     
     for (let i = 0; i < lines.length; i++) {
         let t = lines[i].trim();
-        
         if (t.startsWith('- [ ] ') || t.startsWith('- [x] ') || t.startsWith('- [X] ')) {
             if (tIndex === targetIdx) { 
                 if (currentlyChecked) {
@@ -2079,48 +2012,67 @@ window.toggleTask = async function(targetIdx, currentlyChecked) {
                 }
                 break; 
             } 
-            
             tIndex++;
         }
     }
     
     activeNoteData.text = lines.join('\n'); 
     
-    await fetch(`/api/notes/${activeId}`, { 
-        method: 'PUT', 
-        headers: {
-            'Content-Type': 'application/json'
-        }, 
-        body: JSON.stringify(activeNoteData) 
-    });
+    try {
+        await fetch(`/api/notes/${activeId}`, { 
+            method: 'PUT', 
+            headers: { 'Content-Type': 'application/json' }, 
+            body: JSON.stringify(activeNoteData) 
+        });
+    } catch(e) {
+        console.error(e);
+    }
     
     await releaseLock(); 
     renderDisplayArea();
 };
 
+// EXTREM ROBUSTE KLINGEL-FUNKTION
 function hasActiveReminder(node) {
-    if (isReminderActive(node)) {
-        return true;
-    }
-    
-    if (node.children) {
-        for (let child of node.children) {
-            if (hasActiveReminder(child)) {
-                return true;
+    try {
+        if (!node) return false;
+        if (isReminderActive(node)) return true;
+        
+        if (node.children && Array.isArray(node.children)) {
+            for (let i = 0; i < node.children.length; i++) {
+                if (hasActiveReminder(node.children[i])) {
+                    return true;
+                }
             }
         }
+    } catch(e) {
+        // Falls hier irgendwas schiefgeht, ignorieren wir es, 
+        // damit der Baum trotzdem fertig gezeichnet wird!
+        console.error("Fehler in hasActiveReminder:", e);
     }
-    
     return false;
 }
 
+// SICHERE DATUMS-PRÜFUNG
+function isReminderActive(node) { 
+    try {
+        if (!node || !node.reminder) return false;
+        const remDate = new Date(node.reminder);
+        if (isNaN(remDate.getTime())) return false;
+        
+        return remDate <= new Date();
+    } catch(e) {
+        return false;
+    }
+}
+
 function renderItems(items, parent) { 
+    if (!Array.isArray(items)) return;
+    
     const isEdit = document.body.classList.contains('edit-mode-active'); 
     
     items.forEach(item => { 
-        if (!item) {
-            return;
-        }
+        if (!item || !item.id) return;
         
         const isFolder = item.children && item.children.length > 0; 
         const isCollapsed = isEdit ? false : collapsedIds.has(item.id); 
@@ -2138,23 +2090,16 @@ function renderItems(items, parent) {
         
         const icon = document.createElement('span'); 
         icon.className = 'tree-icon'; 
-        
-        if (isFolder) {
-            icon.innerText = isCollapsed ? '📁' : '📂';
-        } else {
-            icon.innerText = '📄';
-        }
+        icon.innerText = isFolder ? (isCollapsed ? '📁' : '📂') : '📄';
         
         icon.onclick = (e) => { 
             e.stopPropagation(); 
-            
             if (!isEdit && isFolder) { 
                 if (collapsedIds.has(item.id)) {
                     collapsedIds.delete(item.id); 
                 } else {
                     collapsedIds.add(item.id); 
                 }
-                
                 saveCollapsedToLocal(); 
                 renderTree(); 
             } 
@@ -2173,16 +2118,12 @@ function renderItems(items, parent) {
         
         text.onclick = (e) => { 
             e.stopPropagation(); 
-            
-            if (!isEdit) {
-                selectNode(item.id); 
-            }
+            if (!isEdit) selectNode(item.id); 
         }; 
         
         const addBtn = document.createElement('button'); 
         addBtn.className = 'add-sub-btn'; 
         addBtn.innerText = '+'; 
-        
         addBtn.onclick = (e) => { 
             e.stopPropagation(); 
             addItem(item.id); 
@@ -2191,7 +2132,6 @@ function renderItems(items, parent) {
         const delBtn = document.createElement('button'); 
         delBtn.className = 'delete-btn'; 
         delBtn.innerText = '×'; 
-        
         delBtn.onclick = (e) => { 
             e.stopPropagation(); 
             deleteItem(item.id); 
@@ -2213,10 +2153,7 @@ function renderItems(items, parent) {
 }
 
 function initSortables() { 
-    sortables.forEach(s => {
-        s.destroy();
-    }); 
-    
+    sortables.forEach(s => s.destroy()); 
     sortables = []; 
     
     document.querySelectorAll('.tree-group').forEach(el => { 
@@ -2234,27 +2171,35 @@ function initSortables() {
     }); 
 }
 
-function renderMarkdown(text) { 
-    if (!text) {
-        return ''; 
-    }
+function renderTree() { 
+    const container = document.getElementById('tree'); 
+    if (!container) return;
     
+    container.innerHTML = ''; 
+    const rootGroup = document.createElement('div'); 
+    rootGroup.className = 'tree-group'; 
+    container.appendChild(rootGroup); 
+    
+    renderItems(fullTree.content, rootGroup); 
+    
+    if (document.body.classList.contains('edit-mode-active')) {
+        initSortables(); 
+    }
+}
+
+function renderMarkdown(text) { 
+    if (!text) return ''; 
     let html = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); 
     
     html = html.replace(/\[img:(.*?)\]/g, '<img src="/uploads/$1" class="note-img" onclick="openLightbox(this.src)">');
     html = html.replace(/\[sketch:([a-zA-Z0-9]+)\]/g, '<img src="/uploads/sketch_$1.png?v='+Date.now()+'" class="note-img sketch-img" title="Skizze bearbeiten" onclick="openSketch(\'$1\')">');
     html = html.replace(/\[file:([a-zA-Z0-9.\-]+)\|([^\]]+)\]/g, '<a href="/uploads/$1" target="_blank" class="note-link">📎 $2</a>');
     
-    html = html.replace(/\[note:([a-zA-Z0-9]+)\|([^\]]+)\]/g, (match, id, title) => { 
-        return '<a href="#" onclick="selectNode(\'' + id + '\'); return false;" class="note-link">@ ' + title + '</a>'; 
-    });
-    
+    html = html.replace(/\[note:([a-zA-Z0-9]+)\|([^\]]+)\]/g, (match, id, title) => '<a href="#" onclick="selectNode(\'' + id + '\'); return false;" class="note-link">@ ' + title + '</a>');
     html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" style="color:var(--accent); text-decoration:underline;">$1</a>');
-    
     html = html.replace(/\[s=(.*?)\]\n?([\s\S]*?)\n?\[\/s\]/g, '<details class="spoiler"><summary>$1</summary><div class="spoiler-content">$2</div></details>');
 
     let last = ""; 
-    
     while (last !== html) { 
         last = html; 
         html = html.replace(/\[(#[0-9a-fA-F]{6})\]([\s\S]*?)\[\/#\]/g, '<span style="color:$1">$2</span>'); 
@@ -2282,65 +2227,36 @@ function renderMarkdown(text) {
         } else { 
             res += parts[i].split('\n').map(line => {
                 let t = line.trim(); 
-                
-                if (t === '') {
-                    return '<br>'; 
-                }
-                
-                if (t === '---') {
-                    return '<hr>';
-                }
-                
-                if (t.startsWith('### ')) {
-                    return '<h3>' + line.substring(4) + '</h3>'; 
-                }
-                
-                if (t.startsWith('## ')) {
-                    return '<h2>' + line.substring(3) + '</h2>'; 
-                }
-                
-                if (t.startsWith('# ')) {
-                    return '<h1>' + line.substring(2) + '</h1>';
-                }
+                if (t === '') return '<br>'; 
+                if (t === '---') return '<hr>';
+                if (t.startsWith('### ')) return '<h3>' + line.substring(4) + '</h3>'; 
+                if (t.startsWith('## ')) return '<h2>' + line.substring(3) + '</h2>'; 
+                if (t.startsWith('# ')) return '<h1>' + line.substring(2) + '</h1>';
                 
                 if (t.startsWith('- [ ] ')) { 
                     let idx = window.taskIndexCounter++; 
                     return '<div class="task-list-item"><input type="checkbox" class="task-check" onclick="toggleTask(' + idx + ', false)"> <span>' + line.substring(line.indexOf('- [ ] ') + 6) + '</span></div>'; 
                 }
-                
                 if (t.startsWith('- [x] ') || t.startsWith('- [X] ')) { 
                     let idx = window.taskIndexCounter++; 
                     return '<div class="task-list-item"><input type="checkbox" class="task-check" checked onclick="toggleTask(' + idx + ', true)"> <span><del>' + line.substring(line.indexOf('] ') + 2) + '</del></span></div>'; 
                 }
                 
-                if (t.startsWith('- ')) {
-                    return '<div style="margin-left: 20px;">• ' + line.substring(line.indexOf('- ')+2) + '</div>'; 
-                }
+                if (t.startsWith('- ')) return '<div style="margin-left: 20px;">• ' + line.substring(line.indexOf('- ')+2) + '</div>'; 
                 
                 return '<div>' + line + '</div>';
             }).join(''); 
         } 
     } 
-    
     return res; 
 }
 
-function isReminderActive(node) { 
-    if (node.reminder && new Date(node.reminder) <= new Date()) {
-        return true;
-    }
-    return false;
-}
-
 function openReminderModal() {
-    if(!activeNoteData) {
-        return;
-    }
-    
+    if(!activeNoteData) return;
     document.getElementById('reminder-modal').style.display = 'flex';
     
-    const hasTimeCb = document.getElementById('reminder-has-time'); 
-    const dateInp = document.getElementById('reminder-date'); 
+    const hasTimeCb = document.getElementById('reminder-has-time');
+    const dateInp = document.getElementById('reminder-date');
     const dtInp = document.getElementById('reminder-datetime');
     
     if (activeNoteData.reminder) { 
@@ -2356,48 +2272,24 @@ function openReminderModal() {
         dateInp.value = ''; 
         dtInp.value = ''; 
     }
-    
     toggleReminderInput();
 }
 
 function toggleReminderInput() { 
     const hasTime = document.getElementById('reminder-has-time').checked; 
-    
-    if (hasTime) {
-        document.getElementById('reminder-date').style.display = 'none';
-        document.getElementById('reminder-datetime').style.display = 'block';
-    } else {
-        document.getElementById('reminder-date').style.display = 'block';
-        document.getElementById('reminder-datetime').style.display = 'none';
-    }
+    document.getElementById('reminder-date').style.display = hasTime ? 'none' : 'block';
+    document.getElementById('reminder-datetime').style.display = hasTime ? 'block' : 'none';
 }
 
 async function saveReminder() {
-    if(!activeNoteData) {
-        return;
-    }
-    
+    if(!activeNoteData) return;
     const hasTime = document.getElementById('reminder-has-time').checked; 
-    let val = "";
-    
-    if (hasTime) {
-        val = document.getElementById('reminder-datetime').value;
-    } else {
-        val = document.getElementById('reminder-date').value;
-    }
+    let val = hasTime ? document.getElementById('reminder-datetime').value : document.getElementById('reminder-date').value;
     
     if(val) { 
         activeNoteData.reminder = val; 
         document.getElementById('reminder-modal').style.display = 'none'; 
-        
-        await fetch(`/api/notes/${activeId}`, { 
-            method: 'PUT', 
-            headers: {
-                'Content-Type': 'application/json'
-            }, 
-            body: JSON.stringify(activeNoteData) 
-        }); 
-        
+        await fetch(`/api/notes/${activeId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(activeNoteData) }); 
         await checkAndReloadData(); 
         renderDisplayArea(); 
     }
@@ -2406,15 +2298,7 @@ async function saveReminder() {
 async function clearReminder() { 
     if(activeNoteData && activeNoteData.reminder) { 
         activeNoteData.reminder = null; 
-        
-        await fetch(`/api/notes/${activeId}`, { 
-            method: 'PUT', 
-            headers: {
-                'Content-Type': 'application/json'
-            }, 
-            body: JSON.stringify(activeNoteData) 
-        }); 
-        
+        await fetch(`/api/notes/${activeId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(activeNoteData) }); 
         await checkAndReloadData(); 
         renderDisplayArea(); 
     } 
@@ -2426,16 +2310,11 @@ function toggleWebhookModal() {
     document.getElementById('webhook-method').value = fullTree.settings.webhook_method || 'GET'; 
     document.getElementById('webhook-url').value = fullTree.settings.webhook_url || ''; 
     document.getElementById('webhook-payload').value = fullTree.settings.webhook_payload || ''; 
-    
     toggleWebhookPayload(); 
 }
 
 function toggleWebhookPayload() { 
-    if (document.getElementById('webhook-method').value === 'POST') {
-        document.getElementById('webhook-payload-container').style.display = 'block';
-    } else {
-        document.getElementById('webhook-payload-container').style.display = 'none';
-    }
+    document.getElementById('webhook-payload-container').style.display = document.getElementById('webhook-method').value === 'POST' ? 'block' : 'none'; 
 }
 
 async function saveWebhook() {
@@ -2445,15 +2324,7 @@ async function saveWebhook() {
         webhook_url: document.getElementById('webhook-url').value, 
         webhook_payload: document.getElementById('webhook-payload').value 
     };
-    
-    await fetch('/api/settings', { 
-        method: 'POST', 
-        headers: {
-            'Content-Type': 'application/json'
-        }, 
-        body: JSON.stringify(payload) 
-    }); 
-    
+    await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); 
     fullTree.settings.webhook_enabled = payload.webhook_enabled; 
     document.getElementById('webhook-modal').style.display = 'none'; 
     updateMenuUI();
@@ -2462,15 +2333,8 @@ async function saveWebhook() {
 function showModal(title, text, buttons, showInput=false) { 
     document.getElementById('modal-title').innerText = title; 
     document.getElementById('modal-text').innerText = text; 
-    
     const inp = document.getElementById('modal-input'); 
-    
-    if (showInput) {
-        inp.style.display = 'block';
-    } else {
-        inp.style.display = 'none';
-    }
-    
+    inp.style.display = showInput ? 'block' : 'none'; 
     inp.value = ''; 
     
     const container = document.getElementById('modal-btns-container'); 
@@ -2480,22 +2344,12 @@ function showModal(title, text, buttons, showInput=false) {
         const b = document.createElement('button'); 
         b.innerText = btn.label; 
         b.className = btn.class; 
-        
-        b.onclick = () => { 
-            document.getElementById('custom-modal').style.display = 'none'; 
-            btn.action(); 
-        }; 
-        
+        b.onclick = () => { document.getElementById('custom-modal').style.display = 'none'; btn.action(); }; 
         container.appendChild(b); 
     }); 
     
     document.getElementById('custom-modal').style.display = 'flex'; 
-    
-    if (showInput) {
-        setTimeout(() => {
-            inp.focus();
-        }, 100); 
-    }
+    if (showInput) setTimeout(() => { inp.focus(); }, 100); 
 }
 
 function clearSearch() { 
@@ -2515,7 +2369,6 @@ function filterTree() {
     }
     
     clearBtn.style.display = 'flex'; 
-    
     const container = document.getElementById('tree'); 
     container.innerHTML = '';
     
@@ -2525,86 +2378,28 @@ function filterTree() {
     
     function getFilteredItems(items) { 
         let results = []; 
-        
         items.forEach(item => { 
             const matchInTitle = item.title && item.title.toLowerCase().includes(term); 
-            
-            let filteredChildren = [];
-            if (item.children) {
-                filteredChildren = getFilteredItems(item.children);
-            }
-            
+            let filteredChildren = item.children ? getFilteredItems(item.children) : [];
             if (matchInTitle || filteredChildren.length > 0) {
-                results.push({ 
-                    ...item, 
-                    children: filteredChildren 
-                }); 
+                results.push({ ...item, children: filteredChildren }); 
             }
         }); 
-        
         return results; 
     }
-    
     renderItems(getFilteredItems(fullTree.content), rootGroup);
 }
 
 function togglePassword() {
     if (fullTree.settings.password_enabled) { 
         showModal("Passwortschutz", "Deaktivieren?", [
-            { 
-                label: "Ja", 
-                class: "btn-discard", 
-                action: async () => { 
-                    await fetch('/api/settings', { 
-                        method: 'POST', 
-                        headers: {
-                            'Content-Type': 'application/json'
-                        }, 
-                        body: JSON.stringify({
-                            password_enabled: false
-                        }) 
-                    }); 
-                    
-                    fullTree.settings.password_enabled = false; 
-                    updateMenuUI(); 
-                }
-            }, 
-            { 
-                label: "Abbruch", 
-                class: "btn-cancel", 
-                action: () => {} 
-            }
+            { label: "Ja", class: "btn-discard", action: async () => { await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password_enabled: false }) }); fullTree.settings.password_enabled = false; updateMenuUI(); } }, 
+            { label: "Abbruch", class: "btn-cancel", action: () => {} }
         ]); 
     } else { 
         showModal("Passwortschutz", "Neues Passwort:", [
-            { 
-                label: "Speichern", 
-                class: "btn-save", 
-                action: async () => { 
-                    const pwd = document.getElementById('modal-input').value; 
-                    
-                    if(pwd) { 
-                        await fetch('/api/settings', { 
-                            method: 'POST', 
-                            headers: {
-                                'Content-Type': 'application/json'
-                            }, 
-                            body: JSON.stringify({
-                                password_enabled: true, 
-                                password: pwd
-                            }) 
-                        }); 
-                        
-                        fullTree.settings.password_enabled = true; 
-                        updateMenuUI(); 
-                    }
-                }
-            }, 
-            { 
-                label: "Abbruch", 
-                class: "btn-cancel", 
-                action: () => {} 
-            }
+            { label: "Speichern", class: "btn-save", action: async () => { const pwd = document.getElementById('modal-input').value; if(pwd) { await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password_enabled: true, password: pwd }) }); fullTree.settings.password_enabled = true; updateMenuUI(); } } }, 
+            { label: "Abbruch", class: "btn-cancel", action: () => {} }
         ], true); 
     }
 }
@@ -2621,7 +2416,6 @@ function toggleAllFolders() {
             } 
         }); 
     }
-    
     countFolders(fullTree.content);
     
     if (collapsedIds.size >= totalFolders / 2 && totalFolders > 0) {
@@ -2635,65 +2429,35 @@ function toggleAllFolders() {
                 } 
             }); 
         } 
-        
         collect(fullTree.content); 
     }
     
     saveCollapsedToLocal(); 
-    
-    if (searchTerm) {
-        filterTree(); 
-    } else {
-        renderTree();
-    }
+    if (searchTerm) filterTree(); else renderTree();
 }
 
 function confirmAutoSort() { 
-    showModal("Sortieren?", "Automatisch alphabetisch sortieren?", [ 
-        { 
-            label: "Ja, Sortieren", 
-            class: "btn-discard", 
-            action: async () => { 
-                await applyAutoSort(); 
-            } 
-        }, 
-        { 
-            label: "Abbrechen", 
-            class: "btn-cancel", 
-            action: () => {} 
-        } 
+    showModal("Sortieren?", "Automatisch alphabetisch sortieren?", [
+        { label: "Ja, Sortieren", class: "btn-discard", action: async () => { await applyAutoSort(); } }, 
+        { label: "Abbrechen", class: "btn-cancel", action: () => {} }
     ]); 
 }
 
 async function applyAutoSort() { 
     const sortRecursive = (list) => { 
         list.sort((a, b) => { 
-            const aIsFolder = a.children && a.children.length > 0; 
+            const aIsFolder = a.children && a.children.length > 0;
             const bIsFolder = b.children && b.children.length > 0; 
-            
-            if (aIsFolder && !bIsFolder) {
-                return -1; 
-            }
-            
-            if (!aIsFolder && bIsFolder) {
-                return 1; 
-            }
-            
-            return a.title.localeCompare(b.title, undefined, {
-                numeric: true, 
-                sensitivity: 'base'
-            }); 
+            if (aIsFolder && !bIsFolder) return -1; 
+            if (!aIsFolder && bIsFolder) return 1; 
+            return a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: 'base' }); 
         }); 
-        
         list.forEach(item => { 
-            if(item.children) {
-                sortRecursive(item.children); 
-            }
+            if(item.children) sortRecursive(item.children); 
         }); 
     }; 
     
     sortRecursive(fullTree.content); 
-    
     document.body.classList.add('edit-mode-active'); 
     renderTree(); 
     await rebuildDataFromDOM(); 
@@ -2702,35 +2466,24 @@ async function applyAutoSort() {
 }
 
 function wrapSelection(b, a, p = "") { 
-    const ta = document.getElementById('node-text'); 
-    const s = ta.selectionStart; 
+    const ta = document.getElementById('node-text');
+    const s = ta.selectionStart;
     const e = ta.selectionEnd; 
-    
-    let txt = ta.value.substring(s, e);
-    if (!txt) {
-        txt = p;
-    }
-    
+    let txt = ta.value.substring(s, e) || p;
     ta.value = ta.value.substring(0, s) + b + txt + a + ta.value.substring(e); 
     ta.focus(); 
     ta.setSelectionRange(s + b.length, s + b.length + txt.length); 
 }
 
 function handleListAction(prefix, placeholder) {
-    const ta = document.getElementById('node-text'); 
-    const start = ta.selectionStart; 
-    const end = ta.selectionEnd; 
-    const text = ta.value; 
+    const ta = document.getElementById('node-text');
+    const start = ta.selectionStart;
+    const end = ta.selectionEnd;
+    const text = ta.value;
     const selectedText = text.substring(start, end);
     
     if (selectedText.includes('\n')) { 
-        const newText = selectedText.split('\n').map(line => { 
-            if (line.trim() === '' || line.trim().startsWith(prefix.trim())) {
-                return line; 
-            }
-            return prefix + line; 
-        }).join('\n'); 
-        
+        const newText = selectedText.split('\n').map(line => (line.trim() === '' || line.trim().startsWith(prefix.trim())) ? line : prefix + line).join('\n'); 
         ta.value = text.substring(0, start) + newText + text.substring(end); 
         ta.setSelectionRange(start, start + newText.length); 
         ta.focus(); 
@@ -2738,7 +2491,6 @@ function handleListAction(prefix, placeholder) {
     }
     
     const textBefore = text.substring(0, start);
-    
     if (selectedText === placeholder && textBefore.endsWith(prefix)) { 
         const insertStr = '\n' + prefix + placeholder; 
         ta.value = text.substring(0, end) + insertStr + text.substring(end); 
@@ -2748,20 +2500,9 @@ function handleListAction(prefix, placeholder) {
         return; 
     }
     
-    let insertPrefix = prefix; 
-    
-    if (textBefore.length > 0 && !textBefore.endsWith('\n')) {
-        insertPrefix = '\n' + prefix;
-    }
-    
-    let insertText = selectedText;
-    if (!insertText) {
-        insertText = placeholder;
-    }
-    
-    const insertStr = insertPrefix + insertText; 
-    ta.value = text.substring(0, start) + insertStr + text.substring(end); 
-    
+    let insertPrefix = (textBefore.length > 0 && !textBefore.endsWith('\n')) ? '\n' + prefix : prefix;
+    let insertText = selectedText || placeholder;
+    ta.value = text.substring(0, start) + insertPrefix + insertText + text.substring(end); 
     const selectStart = start + insertPrefix.length; 
     ta.setSelectionRange(selectStart, selectStart + insertText.length); 
     ta.focus();
@@ -2772,37 +2513,25 @@ function insertCodeTag() {
 }
 
 function copyToClipboard(btn) { 
-    const code = btn.nextElementSibling.innerText; 
     const el = document.createElement('textarea'); 
-    el.value = code; 
+    el.value = btn.nextElementSibling.innerText; 
     document.body.appendChild(el); 
     el.select(); 
     document.execCommand('copy'); 
     document.body.removeChild(el); 
-    
     btn.innerText = 'Copied!'; 
-    
-    setTimeout(() => {
-        btn.innerText = 'Copy';
-    }, 2000); 
+    setTimeout(() => { btn.innerText = 'Copy'; }, 2000); 
 }
 
 function toggleSettings(e) { 
     e.stopPropagation(); 
     const m = document.getElementById('dropdown-menu'); 
-    
-    if (m.style.display === 'block') {
-        m.style.display = 'none';
-    } else {
-        m.style.display = 'block';
-    }
+    m.style.display = m.style.display === 'block' ? 'none' : 'block'; 
 }
 
 document.addEventListener('click', () => { 
     const m = document.getElementById('dropdown-menu'); 
-    if (m) {
-        m.style.display = 'none'; 
-    }
+    if (m) m.style.display = 'none'; 
 });
 
 function exportData() { 
@@ -2811,14 +2540,8 @@ function exportData() {
 
 function toggleSidebar() { 
     const h = document.body.classList.toggle('sidebar-hidden'); 
-    
-    if (h) {
-        localStorage.setItem('sidebarState', 'closed');
-        document.querySelector('#mobile-toggle-btn span').innerText = '▶';
-    } else {
-        localStorage.setItem('sidebarState', 'open');
-        document.querySelector('#mobile-toggle-btn span').innerText = '◀';
-    }
+    localStorage.setItem('sidebarState', h ? 'closed' : 'open'); 
+    document.querySelector('#mobile-toggle-btn span').innerText = h ? '▶' : '◀';
 }
 
 async function uploadImage() { 
@@ -2828,38 +2551,22 @@ async function uploadImage() {
     
     input.onchange = async (e) => { 
         const file = e.target.files[0]; 
-        
-        if (!file) {
-            return; 
-        }
-        
+        if (!file) return; 
         const fd = new FormData(); 
         fd.append('image', file); 
         
         try { 
-            const res = await fetch('/api/upload', { 
-                method: 'POST', 
-                body: fd 
-            }); 
-            
+            const res = await fetch('/api/upload', { method: 'POST', body: fd }); 
             const data = await res.json(); 
-            
             if(data.filename) {
                 wrapSelection(`[img:${data.filename}]`, '', ''); 
-            } else { 
-                showModal("Fehler", "Ungültig.", [
-                    { 
-                        label: "OK", 
-                        class: "btn-cancel", 
-                        action: () => {} 
-                    }
-                ]); 
-            } 
-        } catch(err) {
-            console.error(err);
+            } else {
+                showModal("Fehler", "Ungültig.", [{ label: "OK", class: "btn-cancel", action: () => {} }]); 
+            }
+        } catch(err) { 
+            console.error(err); 
         } 
     }; 
-    
     input.click(); 
 }
 
@@ -2869,19 +2576,9 @@ async function uploadGenericFile() {
     
     input.onchange = async (e) => { 
         const file = e.target.files[0]; 
-        
-        if (!file) {
-            return; 
-        }
-        
+        if (!file) return; 
         if (file.size > 20 * 1024 * 1024) { 
-            showModal("Zu groß", "Max. 20 MB.", [
-                { 
-                    label: "OK", 
-                    class: "btn-cancel", 
-                    action: () => {} 
-                }
-            ]); 
+            showModal("Zu groß", "Max. 20 MB.", [{ label: "OK", class: "btn-cancel", action: () => {} }]); 
             return; 
         }
         
@@ -2889,31 +2586,20 @@ async function uploadGenericFile() {
         fd.append('file', file); 
         
         try { 
-            const res = await fetch('/api/upload', { 
-                method: 'POST', 
-                body: fd 
-            }); 
-            
+            const res = await fetch('/api/upload', { method: 'POST', body: fd }); 
             const data = await res.json(); 
-            
             if(data.filename) { 
-                let txt = "";
-                if (file.type.startsWith('image/')) {
-                    txt = `[img:${data.filename}]`;
-                } else {
-                    txt = `[file:${data.filename}|${data.original}]`;
-                }
-                
+                let txt = file.type.startsWith('image/') ? `[img:${data.filename}]` : `[file:${data.filename}|${data.original}]`;
+                const ta = document.getElementById('node-text');
                 const s = ta.selectionStart; 
                 ta.value = ta.value.substring(0, s) + txt + ta.value.substring(ta.selectionEnd); 
                 ta.focus(); 
                 ta.setSelectionRange(s + txt.length, s + txt.length); 
             } 
-        } catch(err) {
-            console.error(err);
+        } catch(err) { 
+            console.error(err); 
         } 
     }; 
-    
     input.click(); 
 }
 
@@ -2929,61 +2615,38 @@ function closeLightbox() {
 
 function getAllNotesFlat(nodes, path="") { 
     let res = []; 
+    if (!Array.isArray(nodes)) return res;
     
     nodes.forEach(n => { 
-        let currentPath = "";
-        if (path) {
-            currentPath = path + " / " + n.title;
-        } else {
-            currentPath = n.title;
-        }
-        
-        res.push({
-            id: n.id, 
-            title: n.title, 
-            path: currentPath
-        }); 
-        
+        let currentPath = path ? path + " / " + n.title : n.title;
+        res.push({ id: n.id, title: n.title, path: currentPath }); 
         if(n.children) {
             res = res.concat(getAllNotesFlat(n.children, currentPath)); 
         }
     }); 
-    
     return res; 
 }
 
 function initMentionSystem() {
-    const ta = document.getElementById('node-text'); 
+    const ta = document.getElementById('node-text');
     const dropdown = document.getElementById('mention-dropdown');
+    if(!ta || !dropdown) return;
     
     ta.addEventListener('input', function() {
-        let cursor = ta.selectionStart; 
-        let textBefore = ta.value.substring(0, cursor); 
-        let match = textBefore.match(/(?:^|\s)@([^\n]{0,30})$/);
-        
+        let match = ta.value.substring(0, ta.selectionStart).match(/(?:^|\s)@([^\n]{0,30})$/);
         if (match) {
-            let search = match[1].toLowerCase(); 
-            let allNotes = getAllNotesFlat(fullTree.content).filter(n => n.id !== activeId);
-            
-            let filtered = allNotes.filter(n => {
-                return n.title.toLowerCase().includes(search) || n.path.toLowerCase().includes(search);
-            });
+            let search = match[1].toLowerCase();
+            let filtered = getAllNotesFlat(fullTree.content).filter(n => n.id !== activeId && (n.title.toLowerCase().includes(search) || n.path.toLowerCase().includes(search)));
             
             if (filtered.length > 0) { 
                 dropdown.innerHTML = ''; 
-                
                 filtered.forEach(n => { 
                     let div = document.createElement('div'); 
                     div.className = 'mention-item'; 
                     div.innerHTML = `<strong>${n.title}</strong><span class="mention-path">${n.path}</span>`; 
-                    
-                    div.onclick = () => {
-                        insertMention(n.id, n.title, match[1].length + 1); 
-                    };
-                    
+                    div.onclick = () => insertMention(n.id, n.title, match[1].length + 1); 
                     dropdown.appendChild(div); 
                 }); 
-                
                 dropdown.style.display = 'block'; 
             } else {
                 dropdown.style.display = 'none'; 
@@ -2992,18 +2655,15 @@ function initMentionSystem() {
             dropdown.style.display = 'none'; 
         }
     });
-    
     document.addEventListener('click', (e) => { 
-        if(e.target !== ta && !dropdown.contains(e.target)) {
-            dropdown.style.display = 'none'; 
-        }
+        if(e.target !== ta && !dropdown.contains(e.target)) dropdown.style.display = 'none'; 
     });
 }
 
 function insertMention(id, title, replaceLength) { 
-    let ta = document.getElementById('node-text'); 
-    let cursor = ta.selectionStart; 
-    let start = cursor - replaceLength; 
+    let ta = document.getElementById('node-text');
+    let cursor = ta.selectionStart;
+    let start = cursor - replaceLength;
     let linkCode = `[note:${id}|${title}] `; 
     
     ta.value = ta.value.substring(0, start) + linkCode + ta.value.substring(cursor); 
@@ -3013,32 +2673,66 @@ function insertMention(id, title, replaceLength) {
 }
 
 function triggerMentionButton() { 
-    let ta = document.getElementById('node-text'); 
+    let ta = document.getElementById('node-text');
     let s = ta.selectionStart; 
-    
-    let prefix = "";
-    if (s === 0 || ta.value.charAt(s - 1) === '\n' || ta.value.charAt(s - 1) === ' ') {
-        prefix = '@';
-    } else {
-        prefix = ' @';
-    }
-    
+    let prefix = (s === 0 || ta.value.charAt(s - 1) === '\n' || ta.value.charAt(s - 1) === ' ') ? '@' : ' @';
     ta.value = ta.value.substring(0, s) + prefix + ta.value.substring(ta.selectionEnd); 
     ta.focus(); 
     ta.setSelectionRange(s + prefix.length, s + prefix.length); 
     ta.dispatchEvent(new Event('input')); 
 }
 
-let sketchCanvas;
-let sketchCtx;
-let isDrawing = false;
-let sketchStrokes = [];
-let currentStroke = null; 
-let sketchColor = '#000000';
-let sketchWidth = 8;
-let sketchMode = 'pen';
-let sketchBg = 'white';
-let activeSketchId = null;
+let sketchCanvas, sketchCtx, isDrawing = false, sketchStrokes = [], currentStroke = null, sketchColor = '#000000', sketchWidth = 8, sketchMode = 'pen', sketchBg = 'white', activeSketchId = null;
+
+async function openSketch(id = null) {
+    const isEdit = document.getElementById('edit-mode').style.display === 'block';
+    if (!isEdit && !await acquireLock(activeId)) { 
+        showModal("Gesperrt", "Skizze kann nicht geöffnet werden.", [{ label: "OK", class: "btn-cancel", action: () => {} }]); 
+        return; 
+    }
+    document.getElementById('sketch-modal').style.display = 'flex';
+    if(!sketchCanvas) initSketcher();
+    
+    activeSketchId = id; 
+    sketchStrokes = [];
+    if (id) { 
+        try { 
+            const res = await fetch(`/api/sketch/${id}`); 
+            if(res.ok) { 
+                const data = await res.json(); 
+                sketchBg = data.bg || 'white'; 
+                document.getElementById('sketch-bg-select').value = sketchBg; 
+                sketchStrokes = data.strokes || []; 
+            } 
+        } catch(e) { console.error(e); } 
+    } else { 
+        sketchBg = document.getElementById('sketch-bg-select').value; 
+    }
+    setSketchMode('pen'); 
+    redrawSketch();
+}
+
+function closeSketch() { 
+    document.getElementById('sketch-modal').style.display = 'none'; 
+    if (document.getElementById('edit-mode').style.display !== 'block') releaseLock();
+}
+
+async function saveSketch() {
+    const payload = { id: activeSketchId, bg: sketchBg, strokes: sketchStrokes, image: sketchCanvas.toDataURL("image/png") };
+    const res = await fetch('/api/sketch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); 
+    const data = await res.json();
+    
+    if (!activeSketchId && data.id) wrapSelection(`[sketch:${data.id}]`, '', '');
+    document.getElementById('sketch-modal').style.display = 'none';
+    const ta = document.getElementById('node-text'); 
+    if (ta) ta.value = ta.value.replace(`[sketch:${data.id}]`, `[sketch:${data.id}] `).trim();
+    
+    document.querySelectorAll('.sketch-img').forEach(img => { 
+        if (img.src.includes(data.id)) img.src = `/uploads/sketch_${data.id}.png?v=` + Date.now();
+    });
+
+    if (document.getElementById('edit-mode').style.display !== 'block') releaseLock();
+}
 
 function initSketcher() {
     sketchCanvas = document.getElementById('sketch-canvas'); 
@@ -3047,55 +2741,29 @@ function initSketcher() {
     sketchCanvas.height = 900;
     
     const getPos = (e) => { 
-        const r = sketchCanvas.getBoundingClientRect(); 
-        const scaleX = sketchCanvas.width / r.width; 
+        const r = sketchCanvas.getBoundingClientRect();
+        const scaleX = sketchCanvas.width / r.width;
         const scaleY = sketchCanvas.height / r.height; 
-        let cx = e.clientX;
-        let cy = e.clientY; 
-        
-        if(e.touches && e.touches.length > 0) { 
-            cx = e.touches[0].clientX; 
-            cy = e.touches[0].clientY; 
-        } 
-        
-        return { 
-            x: (cx - r.left) * scaleX, 
-            y: (cy - r.top) * scaleY 
-        }; 
+        let cx = e.touches ? e.touches[0].clientX : e.clientX;
+        let cy = e.touches ? e.touches[0].clientY : e.clientY; 
+        return { x: (cx - r.left) * scaleX, y: (cy - r.top) * scaleY }; 
     };
     
     const startDraw = (e) => { 
         e.preventDefault(); 
         isDrawing = true; 
-        
-        let strokeColor = sketchColor;
-        if (sketchMode === 'eraser') {
-            strokeColor = sketchBg;
-        }
-        
-        currentStroke = { 
-            color: strokeColor, 
-            width: sketchWidth, 
-            mode: sketchMode, 
-            points: [getPos(e)] 
-        }; 
-        
+        currentStroke = { color: sketchMode === 'eraser' ? sketchBg : sketchColor, width: sketchWidth, mode: sketchMode, points: [getPos(e)] }; 
         sketchStrokes.push(currentStroke); 
     };
     
     const draw = (e) => { 
-        if (!isDrawing) {
-            return; 
-        }
-        
+        if (!isDrawing) return; 
         e.preventDefault(); 
         currentStroke.points.push(getPos(e)); 
         redrawSketch(); 
     };
     
-    const endDraw = () => { 
-        isDrawing = false; 
-    };
+    const endDraw = () => { isDrawing = false; };
     
     sketchCanvas.addEventListener('mousedown', startDraw); 
     sketchCanvas.addEventListener('mousemove', draw); 
@@ -3113,31 +2781,20 @@ function redrawSketch() {
     sketchCtx.lineJoin = 'round'; 
     
     for (let s of sketchStrokes) { 
-        if (s.points.length < 2) {
-            continue;
-        }
-        
-        if (s.mode === 'highlighter') {
-            sketchCtx.globalAlpha = 0.4;
-        } else {
-            sketchCtx.globalAlpha = 1.0;
-        }
-        
+        if (s.points.length < 2) continue;
+        sketchCtx.globalAlpha = s.mode === 'highlighter' ? 0.4 : 1.0;
         sketchCtx.beginPath(); 
         sketchCtx.strokeStyle = s.color; 
         sketchCtx.lineWidth = s.width; 
         sketchCtx.moveTo(s.points[0].x, s.points[0].y); 
-        
         for (let i = 1; i < s.points.length - 1; i++) { 
-            let xc = (s.points[i].x + s.points[i + 1].x) / 2; 
+            let xc = (s.points[i].x + s.points[i + 1].x) / 2;
             let yc = (s.points[i].y + s.points[i + 1].y) / 2; 
             sketchCtx.quadraticCurveTo(s.points[i].x, s.points[i].y, xc, yc); 
         } 
-        
         sketchCtx.lineTo(s.points[s.points.length - 1].x, s.points[s.points.length - 1].y); 
         sketchCtx.stroke(); 
     } 
-    
     sketchCtx.globalAlpha = 1.0; 
 }
 
@@ -3157,22 +2814,94 @@ function setSketchMode(mode) {
 
 function setSketchBg(bg) { 
     sketchBg = bg; 
-    
     sketchStrokes.forEach(s => { 
-        if (s.mode === 'eraser') {
-            s.color = bg; 
-        } else if (!s.mode && (s.color === 'white' || s.color === 'black')) { 
-            if (s.color !== bg && sketchMode === 'eraser') {
-                s.color = bg; 
-            }
-        } 
+        if (s.mode === 'eraser') s.color = bg; 
+        else if (!s.mode && (s.color === 'white' || s.color === 'black')) {
+            if (s.color !== bg && sketchMode === 'eraser') s.color = bg; 
+        }
     }); 
-    
     redrawSketch(); 
+}
+
+function applyAccentColor(hex) { 
+    document.documentElement.style.setProperty('--accent', hex); 
+    const r = parseInt(hex.slice(1,3), 16), g = parseInt(hex.slice(3,5), 16), b = parseInt(hex.slice(5,7), 16); 
+    document.documentElement.style.setProperty('--accent-rgb', `${r}, ${g}, ${b}`); 
+    const p = document.getElementById('accent-color-picker'); 
+    if(p) p.value = hex; 
+}
+
+async function updateGlobalAccent(hex) { 
+    await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accent: hex }) }); 
+    fullTree.settings.accent = hex; 
+    applyAccentColor(hex); 
+}
+
+async function toggleTheme() { 
+    const newTheme = document.body.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'; 
+    await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ theme: newTheme }) }); 
+    fullTree.settings.theme = newTheme; 
+    document.body.setAttribute('data-theme', newTheme); 
+}
+
+function updateMenuUI() {
+    const pwdBtn = document.getElementById('pwd-toggle-text'); 
+    const logoutBtn = document.getElementById('logout-btn'); 
+    const whToggleText = document.getElementById('webhook-toggle-text');
+    if(pwdBtn) pwdBtn.innerText = fullTree.settings.password_enabled ? '🔓 Passwortschutz aus' : '🔒 Passwortschutz an';
+    if(logoutBtn) logoutBtn.style.display = fullTree.settings.password_enabled ? 'flex' : 'none';
+    if(whToggleText) whToggleText.innerText = fullTree.settings.webhook_enabled ? '🔔 Webhook (Aktiviert)' : '🔕 Webhook (Deaktiviert)';
+}
+
+async function addItem(parentId) { 
+    const newId = Date.now().toString() + Math.random().toString(36).substring(2, 6); 
+    const payload = { id: newId, parent_id: parentId, title: 'Neu', text: '' };
+    await fetch('/api/notes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    if (parentId) { collapsedIds.delete(parentId); saveCollapsedToLocal(); }
+    await checkAndReloadData(); 
+    selectNode(newId); 
+    enableEdit(); 
+}
+
+function deleteItem(id) { 
+    showModal("Löschen", "Sicher?", [ 
+        { label: "Löschen", class: "btn-discard", action: async () => { 
+            await fetch(`/api/notes/${id}`, { method: 'DELETE' }); 
+            if (activeId === id) { activeId = null; document.getElementById('edit-area').style.display = 'none'; } 
+            await checkAndReloadData(); 
+        } }, 
+        { label: "Abbruch", class: "btn-cancel", action: () => {} } 
+    ]); 
+}
+
+function findNode(items, id) { 
+    if (!Array.isArray(items)) return null;
+    for (let i of items) { 
+        if (i.id === id) return i; 
+        if (i.children) { 
+            const f = findNode(i.children, id); 
+            if (f) return f; 
+        } 
+    } 
+    return null; 
+}
+
+function getPath(items, id, path = []) { 
+    if (!Array.isArray(items)) return null;
+    for (let i of items) { 
+        const n = [...path, {title: i.title, id: i.id}]; 
+        if (i.id === id) return n; 
+        if (i.children) { 
+            const r = getPath(i.children, id, n); 
+            if (r) return r; 
+        } 
+    } 
+    return null; 
 }
 
 function initDragAndDrop() { 
     const ta = document.getElementById('node-text'); 
+    if (!ta) return;
     
     ta.addEventListener('dragover', e => { 
         e.preventDefault(); 
@@ -3190,66 +2919,41 @@ function initDragAndDrop() {
         
         if(e.dataTransfer.files && e.dataTransfer.files.length > 0) { 
             const f = e.dataTransfer.files[0]; 
-            
-            if (f.size > 20 * 1024 * 1024) {
-                return;
-            }
+            if (f.size > 20 * 1024 * 1024) return;
             
             const fd = new FormData(); 
             fd.append('file', f); 
             
             try { 
-                const res = await fetch('/api/upload', { 
-                    method: 'POST', 
-                    body: fd 
-                }); 
-                
+                const res = await fetch('/api/upload', { method: 'POST', body: fd }); 
                 const data = await res.json(); 
-                
                 if(data.filename) { 
-                    let txt = "";
-                    if (f.type.startsWith('image/')) {
-                        txt = `[img:${data.filename}]`;
-                    } else {
-                        txt = `[file:${data.filename}|${data.original}]`;
-                    }
-                    
+                    let txt = f.type.startsWith('image/') ? `[img:${data.filename}]` : `[file:${data.filename}|${data.original}]`;
                     const s = ta.selectionStart; 
                     ta.value = ta.value.substring(0, s) + txt + ta.value.substring(ta.selectionEnd); 
                     ta.focus(); 
                     ta.setSelectionRange(s + txt.length, s + txt.length); 
                 } 
-            } catch(err) {
-                console.error(err);
-            } 
+            } catch(err) { console.error(err); } 
         } 
     }); 
 }
 
 document.addEventListener('keydown', function(e) {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { 
-        if (document.getElementById('edit-mode').style.display === 'block') { 
+        if (document.getElementById('edit-mode') && document.getElementById('edit-mode').style.display === 'block') { 
             e.preventDefault(); 
             saveChanges(); 
         } 
     }
-    
     if (e.key === 'Escape') {
-        if (document.getElementById('lightbox').style.display === 'flex') {
-            closeLightbox();
-        } else if (document.getElementById('sketch-modal').style.display === 'flex') {
-            closeSketch();
-        } else if (document.getElementById('custom-modal').style.display === 'flex') {
-            document.getElementById('custom-modal').style.display = 'none';
-        } else if (document.getElementById('reminder-modal').style.display === 'flex') {
-            document.getElementById('reminder-modal').style.display = 'none';
-        } else if (document.getElementById('webhook-modal').style.display === 'flex') {
-            document.getElementById('webhook-modal').style.display = 'none';
-        } else if (document.getElementById('restore-modal').style.display === 'flex') {
-            document.getElementById('restore-modal').style.display = 'none';
-        } else if (document.getElementById('edit-mode').style.display === 'block') {
-            cancelEdit();
-        }
+        if (document.getElementById('lightbox') && document.getElementById('lightbox').style.display === 'flex') closeLightbox();
+        else if (document.getElementById('sketch-modal') && document.getElementById('sketch-modal').style.display === 'flex') closeSketch();
+        else if (document.getElementById('custom-modal') && document.getElementById('custom-modal').style.display === 'flex') document.getElementById('custom-modal').style.display = 'none';
+        else if (document.getElementById('reminder-modal') && document.getElementById('reminder-modal').style.display === 'flex') document.getElementById('reminder-modal').style.display = 'none';
+        else if (document.getElementById('webhook-modal') && document.getElementById('webhook-modal').style.display === 'flex') document.getElementById('webhook-modal').style.display = 'none';
+        else if (document.getElementById('restore-modal') && document.getElementById('restore-modal').style.display === 'flex') document.getElementById('restore-modal').style.display = 'none';
+        else if (document.getElementById('edit-mode') && document.getElementById('edit-mode').style.display === 'block') cancelEdit();
     }
 });
 
@@ -3269,7 +2973,6 @@ async function openRestoreModal() {
             select.innerHTML = '<option value="">Keine automatischen Backups gefunden</option>';
         } else {
             select.innerHTML = '<option value="">-- Auswählen --</option>';
-            
             backups.forEach(b => {
                 const opt = document.createElement('option');
                 opt.value = b.filename;
@@ -3277,8 +2980,8 @@ async function openRestoreModal() {
                 select.appendChild(opt);
             });
         }
-    } catch(e) {
-        select.innerHTML = '<option value="">Fehler beim Laden</option>';
+    } catch(e) { 
+        select.innerHTML = '<option value="">Fehler beim Laden</option>'; 
     }
 }
 
@@ -3293,63 +2996,44 @@ async function executeRestore() {
 
     if (!file && !serverFile) {
         statusDiv.innerText = "Bitte wähle ein Backup aus der Liste oder lade eine Datei hoch!";
-        statusDiv.style.color = '#e74c3c';
-        statusDiv.style.background = 'rgba(231, 76, 60, 0.1)';
-        statusDiv.style.display = 'block';
+        statusDiv.style.color = '#e74c3c'; 
+        statusDiv.style.background = 'rgba(231, 76, 60, 0.1)'; 
+        statusDiv.style.display = 'block'; 
         return;
     }
 
     const fd = new FormData();
-    
-    if (file) {
-        fd.append('file', file);
-    } else {
-        fd.append('server_file', serverFile);
-    }
+    if (file) fd.append('file', file); 
+    else fd.append('server_file', serverFile);
 
-    btn.disabled = true;
-    btn.innerText = "Verifiziere & Lade...";
+    btn.disabled = true; 
+    btn.innerText = "Verifiziere & Lade..."; 
     statusDiv.style.display = 'none';
 
     try {
-        const res = await fetch('/api/restore', {
-            method: 'POST',
-            body: fd
-        });
-        
+        const res = await fetch('/api/restore', { method: 'POST', body: fd });
         const data = await res.json();
 
         if (data.status === 'success') {
-            statusDiv.style.color = '#27ae60';
+            statusDiv.style.color = '#27ae60'; 
             statusDiv.style.background = 'rgba(39, 174, 96, 0.1)';
-            statusDiv.innerText = "Erfolgreich! Die Seite wird nun neu geladen...";
+            statusDiv.innerText = "Erfolgreich! Die Seite wird nun neu geladen..."; 
             statusDiv.style.display = 'block';
-            
-            setTimeout(() => {
-                window.location.reload();
-            }, 2000);
+            setTimeout(() => window.location.reload(), 2000);
         } else {
-            statusDiv.style.color = '#e74c3c';
+            statusDiv.style.color = '#e74c3c'; 
             statusDiv.style.background = 'rgba(231, 76, 60, 0.1)';
-            
-            let errorText = data.error;
-            if (!errorText) {
-                errorText = "Unbekannter Serverfehler";
-            }
-            
-            statusDiv.innerText = "Fehler: " + errorText;
+            statusDiv.innerText = "Fehler: " + (data.error || "Unbekannter Serverfehler"); 
             statusDiv.style.display = 'block';
-            
-            btn.disabled = false;
+            btn.disabled = false; 
             btn.innerText = "Verifizieren & Wiederherstellen";
         }
     } catch (e) {
-        statusDiv.style.color = '#e74c3c';
+        statusDiv.style.color = '#e74c3c'; 
         statusDiv.style.background = 'rgba(231, 76, 60, 0.1)';
-        statusDiv.innerText = "Netzwerkfehler beim Wiederherstellen.";
+        statusDiv.innerText = "Netzwerkfehler beim Wiederherstellen."; 
         statusDiv.style.display = 'block';
-        
-        btn.disabled = false;
+        btn.disabled = false; 
         btn.innerText = "Verifizieren & Wiederherstellen";
     }
 }
