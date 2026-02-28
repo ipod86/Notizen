@@ -2,31 +2,28 @@
 
 # Root-Rechte prüfen
 if [ "$EUID" -ne 0 ]; then
-  echo "FEHLER: Bitte führe dieses Skript als Root aus!"
+  echo "FEHLER: Bitte führe dieses Skript als Root (z.B. sudo) aus!"
   exit 1
 fi
 
 # 1. Port & Einstellungen
 echo "Welcher Port soll für das Notiz-Tool genutzt werden? (Standard: 8080)"
 read -p "Port: " USER_PORT
-if [ -z "$USER_PORT" ]; then 
-    USER_PORT=8080
-fi
+if [ -z "$USER_PORT" ]; then USER_PORT=8080; fi
 
 echo "Soll ein nächtlicher Cleanup-Cronjob (03:00 Uhr) angelegt werden? (Y/n)"
 read -p "Cleanup-Cronjob: " CRON_CONFIRM
-if [ -z "$CRON_CONFIRM" ]; then 
-    CRON_CONFIRM="y"
-fi
+if [ -z "$CRON_CONFIRM" ]; then CRON_CONFIRM="y"; fi
 
 echo "Soll ein tägliches SQLite-Voll-Backup (04:00 Uhr) eingerichtet werden? (Y/n)"
 read -p "Backup-Cronjob: " BACKUP_CONFIRM
-if [ -z "$BACKUP_CONFIRM" ]; then 
-    BACKUP_CONFIRM="y"
-fi
+if [ -z "$BACKUP_CONFIRM" ]; then BACKUP_CONFIRM="y"; fi
 
 INSTALL_DIR="/opt/notiz-tool"
 SERVICE_NAME="notizen.service"
+
+echo "--- Stoppe alten Service (falls aktiv) ---"
+systemctl stop $SERVICE_NAME 2>/dev/null
 
 echo "--- Starte V2 SQLite Setup in $INSTALL_DIR auf Port $USER_PORT ---"
 
@@ -46,21 +43,19 @@ $INSTALL_DIR/venv/bin/python3 -m pip install flask werkzeug requests
 cat << 'EOF' > $INSTALL_DIR/app.py
 from flask import Flask, render_template, request, jsonify, send_from_directory, session, redirect, url_for, send_file
 from werkzeug.security import generate_password_hash, check_password_hash
-import json
-import os
-import uuid
-import tarfile
-import io
-import time
-import base64
-import requests
-import urllib.parse
-import threading
-import sqlite3
+import json, os, uuid, tarfile, io, time, base64, requests, urllib.parse, threading, sqlite3
 from datetime import datetime
 
 app = Flask(__name__)
-app.secret_key = os.urandom(24)
+
+# Fester Secret Key (damit Sessions nach Server-Neustart gültig bleiben)
+SECRET_FILE = 'secret.key'
+if not os.path.exists(SECRET_FILE):
+    with open(SECRET_FILE, 'wb') as f:
+        f.write(os.urandom(24))
+with open(SECRET_FILE, 'rb') as f:
+    app.secret_key = f.read()
+
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 
 DB_FILE = 'data.db'
@@ -77,12 +72,7 @@ def get_db():
 
 def init_db():
     with get_db() as conn:
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY, 
-                value TEXT
-            )
-        ''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
         conn.execute('''
             CREATE TABLE IF NOT EXISTS notes (
                 id TEXT PRIMARY KEY,
@@ -96,116 +86,76 @@ def init_db():
             )
         ''')
         
-        # Initiale Settings setzen, falls DB leer ist
         if not conn.execute("SELECT key FROM settings WHERE key='theme'").fetchone():
             conn.execute("INSERT INTO settings (key, value) VALUES ('theme', 'dark')")
             conn.execute("INSERT INTO settings (key, value) VALUES ('accent', '#27ae60')")
             conn.execute("INSERT INTO settings (key, value) VALUES ('password_enabled', 'false')")
             conn.execute("INSERT INTO settings (key, value) VALUES ('tree_last_modified', '0')")
             
-        # Trigger für globale Struktur-Updates (benachrichtigt Clients, wenn sich die Struktur ändert)
-        conn.execute('''
-            CREATE TRIGGER IF NOT EXISTS update_tree_mod 
-            AFTER UPDATE OF parent_id, sort_order, title, reminder ON notes 
-            BEGIN 
-                UPDATE settings SET value = strftime('%s', 'now') WHERE key = 'tree_last_modified'; 
-            END;
-        ''')
-        conn.execute('''
-            CREATE TRIGGER IF NOT EXISTS insert_tree_mod 
-            AFTER INSERT ON notes 
-            BEGIN 
-                UPDATE settings SET value = strftime('%s', 'now') WHERE key = 'tree_last_modified'; 
-            END;
-        ''')
-        conn.execute('''
-            CREATE TRIGGER IF NOT EXISTS delete_tree_mod 
-            AFTER DELETE ON notes 
-            BEGIN 
-                UPDATE settings SET value = strftime('%s', 'now') WHERE key = 'tree_last_modified'; 
-            END;
-        ''')
+        conn.execute('''CREATE TRIGGER IF NOT EXISTS update_tree_mod AFTER UPDATE OF parent_id, sort_order, title, reminder ON notes 
+                        BEGIN UPDATE settings SET value = strftime('%s', 'now') WHERE key = 'tree_last_modified'; END;''')
+        conn.execute('''CREATE TRIGGER IF NOT EXISTS insert_tree_mod AFTER INSERT ON notes 
+                        BEGIN UPDATE settings SET value = strftime('%s', 'now') WHERE key = 'tree_last_modified'; END;''')
+        conn.execute('''CREATE TRIGGER IF NOT EXISTS delete_tree_mod AFTER DELETE ON notes 
+                        BEGIN UPDATE settings SET value = strftime('%s', 'now') WHERE key = 'tree_last_modified'; END;''')
 
-    # Einmalige Migration von JSON zu SQLite
     if os.path.exists(OLD_JSON):
         print("[MIGRATION] Konvertiere data.json zu SQLite...", flush=True)
         try:
-            with open(OLD_JSON, 'r') as f: 
-                data = json.load(f)
-                
+            with open(OLD_JSON, 'r') as f: data = json.load(f)
             with get_db() as conn:
-                settings = data.get('settings', {})
-                for k, v in settings.items():
+                for k, v in data.get('settings', {}).items():
                     val_str = str(v).lower() if isinstance(v, bool) else str(v)
                     conn.execute("REPLACE INTO settings (key, value) VALUES (?, ?)", (k, val_str))
                 
                 def import_nodes(nodes, parent_id=None):
                     for idx, n in enumerate(nodes):
-                        conn.execute('''
-                            INSERT OR IGNORE INTO notes (id, parent_id, sort_order, title, text, reminder) 
-                            VALUES (?, ?, ?, ?, ?, ?)
-                        ''', (n['id'], parent_id, idx, n.get('title', 'Neu'), n.get('text', ''), n.get('reminder')))
-                        
-                        if 'children' in n:
-                            import_nodes(n['children'], n['id'])
+                        conn.execute("INSERT OR IGNORE INTO notes (id, parent_id, sort_order, title, text, reminder) VALUES (?, ?, ?, ?, ?, ?)", 
+                                     (n['id'], parent_id, idx, n.get('title', 'Neu'), n.get('text', ''), n.get('reminder')))
+                        if 'children' in n: import_nodes(n['children'], n['id'])
                 
                 import_nodes(data.get('content', []))
                 conn.execute("UPDATE settings SET value = strftime('%s', 'now') WHERE key = 'tree_last_modified'")
             
             os.rename(OLD_JSON, OLD_JSON + '.bak')
-            print("[MIGRATION] Erfolgreich! data.json umbenannt in data.json.bak", flush=True)
-        except Exception as e:
-            print(f"[MIGRATION] Fehler bei der Konvertierung: {e}", flush=True)
+            print("[MIGRATION] Erfolgreich!", flush=True)
+        except Exception as e: print(f"[MIGRATION] Fehler: {e}", flush=True)
 
-# Webhook-Wächter (Arbeitet jetzt auf SQLite Basis)
 def webhook_worker():
     sent_reminders = set()
     while True:
         try:
             with get_db() as conn:
-                webhook_enabled = conn.execute("SELECT value FROM settings WHERE key='webhook_enabled'").fetchone()
-                
-                if webhook_enabled and webhook_enabled['value'] == 'true':
-                    url_row = conn.execute("SELECT value FROM settings WHERE key='webhook_url'").fetchone()
-                    method_row = conn.execute("SELECT value FROM settings WHERE key='webhook_method'").fetchone()
-                    payload_row = conn.execute("SELECT value FROM settings WHERE key='webhook_payload'").fetchone()
+                en = conn.execute("SELECT value FROM settings WHERE key='webhook_enabled'").fetchone()
+                if en and en['value'] == 'true':
+                    url_r = conn.execute("SELECT value FROM settings WHERE key='webhook_url'").fetchone()
+                    method_r = conn.execute("SELECT value FROM settings WHERE key='webhook_method'").fetchone()
+                    payload_r = conn.execute("SELECT value FROM settings WHERE key='webhook_payload'").fetchone()
                     
-                    url = url_row['value'] if url_row else ''
-                    method = method_row['value'] if method_row else 'GET'
-                    payload = payload_row['value'] if payload_row else ''
-                    
+                    url = url_r['value'] if url_r else ''
+                    method = method_r['value'] if method_r else 'GET'
+                    payload = payload_r['value'] if payload_r else ''
                     now = datetime.now()
-                    reminders = conn.execute("SELECT id, title, reminder FROM notes WHERE reminder IS NOT NULL AND reminder != ''").fetchall()
                     
-                    for row in reminders:
+                    reminders = conn.execute("SELECT id, title, reminder FROM notes WHERE reminder IS NOT NULL AND reminder != ''").fetchall()
+                    for r in reminders:
                         try:
-                            r_str = row['reminder'].replace('Z', '')
-                            if len(r_str) == 10:
-                                r_dt = datetime.strptime(r_str, '%Y-%m-%d')
-                            else:
-                                r_dt = datetime.fromisoformat(r_str)
-                                
-                            key = f"{row['id']}_{r_str}"
-                            
+                            r_str = r['reminder'].replace('Z', '')
+                            r_dt = datetime.strptime(r_str, '%Y-%m-%d') if len(r_str) == 10 else datetime.fromisoformat(r_str)
+                            key = f"{r['id']}_{r_str}"
                             if r_dt <= now and key not in sent_reminders:
                                 if url:
-                                    safe_title = urllib.parse.quote(row['title'])
-                                    safe_time = urllib.parse.quote(r_str)
-                                    final_url = url.replace('{{TITLE}}', safe_title).replace('{{TIME}}', safe_time)
-                                    
-                                    if method == 'GET':
-                                        requests.get(final_url, timeout=10)
+                                    su = urllib.parse.quote(r['title'])
+                                    st = urllib.parse.quote(r_str)
+                                    final_url = url.replace('{{TITLE}}', su).replace('{{TIME}}', st)
+                                    if method == 'GET': requests.get(final_url, timeout=10)
                                     else:
-                                        safe_title_json = row['title'].replace('"', '\\"').replace('\n', ' ')
-                                        post_data = payload.replace('{{TITLE}}', safe_title_json).replace('{{TIME}}', r_str)
-                                        requests.post(final_url, data=post_data.encode('utf-8'), headers={'Content-Type': 'application/json'}, timeout=10)
-                                        
+                                        sj = r['title'].replace('"', '\\"').replace('\n', ' ')
+                                        pd = payload.replace('{{TITLE}}', sj).replace('{{TIME}}', r_str)
+                                        requests.post(final_url, data=pd.encode('utf-8'), headers={'Content-Type': 'application/json'}, timeout=10)
                                 sent_reminders.add(key)
-                        except Exception as e:
-                            pass
-        except Exception as e:
-            pass
-        
+                        except: pass
+        except: pass
         time.sleep(30)
 
 init_db()
@@ -225,36 +175,28 @@ def get_settings():
         sets = {}
         for r in rows:
             v = r['value']
-            if v == 'true': 
-                v = True
-            elif v == 'false': 
-                v = False
+            if v == 'true': v = True
+            elif v == 'false': v = False
             sets[r['key']] = v
         return sets
 
 @app.before_request
 def require_login():
-    if request.endpoint in ['login', 'static']: 
-        return
-        
+    if request.endpoint in ['login', 'static']: return
     sets = get_settings()
     if sets.get('password_enabled') and not session.get('logged_in'):
-        if request.path.startswith('/api/'): 
-            return jsonify({"error": "Unauthorized"}), 401
+        if request.path.startswith('/api/'): return jsonify({"error": "Unauthorized"}), 401
         return redirect(url_for('login'))
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     sets = get_settings()
-    if not sets.get('password_enabled'): 
-        return redirect(url_for('index'))
-        
+    if not sets.get('password_enabled'): return redirect(url_for('index'))
     if request.method == 'POST':
         if check_password_hash(sets.get('password_hash', ''), request.form.get('password')):
             session['logged_in'] = True
             return redirect(url_for('index'))
         return render_template('login.html', theme=sets.get('theme', 'dark'), accent=sets.get('accent', '#27ae60'), error="Falsches Passwort", v=str(time.time()))
-        
     return render_template('login.html', theme=sets.get('theme', 'dark'), accent=sets.get('accent', '#27ae60'), v=str(time.time()))
 
 @app.route('/logout')
@@ -266,81 +208,58 @@ def logout():
 def index():
     return render_template('index.html', v=str(time.time()))
 
-# --- API ENDPUNKTE FÜR LAZY LOADING & PER-NOTE-LOCKING ---
-
 @app.route('/api/tree', methods=['GET'])
 def get_tree():
-    """Lädt nur das Skelett (ohne Texte) für das Frontend (Lazy Loading)"""
     with get_db() as conn:
         rows = conn.execute("SELECT id, parent_id, sort_order, title, reminder FROM notes ORDER BY sort_order").fetchall()
         sets = get_settings()
-        
         nodes_by_parent = {}
         for r in rows:
             pid = r['parent_id']
-            if pid not in nodes_by_parent: 
-                nodes_by_parent[pid] = []
+            if pid not in nodes_by_parent: nodes_by_parent[pid] = []
             nodes_by_parent[pid].append(dict(r))
             
         def build_tree(pid=None):
             children = nodes_by_parent.get(pid, [])
-            for c in children: 
-                c['children'] = build_tree(c['id'])
+            for c in children: c['children'] = build_tree(c['id'])
             return children
             
-        return jsonify({
-            "content": build_tree(None),
-            "settings": sets,
-            "last_modified": sets.get('tree_last_modified', 0)
-        })
+        return jsonify({"content": build_tree(None), "settings": sets, "last_modified": sets.get('tree_last_modified', 0)})
 
 @app.route('/api/tree', methods=['POST'])
 def update_tree():
-    """Aktualisiert nur parent_id und sort_order (Für Drag & Drop im UI)"""
     items = request.json
     with get_db() as conn:
-        conn.executemany("UPDATE notes SET parent_id=?, sort_order=? WHERE id=?", 
-                         [(item.get('parent_id'), item.get('sort_order'), item['id']) for item in items])
+        conn.executemany("UPDATE notes SET parent_id=?, sort_order=? WHERE id=?", [(item.get('parent_id'), item.get('sort_order'), item['id']) for item in items])
     return jsonify({"status": "success"})
 
 @app.route('/api/notes/<note_id>', methods=['GET'])
 def get_note(note_id):
-    """Lädt den kompletten Text einer einzelnen Notiz"""
     with get_db() as conn:
         row = conn.execute("SELECT id, title, text, reminder FROM notes WHERE id=?", (note_id,)).fetchone()
-        if row: 
-            return jsonify(dict(row))
+        if row: return jsonify(dict(row))
         return jsonify({"error": "Not found"}), 404
 
 @app.route('/api/notes', methods=['POST'])
 def create_note():
     data = request.json
     with get_db() as conn:
-        conn.execute('''
-            INSERT INTO notes (id, parent_id, sort_order, title, text) 
-            VALUES (?, ?, ?, ?, ?)
-        ''', (data['id'], data.get('parent_id'), data.get('sort_order', 999), data.get('title', 'Neu'), data.get('text', '')))
+        conn.execute("INSERT INTO notes (id, parent_id, sort_order, title, text) VALUES (?, ?, ?, ?, ?)", (data['id'], data.get('parent_id'), data.get('sort_order', 999), data.get('title', 'Neu'), data.get('text', '')))
     return jsonify({"status": "success", "id": data['id']})
 
 @app.route('/api/notes/<note_id>', methods=['PUT'])
 def update_note(note_id):
     data = request.json
     with get_db() as conn:
-        conn.execute('''
-            UPDATE notes SET title=?, text=?, reminder=? WHERE id=?
-        ''', (data.get('title'), data.get('text'), data.get('reminder'), note_id))
+        conn.execute("UPDATE notes SET title=?, text=?, reminder=? WHERE id=?", (data.get('title'), data.get('text'), data.get('reminder'), note_id))
     return jsonify({"status": "success"})
 
 @app.route('/api/notes/<note_id>', methods=['DELETE'])
 def delete_note(note_id):
     with get_db() as conn:
-        # Rekursives Löschen aller Unterordner
         def delete_recursive(nid):
-            children = conn.execute("SELECT id FROM notes WHERE parent_id=?", (nid,)).fetchall()
-            for c in children: 
-                delete_recursive(c['id'])
+            for c in conn.execute("SELECT id FROM notes WHERE parent_id=?", (nid,)).fetchall(): delete_recursive(c['id'])
             conn.execute("DELETE FROM notes WHERE id=?", (nid,))
-            
         delete_recursive(note_id)
     return jsonify({"status": "success"})
 
@@ -352,45 +271,34 @@ def update_settings():
             if k == 'password':
                 conn.execute("REPLACE INTO settings (key, value) VALUES ('password_hash', ?)", (generate_password_hash(v),))
                 continue
-            val_str = str(v).lower() if isinstance(v, bool) else str(v)
-            conn.execute("REPLACE INTO settings (key, value) VALUES (?, ?)", (k, val_str))
+            conn.execute("REPLACE INTO settings (key, value) VALUES (?, ?)", (k, str(v).lower() if isinstance(v, bool) else str(v)))
     return jsonify({"status": "success"})
 
-# --- PER-NOTE LOCKING ---
 @app.route('/api/lock/<note_id>', methods=['POST'])
 def handle_lock(note_id):
     req = request.json
     cid = req.get('client_id')
     action = req.get('action')
     now = time.time()
-    
     with get_db() as conn:
         row = conn.execute("SELECT locked_by, locked_at FROM notes WHERE id=?", (note_id,)).fetchone()
-        if not row: 
-            return jsonify({"error": "Note not found"}), 404
+        if not row: return jsonify({"error": "Note not found"}), 404
         
-        current_lock_owner = row['locked_by']
-        lock_time = row['locked_at'] or 0
-        is_locked = current_lock_owner and (now - lock_time) < 30
+        c_owner = row['locked_by']
+        is_locked = c_owner and (now - (row['locked_at'] or 0)) < 30
         
         if action == 'release':
-            if current_lock_owner == cid or not is_locked:
-                conn.execute("UPDATE notes SET locked_by=NULL, locked_at=NULL WHERE id=?", (note_id,))
+            if c_owner == cid or not is_locked: conn.execute("UPDATE notes SET locked_by=NULL, locked_at=NULL WHERE id=?", (note_id,))
             return jsonify({"status": "released"})
-            
         elif action in ['acquire', 'override', 'heartbeat']:
-            if action == 'override' or not is_locked or current_lock_owner == cid:
+            if action == 'override' or not is_locked or c_owner == cid:
                 conn.execute("UPDATE notes SET locked_by=?, locked_at=? WHERE id=?", (cid, now, note_id))
                 return jsonify({"status": "acquired"})
-            else:
-                return jsonify({"status": "locked"})
+            else: return jsonify({"status": "locked"})
+    return jsonify({"error": "invalid"}), 400
 
-    return jsonify({"error": "invalid action"}), 400
-
-# --- MEDIEN & SKIZZEN ---
 @app.route('/uploads/<filename>')
-def uploaded_file(filename): 
-    return send_from_directory(UPLOAD_FOLDER, filename)
+def uploaded_file(filename): return send_from_directory(UPLOAD_FOLDER, filename)
 
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
@@ -416,29 +324,20 @@ def save_sketch():
 def load_sketch(sid):
     p = os.path.join(UPLOAD_FOLDER, f"sketch_{sid}.json")
     if os.path.exists(p):
-        with open(p, 'r') as f: 
-            return jsonify(json.load(f))
+        with open(p, 'r') as f: return jsonify(json.load(f))
     return jsonify({"error": "404"}), 404
 
-# --- SQLITE BACKUP ---
 @app.route('/api/export', methods=['GET'])
 def export_backup():
     mem = io.BytesIO()
-    backup_db_path = DB_FILE + '.backup'
-    
+    b_path = DB_FILE + '.backup'
     try:
-        # SQLite Online Backup API (Blockiert die Haupt-Datenbank nicht!)
-        with sqlite3.connect(DB_FILE) as src, sqlite3.connect(backup_db_path) as dst:
-            src.backup(dst)
-            
+        with sqlite3.connect(DB_FILE) as src, sqlite3.connect(b_path) as dst: src.backup(dst)
         with tarfile.open(fileobj=mem, mode='w:gz') as tar:
-            tar.add(backup_db_path, arcname='data.db')
-            if os.path.exists(UPLOAD_FOLDER): 
-                tar.add(UPLOAD_FOLDER, arcname='uploads')
+            tar.add(b_path, arcname='data.db')
+            if os.path.exists(UPLOAD_FOLDER): tar.add(UPLOAD_FOLDER, arcname='uploads')
     finally:
-        if os.path.exists(backup_db_path): 
-            os.remove(backup_db_path)
-        
+        if os.path.exists(b_path): os.remove(b_path)
     mem.seek(0)
     return send_file(mem, download_name='notes_backup.tar.gz', as_attachment=True)
 
@@ -448,7 +347,44 @@ EOF
 
 echo "app.run(host='0.0.0.0', port=$USER_PORT, debug=False)" >> $INSTALL_DIR/app.py
 
-# templates/index.html (V2 Version)
+# cleanup.py (Neu für SQLite)
+cat << 'EOF' > $INSTALL_DIR/cleanup.py
+import sqlite3, os
+DB = '/opt/notiz-tool/data.db'
+UPL = '/opt/notiz-tool/uploads'
+if not os.path.exists(DB) or not os.path.exists(UPL): exit()
+
+used_files = set()
+conn = sqlite3.connect(DB)
+rows = conn.execute("SELECT text FROM notes WHERE text IS NOT NULL").fetchall()
+for r in rows:
+    text = r[0]
+    for f in os.listdir(UPL):
+        if f in text: used_files.add(f)
+        if f.startswith('sketch_') and f.endswith('.png'):
+            sid = f.replace('sketch_', '').replace('.png', '')
+            if f"[sketch:{sid}]" in text:
+                used_files.add(f)
+                used_files.add(f"sketch_{sid}.json")
+                
+for f in os.listdir(UPL):
+    if f not in used_files:
+        try: os.remove(os.path.join(UPL, f))
+        except: pass
+EOF
+
+# backup.sh (Neu für SQLite Backup .backup Command)
+cat << 'EOF' > $INSTALL_DIR/backup.sh
+#!/bin/bash
+cd /opt/notiz-tool
+if [ -f data.db ]; then
+    sqlite3 data.db ".backup 'data.db.backup'"
+    tar -czf backups/backup_$(date +%u).tar.gz data.db.backup uploads/
+    rm data.db.backup
+fi
+EOF
+
+# templates/index.html (V2 Version OHNE Restore-Button)
 cat << 'EOF' > $INSTALL_DIR/templates/index.html
 <!DOCTYPE html>
 <html lang="de">
@@ -518,19 +454,15 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
                 <div class="toolbar">
                     <button class="tool-btn" onclick="saveChanges();" style="background:var(--accent) !important; color:white;"><i>💾</i><span>OK</span></button>
                     <button class="tool-btn" onclick="cancelEdit()" style="color:#e74c3c;"><i>❌</i><span>Abbruch</span></button>
-                    
                     <button class="tool-btn" onclick="wrapSelection('**','**', 'Fett')"><i><b>B</b></i><span>Fett</span></button>
                     <button class="tool-btn" onclick="wrapSelection('_','_', 'Kursiv')"><i style="font-style:italic; font-family:serif;">I</i><span>Kursiv</span></button>
                     <button class="tool-btn" onclick="wrapSelection('~~','~~', 'Text')"><i style="text-decoration:line-through;">S</i><span>Streich</span></button>
-                    
                     <button class="tool-btn" onclick="wrapSelection('### ','', 'Überschrift')"><i style="font-weight:bold;">H</i><span>Titel</span></button>
                     <button class="tool-btn" onclick="handleListAction('- ', 'Punkt')"><i style="font-weight:bold;">•—</i><span>Liste</span></button>
                     <button class="tool-btn" onclick="handleListAction('- [ ] ', 'Aufgabe')"><i>☑</i><span>To-Do</span></button>
-                    
                     <button class="tool-btn" onclick="wrapSelection('> ','', 'Zitat')"><i style="font-family:serif;">"</i><span>Zitat</span></button>
                     <button class="tool-btn" onclick="wrapSelection('[s=Spoiler-Titel]\n','\n[/s]', 'Text hier...')"><i>👁️‍🗨️</i><span>Spoiler</span></button>
                     <button class="tool-btn" onclick="wrapSelection('\n---\n','', '')"><i>—</i><span>Linie</span></button>
-
                     <button class="tool-btn" onclick="insertCodeTag()"><i>💻</i><span>Code</span></button>
                     <button class="tool-btn" onclick="uploadImage()"><i>🖼️</i><span>Bild</span></button>
                     <button class="tool-btn" onclick="uploadGenericFile()"><i>📎</i><span>Datei</span></button>
@@ -583,24 +515,19 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
                     <span>Dicke:</span>
                     <input type="range" min="1" max="50" value="8" onchange="sketchWidth=this.value" style="width: 80px;">
                 </div>
-                
                 <button id="btn-pen" class="sketch-btn active" onclick="setSketchMode('pen')">✏️ Stift</button>
                 <button id="btn-highlighter" class="sketch-btn" onclick="setSketchMode('highlighter')">🖍️ Marker</button>
                 <button id="btn-eraser" class="sketch-btn" onclick="setSketchMode('eraser')">🧽 Radierer</button>
-                
                 <button class="sketch-btn" onclick="undoSketch()" style="color:#f39c12;">↩️ Zurück</button>
                 <button class="sketch-btn" onclick="sketchStrokes=[]; redrawSketch();" style="color:#e74c3c;">🗑️ Leeren</button>
-                
                 <div style="flex-grow:1; text-align:right;">
                     <button class="btn-cancel" onclick="closeSketch()">Abbruch</button>
                     <button class="btn-save" onclick="saveSketch()">Speichern</button>
                 </div>
             </div>
-            
             <div id="canvas-wrapper">
                 <canvas id="sketch-canvas"></canvas>
             </div>
-            
         </div>
     </div>
 
@@ -628,21 +555,17 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
                 <label style="display:block; margin-bottom:10px; cursor:pointer;">
                     <input type="checkbox" id="webhook-enabled"> Webhooks aktivieren
                 </label>
-                
                 <label style="display:block; margin-bottom:5px; font-size:0.9em;">HTTP Methode:</label>
                 <select id="webhook-method" onchange="toggleWebhookPayload()" style="width:100%; padding:10px; margin-bottom:10px; background:rgba(255,255,255,0.05); color:inherit; border:1px solid var(--border-color); border-radius:4px;">
                     <option value="GET">GET (Einfache URL, z.B. ntfy.sh oder ioBroker)</option>
                     <option value="POST">POST (Mit JSON Payload, z.B. Discord oder SMTP2GO)</option>
                 </select>
-                
                 <label style="display:block; margin-bottom:5px; font-size:0.9em;">Ziel-URL:</label>
                 <input type="text" id="webhook-url" placeholder="https://..." style="margin-bottom:10px;">
-                
                 <div id="webhook-payload-container" style="display:none;">
                     <label style="display:block; margin-bottom:5px; font-size:0.9em;">JSON Payload:</label>
                     <textarea id="webhook-payload" rows="4" placeholder='{"text": "Erinnerung: {{TITLE}} ist fällig!"}' style="font-family:monospace; font-size:0.9em;"></textarea>
                 </div>
-                
                 <div style="font-size:0.8em; color:#aaa; margin-top:10px; background:rgba(255,255,255,0.05); padding:10px; border-radius:4px; line-height:1.5;">
                     <b>Verfügbare Variablen:</b><br>
                     <code>&#123;&#123;TITLE&#125;&#125;</code> - Der Titel der fälligen Notiz<br>
@@ -678,7 +601,7 @@ EOF
 cat << 'EOF' > $INSTALL_DIR/static/script.js
 var fullTree = {content: [], settings: {}};
 var activeId = null;
-var activeNoteData = null; // Hält die Lazy-Loaded Daten der aktuellen Notiz {id, title, text, reminder}
+var activeNoteData = null; 
 var collapsedIds = new Set();
 var sortables = [];
 var currentTreeLastMod = 0;
@@ -726,7 +649,7 @@ async function releaseLock() {
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({client_id: myClientId, action: 'release'})
         });
-    } catch(e) { console.error(e); }
+    } catch(e) {}
 }
 
 function startHeartbeat(noteId) {
@@ -786,20 +709,14 @@ async function checkAndReloadData() {
                 renderTree();
             }
         }
-    } catch (e) {
-        console.error("Sync error:", e);
-    }
+    } catch (e) { console.error("Sync error:", e); }
 }
 
 async function fetchNoteData(id) {
     try {
         const res = await fetch(`/api/notes/${id}?_t=` + Date.now());
-        if(res.ok) {
-            return await res.json();
-        }
-    } catch(e) {
-        console.error("Fehler beim Laden der Notiz:", e);
-    }
+        if(res.ok) return await res.json();
+    } catch(e) { console.error("Fehler beim Laden der Notiz:", e); }
     return null;
 }
 
@@ -814,27 +731,18 @@ function cleanDataArray(arr) {
 
 async function loadData() { 
     const sState = localStorage.getItem('sidebarState') || 'closed'; 
-    if (sState === 'closed') {
-        document.body.classList.add('sidebar-hidden'); 
-    }
+    if (sState === 'closed') document.body.classList.add('sidebar-hidden'); 
     
     const savedCollapsed = localStorage.getItem('collapsedNodes');
-    if (savedCollapsed) {
-        collapsedIds = new Set(JSON.parse(savedCollapsed));
-    }
+    if (savedCollapsed) collapsedIds = new Set(JSON.parse(savedCollapsed));
     
     await checkAndReloadData();
     
-    if (!savedCollapsed && fullTree.content.length > 0) {
-        initAllCollapsed(fullTree.content);
-    }
+    if (!savedCollapsed && fullTree.content.length > 0) initAllCollapsed(fullTree.content);
     
     renderTree(); 
-    
     const lastId = localStorage.getItem('lastActiveId'); 
-    if (lastId && findNode(fullTree.content, lastId)) {
-        selectNode(lastId); 
-    }
+    if (lastId && findNode(fullTree.content, lastId)) selectNode(lastId); 
 }
 
 function initAllCollapsed(items) { 
@@ -855,16 +763,12 @@ function saveCollapsedToLocal() {
 async function enableEdit() { 
     if (!activeId) return;
     
-    // Holt die absolut neueste Version aus der DB, bevor der Edit startet
     activeNoteData = await fetchNoteData(activeId);
-    if (!activeNoteData) {
-        alert("Notiz nicht auf dem Server gefunden!");
-        return;
-    }
+    if (!activeNoteData) { alert("Notiz nicht gefunden!"); return; }
     
     const locked = await acquireLock(activeId);
     if (!locked) {
-        showModal("System gesperrt", "Diese Notiz wird gerade auf einem anderen Gerät bearbeitet.\n\nSperre ignorieren und erzwingen?", [
+        showModal("System gesperrt", "Diese Notiz wird gerade auf einem anderen Gerät bearbeitet.\n\nSperre erzwingen?", [
             { label: "Ja, erzwingen", class: "btn-discard", action: async () => {
                 await acquireLock(activeId, true);
                 showEditArea();
@@ -873,7 +777,6 @@ async function enableEdit() {
         ]);
         return;
     }
-
     showEditArea();
 }
 
@@ -909,7 +812,7 @@ async function saveChanges() {
     });
     
     await releaseLock();
-    await checkAndReloadData(); // Baum aktualisieren, falls der Titel geändert wurde
+    await checkAndReloadData(); 
     renderDisplayArea();
 }
 
@@ -923,7 +826,6 @@ function renderDisplayArea() {
     
     document.getElementById('view-title').innerText = activeNoteData.title; 
     document.getElementById('display-area').innerHTML = renderMarkdown(activeNoteData.text); 
-    
     if(window.hljs) hljs.highlightAll(); 
     
     const viewBadge = document.getElementById('view-reminder-badge');
@@ -945,14 +847,8 @@ async function selectNode(id) {
     if (document.getElementById('edit-mode').style.display === 'block') {
         if (activeNoteData && (document.getElementById('node-title').value !== activeNoteData.title || document.getElementById('node-text').value !== activeNoteData.text)) { 
             showModal("Ungespeichert", "Speichern?", [ 
-                { label: "Ja", class: "btn-save", action: async () => { 
-                    await saveChanges(); 
-                    doSelectNode(id); 
-                } }, 
-                { label: "Nein", class: "btn-discard", action: () => { 
-                    cancelEdit(); 
-                    doSelectNode(id); 
-                } }, 
+                { label: "Ja", class: "btn-save", action: async () => { await saveChanges(); doSelectNode(id); } }, 
+                { label: "Nein", class: "btn-discard", action: () => { cancelEdit(); doSelectNode(id); } }, 
                 { label: "Abbruch", class: "btn-cancel", action: () => {} } 
             ]); 
             return; 
@@ -977,15 +873,12 @@ async function doSelectNode(id) {
     
     pathData.forEach((p, idx) => { 
         const span = document.createElement('span'); 
-        span.innerText = p.title; 
-        span.style.cursor = 'pointer'; 
+        span.innerText = p.title; span.style.cursor = 'pointer'; 
         span.onclick = () => selectNode(p.id); 
         span.onmouseover = () => span.style.textDecoration = 'underline'; 
         span.onmouseout = () => span.style.textDecoration = 'none'; 
         breadcrumbEl.appendChild(span); 
-        if(idx < pathData.length - 1) {
-            breadcrumbEl.appendChild(document.createTextNode(' / ')); 
-        }
+        if(idx < pathData.length - 1) breadcrumbEl.appendChild(document.createTextNode(' / ')); 
     });
     
     renderDisplayArea();
@@ -995,37 +888,28 @@ async function doSelectNode(id) {
     if(activeEl) activeEl.classList.add('active'); 
 }
 
-// --- STRUKTUR BEARBEITEN (Drag & Drop) ---
+// --- STRUKTUR BEARBEITEN ---
 function toggleEditMode() { 
     if (!document.body.classList.contains('edit-mode-active')) {
         document.body.classList.add('edit-mode-active');
         renderTree();
     } else {
         document.body.classList.remove('edit-mode-active');
-        sortables.forEach(s => s.destroy()); 
-        sortables = []; 
+        sortables.forEach(s => s.destroy()); sortables = []; 
         renderTree(); 
     }
 }
 
 async function rebuildDataFromDOM() { 
     if (!document.body.classList.contains('edit-mode-active')) return;
-    
     let flatUpdates = [];
     
     function parse(container, parentId) { 
         Array.from(container.querySelectorAll(':scope > .tree-item-container')).forEach((div, index) => { 
             const id = div.getAttribute('data-id'); 
-            flatUpdates.push({
-                id: id,
-                parent_id: parentId,
-                sort_order: index
-            });
-            
+            flatUpdates.push({ id: id, parent_id: parentId, sort_order: index });
             const sub = div.querySelector(':scope > .tree-group'); 
-            if(sub) {
-                parse(sub, id);
-            }
+            if(sub) parse(sub, id);
         }); 
     } 
     
@@ -1033,9 +917,7 @@ async function rebuildDataFromDOM() {
     if(rg) { 
         parse(rg, null);
         await fetch('/api/tree', { 
-            method: 'POST', 
-            headers: {'Content-Type': 'application/json'}, 
-            body: JSON.stringify(flatUpdates) 
+            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(flatUpdates) 
         });
         await checkAndReloadData();
     } 
@@ -1044,7 +926,7 @@ async function rebuildDataFromDOM() {
 // --- CHECKBOX SPERRE ---
 window.toggleTask = async function(targetIdx, currentlyChecked) {
     if (!await acquireLock(activeId)) {
-        showModal("Gesperrt", "Checkbox kann nicht geändert werden, da die Notiz gerade bearbeitet wird.", [
+        showModal("Gesperrt", "Checkbox kann nicht geändert werden (Notiz wird bearbeitet).", [
             { label: "OK", class: "btn-cancel", action: () => {} }
         ]);
         renderDisplayArea(); 
@@ -1052,10 +934,7 @@ window.toggleTask = async function(targetIdx, currentlyChecked) {
     }
 
     activeNoteData = await fetchNoteData(activeId);
-    if(!activeNoteData) {
-        releaseLock();
-        return;
-    }
+    if(!activeNoteData) { releaseLock(); return; }
     
     let tIndex = 0;
     let lines = activeNoteData.text.split('\n');
@@ -1064,11 +943,7 @@ window.toggleTask = async function(targetIdx, currentlyChecked) {
         let t = lines[i].trim();
         if (t.startsWith('- [ ] ') || t.startsWith('- [x] ') || t.startsWith('- [X] ')) {
             if (tIndex === targetIdx) { 
-                if (currentlyChecked) { 
-                    lines[i] = lines[i].replace(/- \[[xX]\] /, '- [ ] '); 
-                } else { 
-                    lines[i] = lines[i].replace(/- \[ \] /, '- [x] '); 
-                } 
+                lines[i] = currentlyChecked ? lines[i].replace(/- \[[xX]\] /, '- [ ] ') : lines[i].replace(/- \[ \] /, '- [x] '); 
                 break; 
             } 
             tIndex++;
@@ -1077,9 +952,7 @@ window.toggleTask = async function(targetIdx, currentlyChecked) {
     
     activeNoteData.text = lines.join('\n'); 
     await fetch(`/api/notes/${activeId}`, {
-        method: 'PUT',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(activeNoteData)
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(activeNoteData)
     });
     
     await releaseLock();
@@ -1089,20 +962,14 @@ window.toggleTask = async function(targetIdx, currentlyChecked) {
 // --- SKIZZEN SPERRE ---
 async function openSketch(id = null) {
     const isEdit = document.getElementById('edit-mode').style.display === 'block';
-    
-    if (!isEdit) {
-        if (!await acquireLock(activeId)) {
-            showModal("Gesperrt", "Skizze kann nicht geöffnet werden, da die Notiz bearbeitet wird.", [
-                { label: "OK", class: "btn-cancel", action: () => {} }
-            ]);
-            return;
-        }
+    if (!isEdit && !await acquireLock(activeId)) {
+        showModal("Gesperrt", "Skizze kann nicht geöffnet werden.", [{ label: "OK", class: "btn-cancel", action: () => {} }]);
+        return;
     }
 
     document.getElementById('sketch-modal').style.display = 'flex';
     if(!sketchCanvas) initSketcher();
-    activeSketchId = id;
-    sketchStrokes = [];
+    activeSketchId = id; sketchStrokes = [];
     
     if (id) {
         try {
@@ -1113,94 +980,54 @@ async function openSketch(id = null) {
                 document.getElementById('sketch-bg-select').value = sketchBg;
                 sketchStrokes = data.strokes || [];
             }
-        } catch(e) { console.error("Skizze laden fehlgeschlagen."); }
-    } else {
-        sketchBg = document.getElementById('sketch-bg-select').value;
-    }
+        } catch(e) {}
+    } else { sketchBg = document.getElementById('sketch-bg-select').value; }
     
-    setSketchMode('pen');
-    redrawSketch();
+    setSketchMode('pen'); redrawSketch();
 }
 
 function closeSketch() {
     document.getElementById('sketch-modal').style.display = 'none';
-    if (document.getElementById('edit-mode').style.display !== 'block') {
-        releaseLock();
-    }
+    if (document.getElementById('edit-mode').style.display !== 'block') releaseLock();
 }
 
 async function saveSketch() {
     const payload = { 
-        id: activeSketchId, 
-        bg: sketchBg, 
-        strokes: sketchStrokes, 
-        image: sketchCanvas.toDataURL("image/png") 
+        id: activeSketchId, bg: sketchBg, strokes: sketchStrokes, image: sketchCanvas.toDataURL("image/png") 
     };
-    
     const res = await fetch('/api/sketch', { 
-        method: 'POST', 
-        headers: {'Content-Type': 'application/json'}, 
-        body: JSON.stringify(payload) 
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) 
     });
-    
     const data = await res.json();
     
-    if (!activeSketchId && data.id) {
-        wrapSelection(`[sketch:${data.id}]`, '', '');
-    }
+    if (!activeSketchId && data.id) wrapSelection(`[sketch:${data.id}]`, '', '');
     
     document.getElementById('sketch-modal').style.display = 'none';
-    
     const ta = document.getElementById('node-text');
-    if (ta) {
-        ta.value = ta.value.replace(`[sketch:${data.id}]`, `[sketch:${data.id}] `).trim();
-    }
+    if (ta) ta.value = ta.value.replace(`[sketch:${data.id}]`, `[sketch:${data.id}] `).trim();
     
     document.querySelectorAll('.sketch-img').forEach(img => {
-        if (img.src.includes(data.id)) {
-            img.src = `/uploads/sketch_${data.id}.png?v=` + Date.now();
-        }
+        if (img.src.includes(data.id)) img.src = `/uploads/sketch_${data.id}.png?v=` + Date.now();
     });
 
-    if (document.getElementById('edit-mode').style.display !== 'block') {
-        releaseLock();
-    }
+    if (document.getElementById('edit-mode').style.display !== 'block') releaseLock();
 }
 
-// --- WEITERE HILFSFUNKTIONEN (Baum rendering, Modals etc) ---
+// --- HILFSFUNKTIONEN ---
 async function addItem(parentId) { 
     const newId = Date.now().toString() + Math.random().toString(36).substring(2, 6); 
-    const payload = { 
-        id: newId, 
-        parent_id: parentId, 
-        title: 'Neu', 
-        text: '' 
-    };
-    
-    await fetch('/api/notes', { 
-        method: 'POST', 
-        headers: {'Content-Type': 'application/json'}, 
-        body: JSON.stringify(payload) 
-    });
-    
-    if (parentId) { 
-        collapsedIds.delete(parentId); 
-        saveCollapsedToLocal(); 
-    }
-    
+    const payload = { id: newId, parent_id: parentId, title: 'Neu', text: '' };
+    await fetch('/api/notes', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
+    if (parentId) { collapsedIds.delete(parentId); saveCollapsedToLocal(); }
     await checkAndReloadData();
-    selectNode(newId); 
-    enableEdit(); 
+    selectNode(newId); enableEdit(); 
 }
 
 function deleteItem(id) { 
     showModal("Löschen", "Sicher?", [ 
         { label: "Löschen", class: "btn-discard", action: async () => { 
             await fetch(`/api/notes/${id}`, { method: 'DELETE' });
-            if (activeId === id) { 
-                activeId = null; 
-                document.getElementById('edit-area').style.display = 'none'; 
-            }
+            if (activeId === id) { activeId = null; document.getElementById('edit-area').style.display = 'none'; }
             await checkAndReloadData();
         } }, 
         { label: "Abbruch", class: "btn-cancel", action: () => {} } 
@@ -1210,10 +1037,7 @@ function deleteItem(id) {
 function findNode(items, id) { 
     for (let i of items) { 
         if (i.id === id) return i; 
-        if (i.children) { 
-            const f = findNode(i.children, id); 
-            if (f) return f; 
-        } 
+        if (i.children) { const f = findNode(i.children, id); if (f) return f; } 
     } 
     return null; 
 }
@@ -1222,65 +1046,41 @@ function getPath(items, id, path = []) {
     for (let i of items) { 
         const n = [...path, {title: i.title, id: i.id}]; 
         if (i.id === id) return n; 
-        if (i.children) { 
-            const r = getPath(i.children, id, n); 
-            if (r) return r; 
-        } 
+        if (i.children) { const r = getPath(i.children, id, n); if (r) return r; } 
     } 
     return null; 
 }
 
 function applyAccentColor(hex) { 
     document.documentElement.style.setProperty('--accent', hex); 
-    const r = parseInt(hex.slice(1,3), 16), 
-          g = parseInt(hex.slice(3,5), 16), 
-          b = parseInt(hex.slice(5,7), 16); 
+    const r = parseInt(hex.slice(1,3), 16), g = parseInt(hex.slice(3,5), 16), b = parseInt(hex.slice(5,7), 16); 
     document.documentElement.style.setProperty('--accent-rgb', `${r}, ${g}, ${b}`); 
-    const p = document.getElementById('accent-color-picker'); 
-    if(p) p.value = hex; 
+    const p = document.getElementById('accent-color-picker'); if(p) p.value = hex; 
 }
 
 async function updateGlobalAccent(hex) { 
-    await fetch('/api/settings', { 
-        method: 'POST', 
-        headers: {'Content-Type': 'application/json'}, 
-        body: JSON.stringify({accent: hex})
-    }); 
-    fullTree.settings.accent = hex; 
-    applyAccentColor(hex); 
+    await fetch('/api/settings', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({accent: hex})}); 
+    fullTree.settings.accent = hex; applyAccentColor(hex); 
 }
 
 async function toggleTheme() { 
     const newTheme = document.body.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'; 
-    await fetch('/api/settings', { 
-        method: 'POST', 
-        headers: {'Content-Type': 'application/json'}, 
-        body: JSON.stringify({theme: newTheme})
-    }); 
-    fullTree.settings.theme = newTheme; 
-    document.body.setAttribute('data-theme', newTheme); 
+    await fetch('/api/settings', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({theme: newTheme})}); 
+    fullTree.settings.theme = newTheme; document.body.setAttribute('data-theme', newTheme); 
 }
 
 function updateMenuUI() {
-    const pwdBtn = document.getElementById('pwd-toggle-text'); 
-    const logoutBtn = document.getElementById('logout-btn'); 
-    const whToggleText = document.getElementById('webhook-toggle-text');
-    
+    const pwdBtn = document.getElementById('pwd-toggle-text'); const logoutBtn = document.getElementById('logout-btn'); const whToggleText = document.getElementById('webhook-toggle-text');
     if(pwdBtn) pwdBtn.innerText = fullTree.settings.password_enabled ? '🔓 Passwortschutz aus' : '🔒 Passwortschutz an';
     if(logoutBtn) logoutBtn.style.display = fullTree.settings.password_enabled ? 'flex' : 'none';
     if(whToggleText) whToggleText.innerText = fullTree.settings.webhook_enabled ? '🔔 Webhook (Aktiviert)' : '🔕 Webhook (Deaktiviert)';
 }
 
 function renderTree() { 
-    const container = document.getElementById('tree'); 
-    container.innerHTML = ''; 
-    const rootGroup = document.createElement('div'); 
-    rootGroup.className = 'tree-group'; 
-    container.appendChild(rootGroup); 
+    const container = document.getElementById('tree'); container.innerHTML = ''; 
+    const rootGroup = document.createElement('div'); rootGroup.className = 'tree-group'; container.appendChild(rootGroup); 
     renderItems(fullTree.content, rootGroup); 
-    if (document.body.classList.contains('edit-mode-active')) {
-        initSortables(); 
-    }
+    if (document.body.classList.contains('edit-mode-active')) initSortables(); 
 }
 
 function renderItems(items, parent) { 
@@ -1289,109 +1089,46 @@ function renderItems(items, parent) {
         if (!item) return;
         const isFolder = item.children && item.children.length > 0; 
         const isCollapsed = isEdit ? false : collapsedIds.has(item.id); 
-        
-        const div = document.createElement('div'); 
-        div.className = 'tree-item-container'; 
-        div.setAttribute('data-id', item.id); 
-        
-        const wrapper = document.createElement('div'); 
-        wrapper.className = 'tree-item' + (item.id === activeId ? ' active' : ''); 
-        
-        const handle = document.createElement('span'); 
-        handle.className = 'drag-handle'; 
-        handle.innerHTML = '⋮⋮';
-        
-        const icon = document.createElement('span'); 
-        icon.className = 'tree-icon'; 
-        icon.innerText = isFolder ? (isCollapsed ? '📁' : '📂') : '📄'; 
+        const div = document.createElement('div'); div.className = 'tree-item-container'; div.setAttribute('data-id', item.id); 
+        const wrapper = document.createElement('div'); wrapper.className = 'tree-item' + (item.id === activeId ? ' active' : ''); 
+        const handle = document.createElement('span'); handle.className = 'drag-handle'; handle.innerHTML = '⋮⋮';
+        const icon = document.createElement('span'); icon.className = 'tree-icon'; icon.innerText = isFolder ? (isCollapsed ? '📁' : '📂') : '📄'; 
         
         icon.onclick = (e) => { 
             e.stopPropagation(); 
             if (!isEdit && isFolder) { 
-                if (collapsedIds.has(item.id)) collapsedIds.delete(item.id); 
-                else collapsedIds.add(item.id); 
-                saveCollapsedToLocal(); 
-                renderTree(); 
+                if (collapsedIds.has(item.id)) collapsedIds.delete(item.id); else collapsedIds.add(item.id); 
+                saveCollapsedToLocal(); renderTree(); 
             } 
         }; 
         
-        const text = document.createElement('span'); 
-        text.className = 'tree-text'; 
-        text.innerText = item.title || 'Unbenannt'; 
-
-        if (isReminderActive(item)) { 
-            const rSpan = document.createElement('span'); 
-            rSpan.className = 'reminder-icon'; 
-            rSpan.innerText = '⏰'; 
-            text.appendChild(rSpan); 
-        }
+        const text = document.createElement('span'); text.className = 'tree-text'; text.innerText = item.title || 'Unbenannt'; 
+        if (isReminderActive(item)) { const rSpan = document.createElement('span'); rSpan.className = 'reminder-icon'; rSpan.innerText = '⏰'; text.appendChild(rSpan); }
+        text.onclick = (e) => { e.stopPropagation(); if (!isEdit) selectNode(item.id); }; 
+        const addBtn = document.createElement('button'); addBtn.className = 'add-sub-btn'; addBtn.innerText = '+'; addBtn.onclick = (e) => { e.stopPropagation(); addItem(item.id); }; 
+        const delBtn = document.createElement('button'); delBtn.className = 'delete-btn'; delBtn.innerText = '×'; delBtn.onclick = (e) => { e.stopPropagation(); deleteItem(item.id); }; 
         
-        text.onclick = (e) => { 
-            e.stopPropagation(); 
-            if (!isEdit) selectNode(item.id); 
-        }; 
-        
-        const addBtn = document.createElement('button'); 
-        addBtn.className = 'add-sub-btn'; 
-        addBtn.innerText = '+'; 
-        addBtn.onclick = (e) => { 
-            e.stopPropagation(); 
-            addItem(item.id); 
-        }; 
-        
-        const delBtn = document.createElement('button'); 
-        delBtn.className = 'delete-btn'; 
-        delBtn.innerText = '×'; 
-        delBtn.onclick = (e) => { 
-            e.stopPropagation(); 
-            deleteItem(item.id); 
-        }; 
-        
-        wrapper.append(handle, icon, text, addBtn, delBtn); 
-        div.appendChild(wrapper); 
-        
-        const childGroup = document.createElement('div'); 
-        childGroup.className = 'tree-group'; 
-        
-        if (isFolder && !isCollapsed) {
-            renderItems(item.children, childGroup); 
-        }
-        
-        div.appendChild(childGroup); 
-        parent.appendChild(div); 
+        wrapper.append(handle, icon, text, addBtn, delBtn); div.appendChild(wrapper); 
+        const childGroup = document.createElement('div'); childGroup.className = 'tree-group'; 
+        if (isFolder && !isCollapsed) renderItems(item.children, childGroup); 
+        div.appendChild(childGroup); parent.appendChild(div); 
     }); 
 }
 
 function initSortables() { 
-    sortables.forEach(s => s.destroy()); 
-    sortables = []; 
+    sortables.forEach(s => s.destroy()); sortables = []; 
     document.querySelectorAll('.tree-group').forEach(el => { 
-        sortables.push(new Sortable(el, { 
-            group: 'nested', 
-            animation: 150, 
-            handle: '.drag-handle', 
-            fallbackOnBody: true, 
-            onEnd: (evt) => { 
-                if (evt.oldIndex !== evt.newIndex || evt.to !== evt.from) {
-                    rebuildDataFromDOM(); 
-                }
-            } 
-        })); 
+        sortables.push(new Sortable(el, { group: 'nested', animation: 150, handle: '.drag-handle', fallbackOnBody: true, onEnd: (evt) => { if (evt.oldIndex !== evt.newIndex || evt.to !== evt.from) rebuildDataFromDOM(); } })); 
     }); 
 }
 
 function renderMarkdown(text) { 
     if (!text) return ''; 
     let html = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); 
-    
     html = html.replace(/\[img:(.*?)\]/g, '<img src="/uploads/$1" class="note-img" onclick="openLightbox(this.src)">');
     html = html.replace(/\[sketch:([a-zA-Z0-9]+)\]/g, '<img src="/uploads/sketch_$1.png?v='+Date.now()+'" class="note-img sketch-img" title="Skizze bearbeiten" onclick="openSketch(\'$1\')">');
     html = html.replace(/\[file:([a-zA-Z0-9.\-]+)\|([^\]]+)\]/g, '<a href="/uploads/$1" target="_blank" class="note-link">📎 $2</a>');
-    
-    html = html.replace(/\[note:([a-zA-Z0-9]+)\|([^\]]+)\]/g, (match, id, title) => { 
-        return '<a href="#" onclick="selectNode(\'' + id + '\'); return false;" class="note-link">@ ' + title + '</a>'; 
-    });
-    
+    html = html.replace(/\[note:([a-zA-Z0-9]+)\|([^\]]+)\]/g, (match, id, title) => { return '<a href="#" onclick="selectNode(\'' + id + '\'); return false;" class="note-link">@ ' + title + '</a>'; });
     html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" style="color:var(--accent); text-decoration:underline;">$1</a>');
 
     let last = ""; 
@@ -1403,45 +1140,20 @@ function renderMarkdown(text) {
         html = html.replace(/~~(.*?)~~/g, '<s>$1</s>'); 
     } 
     
-    let parts = html.split("'''"); 
-    let res = ''; 
-    window.taskIndexCounter = 0; 
-    
+    let parts = html.split("'''"); let res = ''; window.taskIndexCounter = 0; 
     for (let i = 0; i < parts.length; i++) { 
         if (i % 2 === 1) { 
-            let content = parts[i].trim(); 
-            let lines = content.split('\n'); 
-            let langClass = ''; 
-            
-            if (lines.length > 0 && lines[0].length < 15 && /^[a-z0-9]+$/.test(lines[0].trim())) { 
-                langClass = ' class="language-' + lines[0].trim() + '"'; 
-                content = lines.slice(1).join('\n'); 
-            } 
-            
+            let content = parts[i].trim(); let lines = content.split('\n'); let langClass = ''; 
+            if (lines.length > 0 && lines[0].length < 15 && /^[a-z0-9]+$/.test(lines[0].trim())) { langClass = ' class="language-' + lines[0].trim() + '"'; content = lines.slice(1).join('\n'); } 
             res += '<div class="code-container"><button class="copy-badge" onclick="copyToClipboard(this)">Copy</button><pre><code' + langClass + '>' + content + '</code></pre></div>'; 
         } else { 
             res += parts[i].split('\n').map(line => {
                 let t = line.trim(); 
-                if (t === '') return '<br>'; 
-                if (t === '---') return '<hr>';
-                if (t.startsWith('### ')) return '<h3>' + line.substring(4) + '</h3>'; 
-                if (t.startsWith('## ')) return '<h2>' + line.substring(3) + '</h2>'; 
-                if (t.startsWith('# ')) return '<h1>' + line.substring(2) + '</h1>';
-                
-                if (t.startsWith('- [ ] ')) { 
-                    let idx = window.taskIndexCounter++; 
-                    return '<div class="task-list-item"><input type="checkbox" class="task-check" onclick="toggleTask(' + idx + ', false)"> <span>' + line.substring(line.indexOf('- [ ] ') + 6) + '</span></div>'; 
-                }
-                
-                if (t.startsWith('- [x] ') || t.startsWith('- [X] ')) { 
-                    let idx = window.taskIndexCounter++; 
-                    return '<div class="task-list-item"><input type="checkbox" class="task-check" checked onclick="toggleTask(' + idx + ', true)"> <span><del>' + line.substring(line.indexOf('] ') + 2) + '</del></span></div>'; 
-                }
-                
-                if (t.startsWith('- ')) {
-                    return '<div style="margin-left: 20px;">• ' + line.substring(line.indexOf('- ')+2) + '</div>'; 
-                }
-                
+                if (t === '') return '<br>'; if (t === '---') return '<hr>';
+                if (t.startsWith('### ')) return '<h3>' + line.substring(4) + '</h3>'; if (t.startsWith('## ')) return '<h2>' + line.substring(3) + '</h2>'; if (t.startsWith('# ')) return '<h1>' + line.substring(2) + '</h1>';
+                if (t.startsWith('- [ ] ')) { let idx = window.taskIndexCounter++; return '<div class="task-list-item"><input type="checkbox" class="task-check" onclick="toggleTask(' + idx + ', false)"> <span>' + line.substring(line.indexOf('- [ ] ') + 6) + '</span></div>'; }
+                if (t.startsWith('- [x] ') || t.startsWith('- [X] ')) { let idx = window.taskIndexCounter++; return '<div class="task-list-item"><input type="checkbox" class="task-check" checked onclick="toggleTask(' + idx + ', true)"> <span><del>' + line.substring(line.indexOf('] ') + 2) + '</del></span></div>'; }
+                if (t.startsWith('- ')) return '<div style="margin-left: 20px;">• ' + line.substring(line.indexOf('- ')+2) + '</div>'; 
                 return '<div>' + line + '</div>';
             }).join(''); 
         } 
@@ -1449,34 +1161,18 @@ function renderMarkdown(text) {
     return res; 
 }
 
-// (Rest der Event Listeners, Skizzen-Logik, Webhook-Modal, Reminders etc. 1:1 identisch und voll ausgeschrieben)
-
-function isReminderActive(node) {
-    if (!node.reminder) return false;
-    return new Date(node.reminder) <= new Date();
-}
+function isReminderActive(node) { return node.reminder && new Date(node.reminder) <= new Date(); }
 
 function openReminderModal() {
     if(!activeNoteData) return;
-    
     document.getElementById('reminder-modal').style.display = 'flex';
     const hasTimeCb = document.getElementById('reminder-has-time');
     const dateInp = document.getElementById('reminder-date');
     const dtInp = document.getElementById('reminder-datetime');
-    
     if (activeNoteData.reminder) {
-        if (activeNoteData.reminder.includes('T')) {
-            hasTimeCb.checked = true;
-            dtInp.value = activeNoteData.reminder;
-        } else {
-            hasTimeCb.checked = false;
-            dateInp.value = activeNoteData.reminder;
-        }
-    } else {
-        hasTimeCb.checked = false;
-        dateInp.value = '';
-        dtInp.value = '';
-    }
+        if (activeNoteData.reminder.includes('T')) { hasTimeCb.checked = true; dtInp.value = activeNoteData.reminder; } 
+        else { hasTimeCb.checked = false; dateInp.value = activeNoteData.reminder; }
+    } else { hasTimeCb.checked = false; dateInp.value = ''; dtInp.value = ''; }
     toggleReminderInput();
 }
 
@@ -1488,37 +1184,20 @@ function toggleReminderInput() {
 
 async function saveReminder() {
     if(!activeNoteData) return;
-    
     const hasTime = document.getElementById('reminder-has-time').checked;
     const val = hasTime ? document.getElementById('reminder-datetime').value : document.getElementById('reminder-date').value;
-    
     if(val) {
-        activeNoteData.reminder = val;
-        document.getElementById('reminder-modal').style.display = 'none';
-        
-        await fetch(`/api/notes/${activeId}`, {
-            method: 'PUT',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(activeNoteData)
-        });
-        
-        await checkAndReloadData();
-        renderDisplayArea();
+        activeNoteData.reminder = val; document.getElementById('reminder-modal').style.display = 'none';
+        await fetch(`/api/notes/${activeId}`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(activeNoteData) });
+        await checkAndReloadData(); renderDisplayArea();
     }
 }
 
 async function clearReminder() {
     if(activeNoteData && activeNoteData.reminder) {
         activeNoteData.reminder = null;
-        
-        await fetch(`/api/notes/${activeId}`, {
-            method: 'PUT',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(activeNoteData)
-        });
-        
-        await checkAndReloadData();
-        renderDisplayArea();
+        await fetch(`/api/notes/${activeId}`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(activeNoteData) });
+        await checkAndReloadData(); renderDisplayArea();
     }
 }
 
@@ -1532,8 +1211,7 @@ function toggleWebhookModal() {
 }
 
 function toggleWebhookPayload() {
-    const method = document.getElementById('webhook-method').value;
-    document.getElementById('webhook-payload-container').style.display = method === 'POST' ? 'block' : 'none';
+    document.getElementById('webhook-payload-container').style.display = document.getElementById('webhook-method').value === 'POST' ? 'block' : 'none';
 }
 
 async function saveWebhook() {
@@ -1543,593 +1221,211 @@ async function saveWebhook() {
         webhook_url: document.getElementById('webhook-url').value,
         webhook_payload: document.getElementById('webhook-payload').value
     };
-    
-    await fetch('/api/settings', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(payload)
-    });
-    
+    await fetch('/api/settings', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
     fullTree.settings.webhook_enabled = payload.webhook_enabled;
     document.getElementById('webhook-modal').style.display = 'none';
     updateMenuUI();
 }
 
 function showModal(title, text, buttons, showInput=false) { 
-    document.getElementById('modal-title').innerText = title; 
-    document.getElementById('modal-text').innerText = text; 
-    const inp = document.getElementById('modal-input'); 
-    inp.style.display = showInput ? 'block' : 'none'; 
-    inp.value = ''; 
-    const container = document.getElementById('modal-btns-container'); 
-    container.innerHTML = ''; 
-    
+    document.getElementById('modal-title').innerText = title; document.getElementById('modal-text').innerText = text; 
+    const inp = document.getElementById('modal-input'); inp.style.display = showInput ? 'block' : 'none'; inp.value = ''; 
+    const container = document.getElementById('modal-btns-container'); container.innerHTML = ''; 
     buttons.forEach(btn => { 
-        const b = document.createElement('button'); 
-        b.innerText = btn.label; 
-        b.className = btn.class; 
-        b.onclick = () => { 
-            document.getElementById('custom-modal').style.display = 'none'; 
-            btn.action(); 
-        }; 
+        const b = document.createElement('button'); b.innerText = btn.label; b.className = btn.class; 
+        b.onclick = () => { document.getElementById('custom-modal').style.display = 'none'; btn.action(); }; 
         container.appendChild(b); 
     }); 
-    
     document.getElementById('custom-modal').style.display = 'flex'; 
     if (showInput) setTimeout(() => inp.focus(), 100); 
 }
 
-function clearSearch() { 
-    document.getElementById('search-input').value = ''; 
-    document.getElementById('clear-search').style.display = 'none'; 
-    renderTree(); 
-}
-
+function clearSearch() { document.getElementById('search-input').value = ''; document.getElementById('clear-search').style.display = 'none'; renderTree(); }
 function filterTree() {
-    const term = document.getElementById('search-input').value.toLowerCase(); 
-    const clearBtn = document.getElementById('clear-search');
-    
-    if (!term) { 
-        clearBtn.style.display = 'none'; 
-        renderTree(); 
-        return; 
-    }
-    
-    clearBtn.style.display = 'flex'; 
-    const container = document.getElementById('tree'); 
-    container.innerHTML = '';
-    
-    const rootGroup = document.createElement('div'); 
-    rootGroup.className = 'tree-group'; 
-    container.appendChild(rootGroup);
-    
+    const term = document.getElementById('search-input').value.toLowerCase(); const clearBtn = document.getElementById('clear-search');
+    if (!term) { clearBtn.style.display = 'none'; renderTree(); return; }
+    clearBtn.style.display = 'flex'; const container = document.getElementById('tree'); container.innerHTML = '';
+    const rootGroup = document.createElement('div'); rootGroup.className = 'tree-group'; container.appendChild(rootGroup);
     function getFilteredItems(items) { 
         let results = []; 
         items.forEach(item => { 
             const matchInTitle = item.title && item.title.toLowerCase().includes(term); 
             const filteredChildren = item.children ? getFilteredItems(item.children) : []; 
-            if (matchInTitle || filteredChildren.length > 0) {
-                results.push({ ...item, children: filteredChildren }); 
-            }
+            if (matchInTitle || filteredChildren.length > 0) results.push({ ...item, children: filteredChildren }); 
         }); 
         return results; 
     }
-    
     renderItems(getFilteredItems(fullTree.content), rootGroup);
 }
 
 function togglePassword() {
     if (fullTree.settings.password_enabled) {
-        showModal("Passwortschutz", "Deaktivieren?", [
-            { label: "Ja", class: "btn-discard", action: async () => {
-                await fetch('/api/settings', { 
-                    method: 'POST', 
-                    headers: {'Content-Type': 'application/json'}, 
-                    body: JSON.stringify({password_enabled: false}) 
-                });
-                fullTree.settings.password_enabled = false; 
-                updateMenuUI();
-            }}, 
-            { label: "Abbruch", class: "btn-cancel", action: () => {} }
-        ]);
+        showModal("Passwortschutz", "Deaktivieren?", [{ label: "Ja", class: "btn-discard", action: async () => { await fetch('/api/settings', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({password_enabled: false}) }); fullTree.settings.password_enabled = false; updateMenuUI(); }}, { label: "Abbruch", class: "btn-cancel", action: () => {} }]);
     } else {
-        showModal("Passwortschutz", "Neues Passwort:", [
-            { label: "Speichern", class: "btn-save", action: async () => {
-                const pwd = document.getElementById('modal-input').value;
-                if(pwd) {
-                    await fetch('/api/settings', { 
-                        method: 'POST', 
-                        headers: {'Content-Type': 'application/json'}, 
-                        body: JSON.stringify({password_enabled: true, password: pwd}) 
-                    });
-                    fullTree.settings.password_enabled = true; 
-                    updateMenuUI();
-                }
-            }}, 
-            { label: "Abbruch", class: "btn-cancel", action: () => {} }
-        ], true);
+        showModal("Passwortschutz", "Neues Passwort:", [{ label: "Speichern", class: "btn-save", action: async () => { const pwd = document.getElementById('modal-input').value; if(pwd) { await fetch('/api/settings', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({password_enabled: true, password: pwd}) }); fullTree.settings.password_enabled = true; updateMenuUI(); }}}, { label: "Abbruch", class: "btn-cancel", action: () => {} }], true);
     }
 }
 
 function toggleAllFolders() {
-    const searchTerm = document.getElementById('search-input').value;
-    let totalFolders = 0;
-    
-    function countFolders(items) { 
-        items.forEach(i => { 
-            if (i.children && i.children.length > 0) { 
-                totalFolders++; 
-                countFolders(i.children); 
-            } 
-        }); 
-    }
+    const searchTerm = document.getElementById('search-input').value; let totalFolders = 0;
+    function countFolders(items) { items.forEach(i => { if (i.children && i.children.length > 0) { totalFolders++; countFolders(i.children); } }); }
     countFolders(fullTree.content);
-
-    if (collapsedIds.size >= totalFolders / 2 && totalFolders > 0) {
-        collapsedIds.clear();
-    } else {
-        function collect(items) { 
-            items.forEach(i => { 
-                if(i.children && i.children.length > 0) { 
-                    collapsedIds.add(i.id); 
-                    collect(i.children); 
-                } 
-            }); 
-        } 
-        collect(fullTree.content);
-    }
-    saveCollapsedToLocal(); 
-    if (searchTerm) filterTree(); else renderTree();
+    if (collapsedIds.size >= totalFolders / 2 && totalFolders > 0) collapsedIds.clear();
+    else { function collect(items) { items.forEach(i => { if(i.children && i.children.length > 0) { collapsedIds.add(i.id); collect(i.children); } }); } collect(fullTree.content); }
+    saveCollapsedToLocal(); if (searchTerm) filterTree(); else renderTree();
 }
 
-function confirmAutoSort() { 
-    showModal("Sortieren?", "Automatisch alphabetisch sortieren?\nAchtung: Kann nicht automatisch rückgängig gemacht werden.", [ 
-        { label: "Ja, Sortieren", class: "btn-discard", action: async () => { await applyAutoSort(); } }, 
-        { label: "Abbrechen", class: "btn-cancel", action: () => {} } 
-    ]); 
-}
-
+function confirmAutoSort() { showModal("Sortieren?", "Automatisch alphabetisch sortieren?", [ { label: "Ja, Sortieren", class: "btn-discard", action: async () => { await applyAutoSort(); } }, { label: "Abbrechen", class: "btn-cancel", action: () => {} } ]); }
 async function applyAutoSort() { 
     const sortRecursive = (list) => { 
         list.sort((a, b) => { 
-            const aIsFolder = a.children && a.children.length > 0; 
-            const bIsFolder = b.children && b.children.length > 0; 
-            if (aIsFolder && !bIsFolder) return -1; 
-            if (!aIsFolder && bIsFolder) return 1; 
+            const aIsFolder = a.children && a.children.length > 0; const bIsFolder = b.children && b.children.length > 0; 
+            if (aIsFolder && !bIsFolder) return -1; if (!aIsFolder && bIsFolder) return 1; 
             return a.title.localeCompare(b.title, undefined, {numeric: true, sensitivity: 'base'}); 
         }); 
-        list.forEach(item => { 
-            if(item.children) sortRecursive(item.children); 
-        }); 
+        list.forEach(item => { if(item.children) sortRecursive(item.children); }); 
     }; 
-    
     sortRecursive(fullTree.content); 
-    
-    // Sortierung speichern (wir aktivieren kurz EditMode und Rebuilden, um die Indizes an die DB zu schicken)
-    document.body.classList.add('edit-mode-active');
-    renderTree();
-    await rebuildDataFromDOM();
-    document.body.classList.remove('edit-mode-active');
-    renderTree();
+    document.body.classList.add('edit-mode-active'); renderTree(); await rebuildDataFromDOM(); document.body.classList.remove('edit-mode-active'); renderTree();
 }
 
-function wrapSelection(b, a, p = "") { 
-    const ta = document.getElementById('node-text'); 
-    const s = ta.selectionStart;
-    const e = ta.selectionEnd; 
-    const txt = ta.value.substring(s, e) || p; 
-    ta.value = ta.value.substring(0, s) + b + txt + a + ta.value.substring(e); 
-    ta.focus(); 
-    ta.setSelectionRange(s + b.length, s + b.length + txt.length); 
-}
-
+function wrapSelection(b, a, p = "") { const ta = document.getElementById('node-text'); const s = ta.selectionStart; const e = ta.selectionEnd; const txt = ta.value.substring(s, e) || p; ta.value = ta.value.substring(0, s) + b + txt + a + ta.value.substring(e); ta.focus(); ta.setSelectionRange(s + b.length, s + b.length + txt.length); }
 function handleListAction(prefix, placeholder) {
-    const ta = document.getElementById('node-text');
-    const start = ta.selectionStart;
-    const end = ta.selectionEnd;
-    const text = ta.value;
-    const selectedText = text.substring(start, end);
-
+    const ta = document.getElementById('node-text'); const start = ta.selectionStart; const end = ta.selectionEnd; const text = ta.value; const selectedText = text.substring(start, end);
     if (selectedText.includes('\n')) {
-        const lines = selectedText.split('\n');
-        const newLines = lines.map(line => {
-            if (line.trim() === '') return line; 
-            if (line.trim().startsWith(prefix.trim())) return line; 
-            return prefix + line;
-        });
-        const newText = newLines.join('\n');
-        ta.value = text.substring(0, start) + newText + text.substring(end);
-        ta.setSelectionRange(start, start + newText.length);
-        ta.focus();
-        return;
+        const newText = selectedText.split('\n').map(line => { if (line.trim() === '' || line.trim().startsWith(prefix.trim())) return line; return prefix + line; }).join('\n');
+        ta.value = text.substring(0, start) + newText + text.substring(end); ta.setSelectionRange(start, start + newText.length); ta.focus(); return;
     }
-
     const textBefore = text.substring(0, start);
-    if (selectedText === placeholder && textBefore.endsWith(prefix)) {
-        const insertStr = '\n' + prefix + placeholder;
-        ta.value = text.substring(0, end) + insertStr + text.substring(end);
-        const newStart = end + '\n'.length + prefix.length;
-        ta.setSelectionRange(newStart, newStart + placeholder.length);
-        ta.focus();
-        return;
-    }
-
-    let insertPrefix = prefix;
-    if (textBefore.length > 0 && !textBefore.endsWith('\n')) {
-        insertPrefix = '\n' + prefix;
-    }
-
-    const insertStr = insertPrefix + (selectedText || placeholder);
-    ta.value = text.substring(0, start) + insertStr + text.substring(end);
-    const selectStart = start + insertPrefix.length;
-    ta.setSelectionRange(selectStart, selectStart + (selectedText || placeholder).length);
-    ta.focus();
+    if (selectedText === placeholder && textBefore.endsWith(prefix)) { const insertStr = '\n' + prefix + placeholder; ta.value = text.substring(0, end) + insertStr + text.substring(end); const newStart = end + '\n'.length + prefix.length; ta.setSelectionRange(newStart, newStart + placeholder.length); ta.focus(); return; }
+    let insertPrefix = prefix; if (textBefore.length > 0 && !textBefore.endsWith('\n')) insertPrefix = '\n' + prefix;
+    const insertStr = insertPrefix + (selectedText || placeholder); ta.value = text.substring(0, start) + insertStr + text.substring(end); const selectStart = start + insertPrefix.length; ta.setSelectionRange(selectStart, selectStart + (selectedText || placeholder).length); ta.focus();
 }
-
-function insertCodeTag() { 
-    wrapSelection("'''\n", "\n'''", "CODE"); 
-}
-
-function copyToClipboard(btn) { 
-    const code = btn.nextElementSibling.innerText; 
-    const el = document.createElement('textarea'); 
-    el.value = code; 
-    document.body.appendChild(el); 
-    el.select(); 
-    document.execCommand('copy'); 
-    document.body.removeChild(el); 
-    btn.innerText = 'Copied!'; 
-    setTimeout(() => btn.innerText = 'Copy', 2000); 
-}
-
-function toggleSettings(e) { 
-    e.stopPropagation(); 
-    const m = document.getElementById('dropdown-menu'); 
-    m.style.display = m.style.display === 'block' ? 'none' : 'block'; 
-}
-
-document.addEventListener('click', () => { 
-    const m = document.getElementById('dropdown-menu'); 
-    if (m) m.style.display = 'none'; 
-});
-
-function exportData() { 
-    window.location.href = '/api/export'; 
-}
-
-function toggleSidebar() { 
-    const h = document.body.classList.toggle('sidebar-hidden'); 
-    localStorage.setItem('sidebarState', h ? 'closed' : 'open'); 
-    document.querySelector('#mobile-toggle-btn span').innerText = h ? '▶' : '◀'; 
-}
+function insertCodeTag() { wrapSelection("'''\n", "\n'''", "CODE"); }
+function copyToClipboard(btn) { const code = btn.nextElementSibling.innerText; const el = document.createElement('textarea'); el.value = code; document.body.appendChild(el); el.select(); document.execCommand('copy'); document.body.removeChild(el); btn.innerText = 'Copied!'; setTimeout(() => btn.innerText = 'Copy', 2000); }
+function toggleSettings(e) { e.stopPropagation(); const m = document.getElementById('dropdown-menu'); m.style.display = m.style.display === 'block' ? 'none' : 'block'; }
+document.addEventListener('click', () => { const m = document.getElementById('dropdown-menu'); if (m) m.style.display = 'none'; });
+function exportData() { window.location.href = '/api/export'; }
+function toggleSidebar() { const h = document.body.classList.toggle('sidebar-hidden'); localStorage.setItem('sidebarState', h ? 'closed' : 'open'); document.querySelector('#mobile-toggle-btn span').innerText = h ? '▶' : '◀'; }
 
 async function uploadImage() { 
-    const input = document.createElement('input'); 
-    input.type = 'file'; 
-    input.accept = 'image/*'; 
-    
+    const input = document.createElement('input'); input.type = 'file'; input.accept = 'image/*'; 
     input.onchange = async (e) => { 
-        const file = e.target.files[0]; 
-        if (!file) return; 
-        
-        const fd = new FormData(); 
-        fd.append('image', file); 
-        
+        const file = e.target.files[0]; if (!file) return; 
+        const fd = new FormData(); fd.append('image', file); 
         try { 
-            const res = await fetch('/api/upload', { method: 'POST', body: fd }); 
-            const data = await res.json(); 
-            if(data.filename) {
-                wrapSelection(`[img:${data.filename}]`, '', ''); 
-            } else {
-                showModal("Fehler", "Ungültiger Dateityp oder Datei zu groß.", [
-                    { label: "OK", class: "btn-cancel", action: () => {} }
-                ]); 
-            }
-        } catch(err) { console.error(err); } 
-    }; 
-    input.click(); 
+            const res = await fetch('/api/upload', { method: 'POST', body: fd }); const data = await res.json(); 
+            if(data.filename) wrapSelection(`[img:${data.filename}]`, '', ''); 
+            else showModal("Fehler", "Ungültig.", [{ label: "OK", class: "btn-cancel", action: () => {} }]); 
+        } catch(err) {} 
+    }; input.click(); 
 }
 
 async function uploadGenericFile() { 
-    const input = document.createElement('input'); 
-    input.type = 'file'; 
-    
+    const input = document.createElement('input'); input.type = 'file'; 
     input.onchange = async (e) => { 
-        const file = e.target.files[0]; 
-        if (!file) return; 
-        
-        if (file.size > 20 * 1024 * 1024) {
-            showModal("Zu groß", "Die Datei darf maximal 20 MB groß sein.", [{ label: "Verstanden", class: "btn-cancel", action: () => {} }]);
-            return;
-        }
-
-        const fd = new FormData(); 
-        fd.append('file', file); 
-        
+        const file = e.target.files[0]; if (!file) return; 
+        if (file.size > 20 * 1024 * 1024) { showModal("Zu groß", "Max. 20 MB.", [{ label: "OK", class: "btn-cancel", action: () => {} }]); return; }
+        const fd = new FormData(); fd.append('file', file); 
         try { 
-            const res = await fetch('/api/upload', { method: 'POST', body: fd }); 
-            const data = await res.json(); 
-            if(data.filename) {
-                const isImg = file.type.startsWith('image/');
-                if (isImg) {
-                    wrapSelection(`[img:${data.filename}]`, '', ''); 
-                } else {
-                    wrapSelection(`[file:${data.filename}|${data.original}]`, '', ''); 
-                }
-            } else {
-                showModal("Fehler", "Upload fehlgeschlagen.", [{ label: "OK", class: "btn-cancel", action: () => {} }]); 
-            }
-        } catch(err) { console.error(err); } 
-    }; 
-    input.click(); 
+            const res = await fetch('/api/upload', { method: 'POST', body: fd }); const data = await res.json(); 
+            if(data.filename) { if (file.type.startsWith('image/')) wrapSelection(`[img:${data.filename}]`, '', ''); else wrapSelection(`[file:${data.filename}|${data.original}]`, '', ''); } 
+            else showModal("Fehler", "Fehler.", [{ label: "OK", class: "btn-cancel", action: () => {} }]); 
+        } catch(err) {} 
+    }; input.click(); 
 }
 
-function openLightbox(src) { 
-    document.getElementById('lightbox-img').src = src; 
-    document.getElementById('lightbox').style.display = 'flex'; 
-}
-
-function closeLightbox() { 
-    document.getElementById('lightbox').style.display = 'none'; 
-    document.getElementById('lightbox-img').src = ''; 
-}
-
-function getAllNotesFlat(nodes, path="") { 
-    let res = []; 
-    nodes.forEach(n => { 
-        let currentPath = path ? path + " / " + n.title : n.title; 
-        res.push({id: n.id, title: n.title, path: currentPath}); 
-        if(n.children) {
-            res = res.concat(getAllNotesFlat(n.children, currentPath)); 
-        }
-    }); 
-    return res; 
-}
+function openLightbox(src) { document.getElementById('lightbox-img').src = src; document.getElementById('lightbox').style.display = 'flex'; }
+function closeLightbox() { document.getElementById('lightbox').style.display = 'none'; document.getElementById('lightbox-img').src = ''; }
+function getAllNotesFlat(nodes, path="") { let res = []; nodes.forEach(n => { let currentPath = path ? path + " / " + n.title : n.title; res.push({id: n.id, title: n.title, path: currentPath}); if(n.children) res = res.concat(getAllNotesFlat(n.children, currentPath)); }); return res; }
 
 function initMentionSystem() {
-    const ta = document.getElementById('node-text'); 
-    const dropdown = document.getElementById('mention-dropdown');
-    
+    const ta = document.getElementById('node-text'); const dropdown = document.getElementById('mention-dropdown');
     ta.addEventListener('input', function() {
-        let cursor = ta.selectionStart; 
-        let textBefore = ta.value.substring(0, cursor); 
-        let match = textBefore.match(/(?:^|\s)@([^\n]{0,30})$/);
-        
+        let cursor = ta.selectionStart; let textBefore = ta.value.substring(0, cursor); let match = textBefore.match(/(?:^|\s)@([^\n]{0,30})$/);
         if (match) {
-            let search = match[1].toLowerCase(); 
-            let allNotes = getAllNotesFlat(fullTree.content).filter(n => n.id !== activeId);
+            let search = match[1].toLowerCase(); let allNotes = getAllNotesFlat(fullTree.content).filter(n => n.id !== activeId);
             let filtered = allNotes.filter(n => n.title.toLowerCase().includes(search) || n.path.toLowerCase().includes(search));
-            
             if (filtered.length > 0) {
                 dropdown.innerHTML = '';
                 filtered.forEach(n => { 
-                    let div = document.createElement('div'); 
-                    div.className = 'mention-item'; 
-                    div.innerHTML = `<strong>${n.title}</strong><span class="mention-path">${n.path}</span>`; 
-                    div.onclick = () => insertMention(n.id, n.title, match[1].length + 1); 
-                    dropdown.appendChild(div); 
+                    let div = document.createElement('div'); div.className = 'mention-item'; div.innerHTML = `<strong>${n.title}</strong><span class="mention-path">${n.path}</span>`; 
+                    div.onclick = () => insertMention(n.id, n.title, match[1].length + 1); dropdown.appendChild(div); 
                 });
                 dropdown.style.display = 'block';
-            } else { 
-                dropdown.style.display = 'none'; 
-            }
-        } else { 
-            dropdown.style.display = 'none'; 
-        }
+            } else dropdown.style.display = 'none'; 
+        } else dropdown.style.display = 'none'; 
     });
-    
-    document.addEventListener('click', (e) => { 
-        if(e.target !== ta && !dropdown.contains(e.target)) {
-            dropdown.style.display = 'none'; 
-        }
-    });
+    document.addEventListener('click', (e) => { if(e.target !== ta && !dropdown.contains(e.target)) dropdown.style.display = 'none'; });
 }
 
-function insertMention(id, title, replaceLength) {
-    let ta = document.getElementById('node-text'); 
-    let cursor = ta.selectionStart; 
-    let start = cursor - replaceLength; 
-    let text = ta.value;
-    
-    let linkCode = `[note:${id}|${title}] `; 
-    ta.value = text.substring(0, start) + linkCode + text.substring(cursor); 
-    ta.focus();
-    
-    let newCursor = start + linkCode.length; 
-    ta.setSelectionRange(newCursor, newCursor); 
-    document.getElementById('mention-dropdown').style.display = 'none';
-}
+function insertMention(id, title, replaceLength) { let ta = document.getElementById('node-text'); let cursor = ta.selectionStart; let start = cursor - replaceLength; let linkCode = `[note:${id}|${title}] `; ta.value = ta.value.substring(0, start) + linkCode + ta.value.substring(cursor); ta.focus(); ta.setSelectionRange(start + linkCode.length, start + linkCode.length); document.getElementById('mention-dropdown').style.display = 'none'; }
+function triggerMentionButton() { let ta = document.getElementById('node-text'); let s = ta.selectionStart; let prefix = (s === 0 || ta.value.charAt(s - 1) === '\n' || ta.value.charAt(s - 1) === ' ') ? '@' : ' @'; ta.value = ta.value.substring(0, s) + prefix + ta.value.substring(ta.selectionEnd); ta.focus(); ta.setSelectionRange(s + prefix.length, s + prefix.length); ta.dispatchEvent(new Event('input')); }
 
-function triggerMentionButton() {
-    let ta = document.getElementById('node-text'); 
-    let s = ta.selectionStart; 
-    let prefix = (s === 0 || ta.value.charAt(s - 1) === '\n' || ta.value.charAt(s - 1) === ' ') ? '@' : ' @';
-    
-    ta.value = ta.value.substring(0, s) + prefix + ta.value.substring(ta.selectionEnd); 
-    ta.focus(); 
-    ta.setSelectionRange(s + prefix.length, s + prefix.length); 
-    ta.dispatchEvent(new Event('input'));
-}
-
-// Skizzen Initialisierung
 let sketchCanvas, sketchCtx, isDrawing = false, sketchStrokes = [], currentStroke = null;
 let sketchColor = '#000000', sketchWidth = 8, sketchMode = 'pen', sketchBg = 'white', activeSketchId = null;
 
 function initSketcher() {
-    sketchCanvas = document.getElementById('sketch-canvas');
-    sketchCtx = sketchCanvas.getContext('2d');
-    
-    sketchCanvas.width = 1200;
-    sketchCanvas.height = 900;
-
-    const getPos = (e) => {
-        const r = sketchCanvas.getBoundingClientRect();
-        const scaleX = sketchCanvas.width / r.width;
-        const scaleY = sketchCanvas.height / r.height;
-        let cx = e.clientX, cy = e.clientY;
-        if(e.touches && e.touches.length > 0) { cx = e.touches[0].clientX; cy = e.touches[0].clientY; }
-        return { x: (cx - r.left) * scaleX, y: (cy - r.top) * scaleY };
-    };
-
-    const startDraw = (e) => {
-        e.preventDefault(); 
-        isDrawing = true; 
-        const p = getPos(e);
-        currentStroke = { color: sketchMode === 'eraser' ? sketchBg : sketchColor, width: sketchWidth, mode: sketchMode, points: [p] };
-        sketchStrokes.push(currentStroke);
-    };
-
-    const draw = (e) => {
-        if (!isDrawing) return; 
-        e.preventDefault();
-        currentStroke.points.push(getPos(e));
-        redrawSketch();
-    };
-
+    sketchCanvas = document.getElementById('sketch-canvas'); sketchCtx = sketchCanvas.getContext('2d');
+    sketchCanvas.width = 1200; sketchCanvas.height = 900;
+    const getPos = (e) => { const r = sketchCanvas.getBoundingClientRect(); const scaleX = sketchCanvas.width / r.width; const scaleY = sketchCanvas.height / r.height; let cx = e.clientX, cy = e.clientY; if(e.touches && e.touches.length > 0) { cx = e.touches[0].clientX; cy = e.touches[0].clientY; } return { x: (cx - r.left) * scaleX, y: (cy - r.top) * scaleY }; };
+    const startDraw = (e) => { e.preventDefault(); isDrawing = true; currentStroke = { color: sketchMode === 'eraser' ? sketchBg : sketchColor, width: sketchWidth, mode: sketchMode, points: [getPos(e)] }; sketchStrokes.push(currentStroke); };
+    const draw = (e) => { if (!isDrawing) return; e.preventDefault(); currentStroke.points.push(getPos(e)); redrawSketch(); };
     const endDraw = () => { isDrawing = false; };
-
-    sketchCanvas.addEventListener('mousedown', startDraw); 
-    sketchCanvas.addEventListener('mousemove', draw);
-    window.addEventListener('mouseup', endDraw);
-    sketchCanvas.addEventListener('touchstart', startDraw, {passive: false}); 
-    sketchCanvas.addEventListener('touchmove', draw, {passive: false});
-    window.addEventListener('touchend', endDraw);
+    sketchCanvas.addEventListener('mousedown', startDraw); sketchCanvas.addEventListener('mousemove', draw); window.addEventListener('mouseup', endDraw);
+    sketchCanvas.addEventListener('touchstart', startDraw, {passive: false}); sketchCanvas.addEventListener('touchmove', draw, {passive: false}); window.addEventListener('touchend', endDraw);
 }
 
 function redrawSketch() {
-    sketchCtx.globalAlpha = 1.0; 
-    sketchCtx.fillStyle = sketchBg;
-    sketchCtx.fillRect(0, 0, sketchCanvas.width, sketchCanvas.height);
-    sketchCtx.lineCap = 'round';
-    sketchCtx.lineJoin = 'round';
-
+    sketchCtx.globalAlpha = 1.0; sketchCtx.fillStyle = sketchBg; sketchCtx.fillRect(0, 0, sketchCanvas.width, sketchCanvas.height); sketchCtx.lineCap = 'round'; sketchCtx.lineJoin = 'round';
     for (let s of sketchStrokes) {
         if (s.points.length < 2) continue;
-        sketchCtx.globalAlpha = s.mode === 'highlighter' ? 0.4 : 1.0;
-
-        sketchCtx.beginPath();
-        sketchCtx.strokeStyle = s.color;
-        sketchCtx.lineWidth = s.width;
-        sketchCtx.moveTo(s.points[0].x, s.points[0].y);
-        
-        for (let i = 1; i < s.points.length - 1; i++) {
-            let xc = (s.points[i].x + s.points[i + 1].x) / 2;
-            let yc = (s.points[i].y + s.points[i + 1].y) / 2;
-            sketchCtx.quadraticCurveTo(s.points[i].x, s.points[i].y, xc, yc);
-        }
-        
-        sketchCtx.lineTo(s.points[s.points.length - 1].x, s.points[s.points.length - 1].y);
-        sketchCtx.stroke();
-    }
-    sketchCtx.globalAlpha = 1.0;
+        sketchCtx.globalAlpha = s.mode === 'highlighter' ? 0.4 : 1.0; sketchCtx.beginPath(); sketchCtx.strokeStyle = s.color; sketchCtx.lineWidth = s.width; sketchCtx.moveTo(s.points[0].x, s.points[0].y);
+        for (let i = 1; i < s.points.length - 1; i++) { let xc = (s.points[i].x + s.points[i + 1].x) / 2; let yc = (s.points[i].y + s.points[i + 1].y) / 2; sketchCtx.quadraticCurveTo(s.points[i].x, s.points[i].y, xc, yc); }
+        sketchCtx.lineTo(s.points[s.points.length - 1].x, s.points[s.points.length - 1].y); sketchCtx.stroke();
+    } sketchCtx.globalAlpha = 1.0;
 }
-
-function undoSketch() {
-    if (sketchStrokes.length > 0) {
-        sketchStrokes.pop();
-        redrawSketch();
-    }
-}
-
-function setSketchMode(mode) {
-    sketchMode = mode;
-    document.getElementById('btn-pen').classList.toggle('active', mode === 'pen');
-    document.getElementById('btn-highlighter').classList.toggle('active', mode === 'highlighter');
-    document.getElementById('btn-eraser').classList.toggle('active', mode === 'eraser');
-}
-
-function setSketchBg(bg) {
-    sketchBg = bg;
-    sketchStrokes.forEach(s => { 
-        if (s.mode === 'eraser') {
-            s.color = bg; 
-        } else if (!s.mode && (s.color === 'white' || s.color === 'black')) {
-            if (s.color !== bg && sketchMode === 'eraser') s.color = bg;
-        }
-    });
-    redrawSketch();
-}
+function undoSketch() { if (sketchStrokes.length > 0) { sketchStrokes.pop(); redrawSketch(); } }
+function setSketchMode(mode) { sketchMode = mode; document.getElementById('btn-pen').classList.toggle('active', mode === 'pen'); document.getElementById('btn-highlighter').classList.toggle('active', mode === 'highlighter'); document.getElementById('btn-eraser').classList.toggle('active', mode === 'eraser'); }
+function setSketchBg(bg) { sketchBg = bg; sketchStrokes.forEach(s => { if (s.mode === 'eraser') s.color = bg; else if (!s.mode && (s.color === 'white' || s.color === 'black')) { if (s.color !== bg && sketchMode === 'eraser') s.color = bg; } }); redrawSketch(); }
 
 function initDragAndDrop() { 
     const ta = document.getElementById('node-text'); 
-    
-    ta.addEventListener('dragover', e => { 
-        e.preventDefault(); 
-        ta.style.border = '1px dashed var(--accent)'; 
-    }); 
-    
-    ta.addEventListener('dragleave', e => { 
-        e.preventDefault(); 
-        ta.style.border = '1px solid var(--border-color)'; 
-    }); 
-    
+    ta.addEventListener('dragover', e => { e.preventDefault(); ta.style.border = '1px dashed var(--accent)'; }); 
+    ta.addEventListener('dragleave', e => { e.preventDefault(); ta.style.border = '1px solid var(--border-color)'; }); 
     ta.addEventListener('drop', async e => { 
-        e.preventDefault(); 
-        ta.style.border = '1px solid var(--border-color)'; 
-        
+        e.preventDefault(); ta.style.border = '1px solid var(--border-color)'; 
         if(e.dataTransfer.files && e.dataTransfer.files.length > 0) { 
             const f = e.dataTransfer.files[0]; 
-            
-            if (f.size > 20 * 1024 * 1024) {
-                showModal("Zu groß", "Maximal 20 MB erlaubt.", [{label: "OK", class: "btn-cancel", action: () => {}}]);
-                return;
-            }
-
-            const fd = new FormData(); 
-            fd.append('file', f); 
+            if (f.size > 20 * 1024 * 1024) return;
+            const fd = new FormData(); fd.append('file', f); 
             try { 
-                const res = await fetch('/api/upload', { method: 'POST', body: fd }); 
-                const data = await res.json(); 
+                const res = await fetch('/api/upload', { method: 'POST', body: fd }); const data = await res.json(); 
                 if(data.filename) { 
-                    const isImg = f.type.startsWith('image/');
-                    const txt = isImg ? `[img:${data.filename}]` : `[file:${data.filename}|${data.original}]`; 
-                    
-                    const s = ta.selectionStart;
-                    const end = ta.selectionEnd;
-                    ta.value = ta.value.substring(0, s) + txt + ta.value.substring(end); 
-                    ta.focus(); 
-                    ta.setSelectionRange(s + txt.length, s + txt.length); 
+                    const txt = f.type.startsWith('image/') ? `[img:${data.filename}]` : `[file:${data.filename}|${data.original}]`; 
+                    const s = ta.selectionStart; ta.value = ta.value.substring(0, s) + txt + ta.value.substring(ta.selectionEnd); ta.focus(); ta.setSelectionRange(s + txt.length, s + txt.length); 
                 } 
-            } catch(err) { console.error(err); } 
+            } catch(err) {} 
         } 
     }); 
 }
 
 document.addEventListener('keydown', function(e) {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
-        if (document.getElementById('edit-mode').style.display === 'block') {
-            e.preventDefault(); 
-            saveChanges();
-        }
-    }
-    
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { if (document.getElementById('edit-mode').style.display === 'block') { e.preventDefault(); saveChanges(); } }
     if (e.key === 'Escape') {
-        if (document.getElementById('lightbox').style.display === 'flex') {
-            closeLightbox();
-        } else if (document.getElementById('sketch-modal').style.display === 'flex') {
-            closeSketch();
-        } else if (document.getElementById('custom-modal').style.display === 'flex') {
-            document.getElementById('custom-modal').style.display = 'none';
-        } else if (document.getElementById('reminder-modal').style.display === 'flex') {
-            document.getElementById('reminder-modal').style.display = 'none';
-        } else if (document.getElementById('webhook-modal').style.display === 'flex') {
-            document.getElementById('webhook-modal').style.display = 'none';
-        } else if (document.getElementById('edit-mode').style.display === 'block') {
-            cancelEdit();
-        }
+        if (document.getElementById('lightbox').style.display === 'flex') closeLightbox();
+        else if (document.getElementById('sketch-modal').style.display === 'flex') closeSketch();
+        else if (document.getElementById('custom-modal').style.display === 'flex') document.getElementById('custom-modal').style.display = 'none';
+        else if (document.getElementById('reminder-modal').style.display === 'flex') document.getElementById('reminder-modal').style.display = 'none';
+        else if (document.getElementById('webhook-modal').style.display === 'flex') document.getElementById('webhook-modal').style.display = 'none';
+        else if (document.getElementById('edit-mode').style.display === 'block') cancelEdit();
     }
 });
 
-// Start des Tools
-window.onload = () => { 
-    loadData(); 
-    initDragAndDrop(); 
-    initMentionSystem();
-    setInterval(checkAndReloadData, 30000);
-};
+window.onload = () => { loadData(); initDragAndDrop(); initMentionSystem(); setInterval(checkAndReloadData, 30000); };
 EOF
 
-# CSS (identisch zu V1)
+# CSS Styling (Identisch zur V1 - Wichtig, dass das geladen wird!)
 cat << 'EOF' > $INSTALL_DIR/static/style.css
 :root { 
     --bg-color: #1a1a1a; 
@@ -2776,7 +2072,6 @@ input[type="checkbox"].task-check {
     100% { opacity: 1; }
 }
 
-/* Sketch Modal CSS */
 #sketch-modal .modal { 
     width: 1000px;
     max-width: 95vw; 
@@ -2825,50 +2120,17 @@ input[type="checkbox"].task-check {
 .sketch-btn.active { background: var(--accent); color: white; border-color: var(--accent); }
 EOF
 
-# Login HTML
-cat << 'EOF' > $INSTALL_DIR/templates/login.html
-<!DOCTYPE html>
-<html lang="de">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1.0">
-    <title>Login - Notes V2</title>
-    <link rel="stylesheet" href="/static/style.css?v={{ v }}">
-    <style> 
-        body { 
-            display: flex; 
-            justify-content: center; 
-            align-items: center; 
-        } 
-        
-        .login-box { 
-            background: var(--sidebar-bg); 
-            padding: 30px; 
-            border-radius: 8px; 
-            border: 1px solid var(--border-color); 
-            text-align: center; 
-            width: 300px; 
-            box-shadow: 0 5px 20px rgba(0,0,0,0.2); 
-        } 
-    </style>
-</head>
-<body data-theme="{{ theme }}">
-    <div class="login-box">
-        <h2 style="margin-top: 0">Login</h2>
-        {% if error %}<p style="color:#e74c3c; font-size: 0.9em; margin-bottom: 15px;">{{ error }}</p>{% endif %}
-        <form method="POST">
-            <input type="password" name="password" placeholder="Passwort eingeben" required autofocus>
-            <button type="submit" style="width:100%; background:{{ accent }} !important; color:white; padding:10px; border-radius:5px; margin-top:10px; font-weight:bold;">Einloggen</button>
-        </form>
-    </div>
-</body>
-</html>
-EOF
+# Sicherheit & Rechte: Wir bleiben bei deinem alten "notizen" Nutzer, damit es zu 100 % keine Dateikonflikte gibt!
+if ! id -u notizen > /dev/null 2>&1; then 
+    useradd -r -s /bin/false notizen
+fi
 
-# Sicherheit & Rechte
-chown -R www-data:www-data $INSTALL_DIR
+chown -R notizen:notizen $INSTALL_DIR
 find $INSTALL_DIR -type d -exec chmod 750 {} \;
 find $INSTALL_DIR -type f -exec chmod 640 {} \;
+
+chmod 750 $INSTALL_DIR/backup.sh
+chmod 750 $INSTALL_DIR/cleanup.py
 chmod +x $INSTALL_DIR/app.py
 
 # Systemd Autostart
@@ -2879,8 +2141,8 @@ Description=Notizen V2 (SQLite)
 After=network.target
 
 [Service]
-User=www-data
-Group=www-data
+User=notizen
+Group=notizen
 WorkingDirectory=$INSTALL_DIR
 ExecStart=$INSTALL_DIR/venv/bin/python $INSTALL_DIR/app.py
 Restart=always
@@ -2890,7 +2152,22 @@ WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
     systemctl enable $SERVICE_NAME
-    systemctl restart $SERVICE_NAME
 fi
+
+# Cronjobs verwalten
+if [[ "$CRON_CONFIRM" =~ ^[Yy]$ ]] || [[ "$BACKUP_CONFIRM" =~ ^[Yy]$ ]]; then
+    echo "--- Richte Cronjobs ein ---"
+    rm -f /etc/cron.d/notizen-tool
+    if [[ "$CRON_CONFIRM" =~ ^[Yy]$ ]]; then 
+        echo "0 3 * * * notizen /usr/bin/python3 $INSTALL_DIR/cleanup.py" >> /etc/cron.d/notizen-tool
+    fi
+    if [[ "$BACKUP_CONFIRM" =~ ^[Yy]$ ]]; then 
+        echo "0 4 * * * notizen $INSTALL_DIR/backup.sh" >> /etc/cron.d/notizen-tool
+    fi
+    chmod 644 /etc/cron.d/notizen-tool
+fi
+
+# Neustart erzwingen
+systemctl restart $SERVICE_NAME
 
 echo "--- V2 Setup abgeschlossen! ---"
