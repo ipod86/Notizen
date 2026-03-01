@@ -2895,6 +2895,9 @@ async function executeRestore() {
     xhr.open('POST', '/api/restore', true);
 
     if (file) {
+        // Restore-Modal ausblenden, damit der Upload-Balken im Vordergrund sichtbar wird
+        document.getElementById('restore-modal').style.display = 'none';
+        
         const modal = document.getElementById('upload-modal');
         const bar = document.getElementById('upload-progress-bar');
         const percentTxt = document.getElementById('upload-percent');
@@ -2914,15 +2917,19 @@ async function executeRestore() {
     
     xhr.onload = function() {
         if (file) document.getElementById('upload-modal').style.display = 'none';
+        
         try {
             const data = JSON.parse(xhr.responseText);
             if (xhr.status === 200 && data.status === 'success') {
+                // Restore-Modal wieder einblenden für die Erfolgsmeldung
+                document.getElementById('restore-modal').style.display = 'flex';
                 statusDiv.style.color = '#27ae60';
                 statusDiv.style.background = 'rgba(39, 174, 96, 0.1)';
                 statusDiv.innerText = "Erfolgreich! Die Seite wird nun neu geladen...";
                 statusDiv.style.display = 'block';
                 setTimeout(() => window.location.reload(), 2000);
             } else {
+                document.getElementById('restore-modal').style.display = 'flex';
                 statusDiv.style.color = '#e74c3c';
                 statusDiv.style.background = 'rgba(231, 76, 60, 0.1)';
                 statusDiv.innerText = "Fehler: " + (data.error || "Unbekannter Serverfehler");
@@ -2931,6 +2938,7 @@ async function executeRestore() {
                 btn.innerText = "Wiederherstellen";
             }
         } catch (e) {
+            document.getElementById('restore-modal').style.display = 'flex';
             statusDiv.style.color = '#e74c3c';
             statusDiv.style.background = 'rgba(231, 76, 60, 0.1)';
             statusDiv.innerText = "Netzwerkfehler beim Wiederherstellen.";
@@ -2942,6 +2950,8 @@ async function executeRestore() {
     
     xhr.onerror = function() {
         if (file) document.getElementById('upload-modal').style.display = 'none';
+        
+        document.getElementById('restore-modal').style.display = 'flex';
         statusDiv.style.color = '#e74c3c';
         statusDiv.style.background = 'rgba(231, 76, 60, 0.1)';
         statusDiv.innerText = "Netzwerkfehler beim Upload.";
