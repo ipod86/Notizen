@@ -6,23 +6,11 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# 1. Port & Einstellungen
+# 1. Port & Einstellungen (Stark vereinfacht)
 echo "Welcher Port soll für das Notiz-Tool genutzt werden? (Standard: 8080)"
 read -p "Port: " USER_PORT
 if [ -z "$USER_PORT" ]; then 
     USER_PORT=8080
-fi
-
-echo "Soll das Tool als Systemdienst eingerichtet und beim Systemstart automatisch geladen werden? (Y/n)"
-read -p "Autostart: " AUTOSTART_CONFIRM
-if [ -z "$AUTOSTART_CONFIRM" ]; then 
-    AUTOSTART_CONFIRM="y"
-fi
-
-echo "Soll ein nächtlicher Cleanup-Cronjob (03:00 Uhr) angelegt werden? (Y/n)"
-read -p "Cleanup-Cronjob: " CRON_CONFIRM
-if [ -z "$CRON_CONFIRM" ]; then 
-    CRON_CONFIRM="y"
 fi
 
 echo "Soll ein tägliches SQLite-Voll-Backup (04:00 Uhr) eingerichtet werden? (Y/n)"
@@ -31,13 +19,17 @@ if [ -z "$BACKUP_CONFIRM" ]; then
     BACKUP_CONFIRM="y"
 fi
 
+# Pflicht-Einstellungen (werden nicht mehr gefragt)
+AUTOSTART_CONFIRM="y"
+CRON_CONFIRM="y"
+
 INSTALL_DIR="/opt/notiz-tool"
 SERVICE_NAME="notizen.service"
 
 echo "--- Stoppe alten Service (falls aktiv) ---"
 systemctl stop $SERVICE_NAME 2>/dev/null
 
-echo "--- Starte V2.1 Setup in $INSTALL_DIR auf Port $USER_PORT ---"
+echo "--- Starte V2.2 Setup in $INSTALL_DIR auf Port $USER_PORT ---"
 
 # 2. Abhängigkeiten installieren
 apt update && apt install -y python3 python3-pip python3-venv cron sqlite3
@@ -128,6 +120,10 @@ def init_db():
                 saved_at REAL
             )
         ''')
+        
+        # FIX: Alte Trigger aus vorherigen Versionen aus der SQLite-Datei radieren!
+        conn.execute('DROP TRIGGER IF EXISTS save_note_history')
+        conn.execute('DROP TRIGGER IF EXISTS keep_max_5_history')
         
         if not conn.execute("SELECT key FROM settings WHERE key='theme'").fetchone():
             conn.execute("INSERT INTO settings (key, value) VALUES ('theme', 'dark')")
@@ -270,7 +266,6 @@ def update_tree():
         conn.executemany("UPDATE notes SET parent_id=?, sort_order=? WHERE id=?", update_data)
     return jsonify({"status": "success"})
 
-# Sucht per LIKE im gesamten Text inkl. Teilwörtern
 @app.route('/api/search', methods=['GET'])
 def search_notes():
     q = request.args.get('q', '')
@@ -338,7 +333,7 @@ def update_note(note_id):
             is_locked = lock_owner and (now - lock_time) < 30
             if is_locked and lock_owner != cid: return jsonify({"error": "Locked by another client"}), 403
 
-        # Historie anlegen (wenn in Einstellungen aktiv)
+        # Python-basierter Historien-Speicher
         sets = get_settings()
         if sets.get('history_enabled', True):
             old_row = conn.execute("SELECT title, text FROM notes WHERE id=?", (note_id,)).fetchone()
@@ -589,7 +584,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width,initial-scale=1.0">
-    <title>Notes V2.1</title>
+    <title>Notes V2.2</title>
     <link rel="stylesheet" href="/static/style.css?v={{ v }}">
     <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/tomorrow-night-blue.min.css">
@@ -2964,10 +2959,9 @@ chmod 750 $INSTALL_DIR/cleanup.py
 chmod +x $INSTALL_DIR/app.py
 
 # Systemd Autostart konfigurieren
-if [[ "$AUTOSTART_CONFIRM" =~ ^[Yy]$ ]]; then
-    cat << EOF > /etc/systemd/system/$SERVICE_NAME
+cat << EOF > /etc/systemd/system/$SERVICE_NAME
 [Unit]
-Description=Notizen V2.1
+Description=Notizen V2.2
 After=network.target
 
 [Service]
@@ -2980,27 +2974,19 @@ Restart=always
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl daemon-reload
-    systemctl enable $SERVICE_NAME
-fi
+
+systemctl daemon-reload
+systemctl enable $SERVICE_NAME
 
 # Cronjobs verwalten
-if [[ "$CRON_CONFIRM" =~ ^[Yy]$ ]] || [[ "$BACKUP_CONFIRM" =~ ^[Yy]$ ]]; then
-    echo "--- Richte Cronjobs ein ---"
-    rm -f /etc/cron.d/notizen-tool
-    if [[ "$CRON_CONFIRM" =~ ^[Yy]$ ]]; then 
-        echo "0 3 * * * notizen /usr/bin/python3 $INSTALL_DIR/cleanup.py" >> /etc/cron.d/notizen-tool
-    fi
-    if [[ "$BACKUP_CONFIRM" =~ ^[Yy]$ ]]; then 
-        echo "0 4 * * * notizen $INSTALL_DIR/backup.sh" >> /etc/cron.d/notizen-tool
-    fi
-    chmod 644 /etc/cron.d/notizen-tool
+echo "--- Richte Cronjobs ein ---"
+rm -f /etc/cron.d/notizen-tool
+echo "0 3 * * * notizen /usr/bin/python3 $INSTALL_DIR/cleanup.py" >> /etc/cron.d/notizen-tool
+if [[ "$BACKUP_CONFIRM" =~ ^[Yy]$ ]]; then 
+    echo "0 4 * * * notizen $INSTALL_DIR/backup.sh" >> /etc/cron.d/notizen-tool
 fi
+chmod 644 /etc/cron.d/notizen-tool
 
 # Neustart
-if [[ "$AUTOSTART_CONFIRM" =~ ^[Yy]$ ]]; then
-    systemctl restart $SERVICE_NAME
-    echo "--- Setup abgeschlossen! Tool ist unter Port $USER_PORT erreichbar. ---"
-else
-    echo "--- Setup abgeschlossen! ---"
-fi
+systemctl restart $SERVICE_NAME
+echo "--- Setup abgeschlossen! Tool ist unter Port $USER_PORT erreichbar. ---"
