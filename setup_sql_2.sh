@@ -37,7 +37,7 @@ SERVICE_NAME="notizen.service"
 echo "--- Stoppe alten Service (falls aktiv) ---"
 systemctl stop $SERVICE_NAME 2>/dev/null
 
-echo "--- Starte V2.1 (Zettelkasten & FTS) Setup in $INSTALL_DIR auf Port $USER_PORT ---"
+echo "--- Starte V2.1 Setup in $INSTALL_DIR auf Port $USER_PORT ---"
 
 # 2. Abhängigkeiten installieren
 apt update && apt install -y python3 python3-pip python3-venv cron sqlite3
@@ -119,7 +119,6 @@ def init_db():
             )
         ''')
         
-        # NEU: Tabelle für den Versionsverlauf
         conn.execute('''
             CREATE TABLE IF NOT EXISTS note_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -130,40 +129,14 @@ def init_db():
             )
         ''')
         
-        # NEU: FTS5 Virtuelle Tabelle für Volltextsuche
-        conn.execute('''
-            CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
-                id UNINDEXED, title, text, tokenize='unicode61'
-            )
-        ''')
-        
         if not conn.execute("SELECT key FROM settings WHERE key='theme'").fetchone():
             conn.execute("INSERT INTO settings (key, value) VALUES ('theme', 'dark')")
             conn.execute("INSERT INTO settings (key, value) VALUES ('accent', '#27ae60')")
             conn.execute("INSERT INTO settings (key, value) VALUES ('password_enabled', 'false')")
+            conn.execute("INSERT INTO settings (key, value) VALUES ('history_enabled', 'true')")
+            conn.execute("INSERT INTO settings (key, value) VALUES ('history_days', '30')")
             conn.execute("INSERT INTO settings (key, value) VALUES ('tree_last_modified', '0')")
             
-        # Aktualisierung der FTS-Tabelle bei Start sicherstellen
-        conn.execute("DELETE FROM notes_fts")
-        conn.execute("INSERT INTO notes_fts (id, title, text) SELECT id, title, text FROM notes")
-        
-        # Trigger für FTS
-        conn.execute('DROP TRIGGER IF EXISTS fts_insert')
-        conn.execute('''CREATE TRIGGER fts_insert AFTER INSERT ON notes BEGIN
-            INSERT INTO notes_fts (id, title, text) VALUES (NEW.id, NEW.title, NEW.text);
-        END;''')
-        
-        conn.execute('DROP TRIGGER IF EXISTS fts_delete')
-        conn.execute('''CREATE TRIGGER fts_delete AFTER DELETE ON notes BEGIN
-            DELETE FROM notes_fts WHERE id = OLD.id;
-        END;''')
-        
-        conn.execute('DROP TRIGGER IF EXISTS fts_update')
-        conn.execute('''CREATE TRIGGER fts_update AFTER UPDATE ON notes BEGIN
-            UPDATE notes_fts SET title = NEW.title, text = NEW.text WHERE id = OLD.id;
-        END;''')
-        
-        # Trigger für Tree Modified
         conn.execute('DROP TRIGGER IF EXISTS update_tree_mod')
         conn.execute('''CREATE TRIGGER update_tree_mod AFTER UPDATE ON notes BEGIN 
             UPDATE settings SET value = strftime('%s', 'now') WHERE key = 'tree_last_modified'; 
@@ -178,28 +151,6 @@ def init_db():
         conn.execute('''CREATE TRIGGER delete_tree_mod AFTER DELETE ON notes BEGIN 
             UPDATE settings SET value = strftime('%s', 'now') WHERE key = 'tree_last_modified'; 
         END;''')
-
-        # NEU: Trigger zum automatischen Speichern des Verlaufs vor einem Update
-        conn.execute('DROP TRIGGER IF EXISTS save_note_history')
-        conn.execute('''
-            CREATE TRIGGER save_note_history BEFORE UPDATE ON notes
-            WHEN OLD.text != NEW.text OR OLD.title != NEW.title
-            BEGIN
-                INSERT INTO note_history (note_id, title, text, saved_at)
-                VALUES (OLD.id, OLD.title, OLD.text, strftime('%s', 'now'));
-            END;
-        ''')
-        
-        # NEU: Trigger zum Begrenzen des Verlaufs auf die letzten 5 Versionen
-        conn.execute('DROP TRIGGER IF EXISTS keep_max_5_history')
-        conn.execute('''
-            CREATE TRIGGER keep_max_5_history AFTER INSERT ON note_history
-            BEGIN
-                DELETE FROM note_history WHERE note_id = NEW.note_id AND id NOT IN (
-                    SELECT id FROM note_history WHERE note_id = NEW.note_id ORDER BY saved_at DESC LIMIT 5
-                );
-            END;
-        ''')
 
 def webhook_worker():
     sent_reminders = set()
@@ -319,23 +270,15 @@ def update_tree():
         conn.executemany("UPDATE notes SET parent_id=?, sort_order=? WHERE id=?", update_data)
     return jsonify({"status": "success"})
 
-# NEU: Volltextsuche Route
+# Sucht per LIKE im gesamten Text inkl. Teilwörtern
 @app.route('/api/search', methods=['GET'])
 def search_notes():
     q = request.args.get('q', '')
-    if not q or len(q) < 2: return jsonify([])
+    if not q: return jsonify([])
     
-    safe_q = q.replace('"', '').replace("'", "").strip()
-    if not safe_q: return jsonify([])
-    
+    safe_q = f'%{q}%'
     with get_db() as conn:
-        try:
-            # FTS5 für super schnelle Volltextsuche
-            rows = conn.execute("SELECT id FROM notes_fts WHERE notes_fts MATCH ? LIMIT 50", (f'"{safe_q}" *',)).fetchall()
-        except:
-            # Fallback bei Syntax-Fehlern
-            rows = conn.execute("SELECT id FROM notes WHERE title LIKE ? OR text LIKE ? LIMIT 50", (f'%{safe_q}%', f'%{safe_q}%')).fetchall()
-            
+        rows = conn.execute("SELECT id FROM notes WHERE title LIKE ? OR text LIKE ?", (safe_q, safe_q)).fetchall()
         return jsonify([r['id'] for r in rows])
 
 @app.route('/api/notes/<note_id>', methods=['GET'])
@@ -345,27 +288,23 @@ def get_note(note_id):
         if row: return jsonify(dict(row))
         return jsonify({"error": "Not found"}), 404
 
-# NEU: Backlinks (Wo wird diese Notiz erwähnt?)
 @app.route('/api/notes/<note_id>/backlinks', methods=['GET'])
 def get_backlinks(note_id):
     with get_db() as conn:
         rows = conn.execute("SELECT id, title FROM notes WHERE text LIKE ?", (f'%[note:{note_id}|%',)).fetchall()
         return jsonify([dict(r) for r in rows])
 
-# NEU: Historie abrufen
 @app.route('/api/notes/<note_id>/history', methods=['GET'])
 def get_history(note_id):
     with get_db() as conn:
         rows = conn.execute("SELECT id, title, text, saved_at FROM note_history WHERE note_id=? ORDER BY saved_at DESC", (note_id,)).fetchall()
         return jsonify([dict(r) for r in rows])
 
-# NEU: Historie wiederherstellen
 @app.route('/api/notes/<note_id>/history/<int:history_id>', methods=['POST'])
 def restore_history(note_id, history_id):
     cid = request.json.get('client_id')
     now = time.time()
     with get_db() as conn:
-        # Lock prüfen wie beim PUT
         row = conn.execute("SELECT locked_by, locked_at FROM notes WHERE id=?", (note_id,)).fetchone()
         if row:
             lock_owner = row['locked_by']
@@ -399,6 +338,19 @@ def update_note(note_id):
             is_locked = lock_owner and (now - lock_time) < 30
             if is_locked and lock_owner != cid: return jsonify({"error": "Locked by another client"}), 403
 
+        # Historie anlegen (wenn in Einstellungen aktiv)
+        sets = get_settings()
+        if sets.get('history_enabled', True):
+            old_row = conn.execute("SELECT title, text FROM notes WHERE id=?", (note_id,)).fetchone()
+            if old_row:
+                old_title = old_row['title'] or ''
+                old_text = old_row['text'] or ''
+                new_title = data.get('title') or ''
+                new_text = data.get('text') or ''
+                if old_title != new_title or old_text != new_text:
+                    conn.execute("INSERT INTO note_history (note_id, title, text, saved_at) VALUES (?, ?, ?, ?)",
+                                 (note_id, old_title, old_text, now))
+
         conn.execute('''UPDATE notes SET title=?, text=?, reminder=? WHERE id=?''', (data.get('title'), data.get('text'), data.get('reminder'), note_id))
     return jsonify({"status": "success"})
 
@@ -409,7 +361,6 @@ def delete_note(note_id):
             children = conn.execute("SELECT id FROM notes WHERE parent_id=?", (nid,)).fetchall()
             for c in children: delete_recursive(c['id'])
             conn.execute("DELETE FROM notes WHERE id=?", (nid,))
-            # Optional: Historie bereinigen
             conn.execute("DELETE FROM note_history WHERE note_id=?", (nid,))
         delete_recursive(note_id)
     return jsonify({"status": "success"})
@@ -577,18 +528,35 @@ echo "app.run(host='0.0.0.0', port=$USER_PORT, debug=False)" >> $INSTALL_DIR/app
 cat << 'EOF' > $INSTALL_DIR/cleanup.py
 import sqlite3
 import os
+import time
 
 DB = '/opt/notiz-tool/data.db'
 UPL = '/opt/notiz-tool/uploads'
 
 if not os.path.exists(DB) or not os.path.exists(UPL): exit()
 
-used_files = set()
 conn = sqlite3.connect(DB)
-rows = conn.execute("SELECT text FROM notes WHERE text IS NOT NULL").fetchall()
 
-for r in rows:
-    text = r[0]
+# 1. Historie bereinigen anhand der Einstellungen
+sets = dict(conn.execute("SELECT key, value FROM settings").fetchall())
+hist_enabled = sets.get('history_enabled', 'true') == 'true'
+hist_days = int(sets.get('history_days', '30'))
+
+if hist_enabled:
+    cutoff = time.time() - (hist_days * 86400)
+    conn.execute("DELETE FROM note_history WHERE saved_at < ?", (cutoff,))
+else:
+    conn.execute("DELETE FROM note_history")
+conn.commit()
+
+# 2. Uploads bereinigen (scannt aktive Notizen UND lebendige Historie)
+used_files = set()
+rows = conn.execute("SELECT text FROM notes WHERE text IS NOT NULL").fetchall()
+hist_rows = conn.execute("SELECT text FROM note_history WHERE text IS NOT NULL").fetchall()
+
+all_texts = [r[0] for r in rows] + [r[0] for r in hist_rows]
+
+for text in all_texts:
     for f in os.listdir(UPL):
         if f in text: used_files.add(f)
         if f.startswith('sketch_') and f.endswith('.png'):
@@ -641,6 +609,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
                 <div class="menu-row" onclick="openRestoreModal()"><span>🔄 Backup Wiederherstellen</span></div>
                 <div class="menu-row" onclick="togglePassword()"><span id="pwd-toggle-text">🔒 Passwortschutz an</span></div>
                 <div class="menu-row" onclick="toggleWebhookModal()"><span id="webhook-toggle-text">🔔 Webhook (Push)</span></div>
+                <div class="menu-row" onclick="toggleHistorySettings()"><span>🕰️ Historien-Optionen</span></div>
                 <div class="menu-row" id="logout-btn" style="display:none; color:#e74c3c;" onclick="window.location.href='/logout'"><span>🚪 Abmelden</span></div>
             </div>
         </div>
@@ -679,7 +648,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
                     <button id="view-reminder-ack" onclick="clearReminder()" style="display:none; background:#e74c3c !important; color:white; padding:4px 8px; border-radius:4px; font-size:0.8em; font-weight:bold;">Bestätigen</button>
                     
                     <div style="margin-left:auto; display:flex; gap:10px;">
-                        <button onclick="openHistoryModal()" style="font-size:1.2em;" title="Versionsverlauf">🕰️</button>
+                        <button id="btn-open-history" onclick="openHistoryModal()" style="font-size:1.2em;" title="Versionsverlauf">🕰️</button>
                         <button onclick="enableEdit()" style="font-size:1.2em;" title="Bearbeiten">✏️</button>
                     </div>
                 </div>
@@ -740,8 +709,36 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
                 Lade...
             </div>
             <div class="modal-btns">
-                <button class="btn-cancel" onclick="document.getElementById('history-modal').style.display='none'">Schließen</button>
+                <button class="btn-cancel" onclick="closeHistoryModal()">Schließen</button>
             </div>
+        </div>
+    </div>
+
+    <div id="history-settings-modal" class="modal-overlay">
+        <div class="modal">
+            <h3 style="margin-top:0">Historien-Einstellungen</h3>
+            <div style="text-align:left; margin-bottom: 15px;">
+                <label style="display:block; margin-bottom:10px; cursor:pointer;">
+                    <input type="checkbox" id="history-enabled"> Versionsverlauf aktivieren
+                </label>
+                <label style="display:block; margin-bottom:5px; font-size:0.9em;">Lebensdauer der Versionen (in Tagen):</label>
+                <input type="number" id="history-days" min="1" max="365" style="width:100%;">
+                <p style="font-size:0.8em; color:#888; margin-top:5px;">Ältere Versionen (und deren verknüpfte Bilder) werden nachts vom System gelöscht.</p>
+            </div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('history-settings-modal').style.display='none'">Abbruch</button>
+                <button class="btn-save" onclick="saveHistorySettings()">Speichern</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="upload-modal" class="modal-overlay">
+        <div class="modal">
+            <h3 style="margin-top:0">Upload läuft...</h3>
+            <div style="width:100%; background:rgba(255,255,255,0.1); border-radius:5px; margin-top:15px; overflow:hidden;">
+                <div id="upload-progress-bar" style="width:0%; height:20px; background:var(--accent); border-radius:5px; transition:width 0.2s ease;"></div>
+            </div>
+            <div id="upload-percent" style="margin-top:10px; font-weight:bold;">0%</div>
         </div>
     </div>
 
@@ -759,7 +756,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
             <div id="restore-status" style="font-size: 0.9em; margin-bottom: 15px; display: none; padding: 10px; border-radius: 4px; background: rgba(0,0,0,0.2);"></div>
             <div class="modal-btns">
                 <button class="btn-cancel" onclick="document.getElementById('restore-modal').style.display='none'">Abbruch</button>
-                <button class="btn-save" id="btn-do-restore" onclick="executeRestore()">Verifizieren & Wiederherstellen</button>
+                <button class="btn-save" id="btn-do-restore" onclick="executeRestore()">Wiederherstellen</button>
             </div>
         </div>
     </div>
@@ -1305,13 +1302,12 @@ input[type="checkbox"].task-check { width: 16px; height: 16px; margin: 0; cursor
 .sketch-btn { padding: 5px 10px; border-radius: 4px; border: 1px solid var(--border-color); cursor: pointer; background: var(--sidebar-bg); color: var(--text-color); }
 .sketch-btn.active { background: var(--accent); color: white; border-color: var(--accent); }
 
-/* History-Details Design */
 .history-item summary { cursor: pointer; font-weight: bold; padding: 10px; background: rgba(255,255,255,0.05); border-radius: 5px; transition: background 0.2s; }
 .history-item summary:hover { background: rgba(var(--accent-rgb), 0.2); }
 .history-item[open] summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; border-bottom: 1px solid var(--border-color); }
 EOF
 
-# static/script.js (UNMINIFIED UND KOMPLETT EXPANDIERT)
+# static/script.js - UNKOMPRIMIERT
 cat << 'EOF' > $INSTALL_DIR/static/script.js
 var fullTree = { content: [], settings: {} };
 var activeId = null;
@@ -1343,7 +1339,9 @@ async function acquireLock(noteId, override = false) {
             startHeartbeat(noteId);
             return true;
         }
-    } catch(e) { console.error("Lock-Fehler:", e); }
+    } catch(e) { 
+        console.error("Lock-Fehler:", e); 
+    }
     return false;
 }
 
@@ -1351,18 +1349,25 @@ async function releaseLock() {
     if (!currentLockedNote) return;
     let nidToRelease = currentLockedNote;
     currentLockedNote = null; 
-    if (lockInterval) { clearInterval(lockInterval); lockInterval = null; }
+    
+    if (lockInterval) { 
+        clearInterval(lockInterval); 
+        lockInterval = null; 
+    }
     try {
         await fetch(`/api/lock/${nidToRelease}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ client_id: myClientId, action: 'release' })
         });
-    } catch(e) { console.error(e); }
+    } catch(e) { 
+        console.error(e); 
+    }
 }
 
 function startHeartbeat(noteId) {
     if (lockInterval) clearInterval(lockInterval);
+    
     lockInterval = setInterval(async () => {
         try {
             const res = await fetch(`/api/lock/${noteId}`, {
@@ -1371,15 +1376,23 @@ function startHeartbeat(noteId) {
                 body: JSON.stringify({ client_id: myClientId, action: 'heartbeat' })
             });
             const data = await res.json();
+            
             if (data.status === 'lost') {
                 if (lockInterval) clearInterval(lockInterval);
                 lockInterval = null;
                 currentLockedNote = null;
+                
                 showModal("Sperre verloren!", "Ein anderes Gerät hat die Bearbeitung erzwungen.", [
-                    { label: "Verstanden", class: "btn-cancel", action: () => { cancelEdit(); if (document.getElementById('sketch-modal').style.display === 'flex') closeSketch(); } }
+                    { label: "Verstanden", class: "btn-cancel", action: () => { 
+                        cancelEdit(); 
+                        if (document.getElementById('sketch-modal').style.display === 'flex') closeSketch();
+                        if (document.getElementById('history-modal').style.display === 'flex') document.getElementById('history-modal').style.display = 'none';
+                    }}
                 ]);
             }
-        } catch(e) { console.error(e); }
+        } catch(e) { 
+            console.error(e); 
+        }
     }, 5000); 
 }
 
@@ -1394,37 +1407,56 @@ async function checkAndReloadData() {
     try {
         const res = await fetch('/api/tree?_t=' + Date.now());
         if (!res.ok) return;
+        
         const data = await res.json();
         const serverMod = String(data.last_modified);
         const localMod = String(currentTreeLastMod);
         
         if (currentTreeLastMod === null || serverMod !== localMod) {
             currentTreeLastMod = data.last_modified;
-            if (Array.isArray(data.content)) fullTree.content = cleanDataArray(data.content);
-            else fullTree.content = [];
+            if (Array.isArray(data.content)) {
+                fullTree.content = cleanDataArray(data.content);
+            } else {
+                fullTree.content = [];
+            }
             
             fullTree.settings = data.settings || {};
             document.body.setAttribute('data-theme', fullTree.settings.theme || 'dark'); 
             applyAccentColor(fullTree.settings.accent || '#27ae60');
             updateMenuUI();
-            if (!document.body.classList.contains('edit-mode-active')) renderTree();
+            
+            if (!document.body.classList.contains('edit-mode-active')) {
+                const term = document.getElementById('search-input').value.trim();
+                if (term) {
+                    filterTree();
+                } else {
+                    renderTree();
+                }
+            }
         }
 
         if (activeId) {
             const editModeEl = document.getElementById('edit-mode');
             if (editModeEl && editModeEl.style.display !== 'block') {
                 const freshData = await fetchNoteData(activeId);
-                if (freshData) { activeNoteData = freshData; renderDisplayArea(); }
+                if (freshData) { 
+                    activeNoteData = freshData; 
+                    renderDisplayArea(); 
+                }
             }
         }
-    } catch (e) { console.error("Sync error:", e); }
+    } catch (e) { 
+        console.error("Sync error:", e); 
+    }
 }
 
 async function fetchNoteData(id) {
     try {
         const res = await fetch(`/api/notes/${id}?_t=` + Date.now());
         if(res.ok) return await res.json();
-    } catch(e) { console.error(e); }
+    } catch(e) { 
+        console.error(e); 
+    }
     return null;
 }
 
@@ -1439,26 +1471,90 @@ function cleanDataArray(arr) {
 async function loadData() { 
     const sState = localStorage.getItem('sidebarState') || 'closed'; 
     if (sState === 'closed') document.body.classList.add('sidebar-hidden'); 
+    
     const savedCollapsed = localStorage.getItem('collapsedNodes');
     if (savedCollapsed) {
-        try { collapsedIds = new Set(JSON.parse(savedCollapsed)); } catch(e) { collapsedIds = new Set(); }
+        try { 
+            collapsedIds = new Set(JSON.parse(savedCollapsed)); 
+        } catch(e) { 
+            collapsedIds = new Set(); 
+        }
     }
+    
     await checkAndReloadData();
-    if (!savedCollapsed && fullTree.content.length > 0) initAllCollapsed(fullTree.content);
+    
+    if (!savedCollapsed && fullTree.content.length > 0) {
+        initAllCollapsed(fullTree.content);
+    }
+    
     renderTree(); 
     const lastId = localStorage.getItem('lastActiveId'); 
-    if (lastId && findNode(fullTree.content, lastId)) selectNode(lastId); 
+    if (lastId && findNode(fullTree.content, lastId)) {
+        selectNode(lastId); 
+    }
 }
 
 function initAllCollapsed(items) { 
     if (!Array.isArray(items)) return;
     items.forEach(item => { 
-        if (item && item.children && item.children.length > 0) { collapsedIds.add(item.id); initAllCollapsed(item.children); } 
+        if (item && item.children && item.children.length > 0) { 
+            collapsedIds.add(item.id); 
+            initAllCollapsed(item.children); 
+        } 
     }); 
     saveCollapsedToLocal(); 
 }
 
-function saveCollapsedToLocal() { localStorage.setItem('collapsedNodes', JSON.stringify(Array.from(collapsedIds))); }
+function saveCollapsedToLocal() { 
+    localStorage.setItem('collapsedNodes', JSON.stringify(Array.from(collapsedIds))); 
+}
+
+// Ladefunktion mit Fortschrittsbalken (XMLHttpRequest)
+function uploadWithProgress(file, onSuccess) {
+    if (file.size > 50 * 1024 * 1024) { 
+        showModal("Zu groß", "Die Datei darf maximal 50 MB groß sein.", [{ label: "OK", class: "btn-cancel", action: () => {} }]); 
+        return; 
+    }
+    
+    const fd = new FormData(); 
+    fd.append('file', file);
+    
+    const modal = document.getElementById('upload-modal');
+    const bar = document.getElementById('upload-progress-bar');
+    const percentTxt = document.getElementById('upload-percent');
+    
+    modal.style.display = 'flex';
+    bar.style.width = '0%';
+    percentTxt.innerText = '0%';
+    
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/upload', true);
+    
+    xhr.upload.onprogress = function(e) {
+        if (e.lengthComputable) {
+            const percent = Math.round((e.loaded / e.total) * 100);
+            bar.style.width = percent + '%';
+            percentTxt.innerText = percent + '%';
+        }
+    };
+    
+    xhr.onload = function() {
+        modal.style.display = 'none';
+        if (xhr.status === 200) {
+            const data = JSON.parse(xhr.responseText);
+            onSuccess(data);
+        } else {
+            showModal("Fehler", "Der Upload ist fehlgeschlagen.", [{ label: "OK", class: "btn-cancel", action: () => {} }]); 
+        }
+    };
+    
+    xhr.onerror = function() {
+        modal.style.display = 'none';
+        showModal("Netzwerkfehler", "Upload abgebrochen.", [{ label: "OK", class: "btn-cancel", action: () => {} }]);
+    };
+    
+    xhr.send(fd);
+}
 
 async function enableEdit() { 
     if (!activeId) return;
@@ -1467,7 +1563,7 @@ async function enableEdit() {
     
     const locked = await acquireLock(activeId);
     if (!locked) {
-        showModal("System gesperrt", "Notiz wird bearbeitet.\n\nErzwingen?", [
+        showModal("System gesperrt", "Die Notiz wird gerade bearbeitet.\n\nErzwingen?", [
             { label: "Ja", class: "btn-discard", action: async () => { await acquireLock(activeId, true); showEditArea(); } },
             { label: "Abbrechen", class: "btn-cancel", action: () => {} }
         ]);
@@ -1479,8 +1575,10 @@ async function enableEdit() {
 function showEditArea() {
     document.getElementById('node-title').value = activeNoteData.title || '';
     document.getElementById('node-text').value = activeNoteData.text || '';
+    
     const editRemBtnText = document.getElementById('edit-reminder-text');
     const editRemClearBtn = document.getElementById('edit-reminder-clear');
+    
     if (activeNoteData.reminder) { 
         editRemBtnText.innerText = activeNoteData.reminder.replace('T', ' '); 
         editRemClearBtn.style.display = 'flex'; 
@@ -1488,6 +1586,7 @@ function showEditArea() {
         editRemBtnText.innerText = 'Erinnerung'; 
         editRemClearBtn.style.display = 'none'; 
     }
+    
     document.getElementById('view-mode').style.display = 'none'; 
     document.getElementById('edit-mode').style.display = 'block'; 
 }
@@ -1497,38 +1596,60 @@ async function saveChanges() {
     activeNoteData.title = document.getElementById('node-title').value; 
     activeNoteData.text = document.getElementById('node-text').value; 
     activeNoteData.client_id = myClientId; 
+    
     try {
-        const res = await fetch(`/api/notes/${activeId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(activeNoteData) });
+        const res = await fetch(`/api/notes/${activeId}`, { 
+            method: 'PUT', 
+            headers: { 'Content-Type': 'application/json' }, 
+            body: JSON.stringify(activeNoteData) 
+        });
         if (res.status === 403) {
             showModal("Speichern blockiert", "Gerät hat keine Sperre mehr. NICHT gespeichert.", [{ label: "OK", class: "btn-cancel", action: () => {} }]);
             return;
         }
-    } catch(e) { console.error(e); }
+    } catch(e) { 
+        console.error(e); 
+    }
+    
     await releaseLock();
     await checkAndReloadData(); 
     renderDisplayArea();
 }
 
-function cancelEdit() { releaseLock(); renderDisplayArea(); }
+function cancelEdit() { 
+    releaseLock(); 
+    renderDisplayArea(); 
+}
 
 function renderDisplayArea() {
     if (!activeNoteData) return;
+    
     document.getElementById('view-title').innerText = activeNoteData.title || 'Unbenannt'; 
     document.getElementById('display-area').innerHTML = renderMarkdown(activeNoteData.text); 
-    if(window.hljs) hljs.highlightAll(); 
+    
+    if(window.hljs) {
+        hljs.highlightAll(); 
+    }
     
     const viewBadge = document.getElementById('view-reminder-badge');
     const viewAck = document.getElementById('view-reminder-ack');
+    
     if (isReminderActive(activeNoteData)) { 
-        viewBadge.style.display = 'inline-block'; viewAck.style.display = 'inline-block'; 
+        viewBadge.style.display = 'inline-block'; 
+        viewAck.style.display = 'inline-block'; 
     } else { 
-        viewBadge.style.display = 'none'; viewAck.style.display = 'none'; 
+        viewBadge.style.display = 'none'; 
+        viewAck.style.display = 'none'; 
     }
     
     document.getElementById('view-mode').style.display = 'block'; 
     document.getElementById('edit-mode').style.display = 'none'; 
     
-    // FEATURE 3: Backlinks laden (Zettelkasten)
+    const btnHistory = document.getElementById('btn-open-history');
+    if (btnHistory) {
+        btnHistory.style.display = (fullTree.settings.history_enabled) ? 'inline-block' : 'none';
+    }
+    
     fetch(`/api/notes/${activeId}/backlinks`).then(r => r.json()).then(bl => {
         if (bl && bl.length > 0 && activeId === activeNoteData.id) {
             let blHtml = '<div style="margin-top:40px; padding-top:15px; border-top:1px dashed var(--border-color); color:#888;"><strong>🔗 Wird erwähnt in:</strong><br><div style="margin-top:8px;">';
@@ -1556,7 +1677,9 @@ async function selectNode(id) {
 }
 
 async function doSelectNode(id) {
-    activeId = id; localStorage.setItem('lastActiveId', id); 
+    activeId = id; 
+    localStorage.setItem('lastActiveId', id); 
+    
     activeNoteData = await fetchNoteData(id);
     if (!activeNoteData) return;
     
@@ -1574,11 +1697,13 @@ async function doSelectNode(id) {
         span.onclick = () => selectNode(p.id);
         span.onmouseover = () => span.style.textDecoration = 'underline';
         span.onmouseout = () => span.style.textDecoration = 'none';
+        
         breadcrumbEl.appendChild(span); 
         if(idx < pathData.length - 1) breadcrumbEl.appendChild(document.createTextNode(' / ')); 
     });
     
     renderDisplayArea();
+    
     document.querySelectorAll('.tree-item').forEach(el => el.classList.remove('active')); 
     const activeEl = document.querySelector(`.tree-item-container[data-id="${id}"] > .tree-item`); 
     if(activeEl) activeEl.classList.add('active'); 
@@ -1586,38 +1711,63 @@ async function doSelectNode(id) {
 
 function toggleEditMode() { 
     if (!document.body.classList.contains('edit-mode-active')) { 
-        document.body.classList.add('edit-mode-active'); renderTree(); 
+        document.body.classList.add('edit-mode-active'); 
+        renderTree(); 
     } else { 
-        document.body.classList.remove('edit-mode-active'); sortables.forEach(s => s.destroy()); sortables = []; renderTree(); 
+        document.body.classList.remove('edit-mode-active'); 
+        sortables.forEach(s => s.destroy()); 
+        sortables = []; 
+        renderTree(); 
     }
 }
 
 async function rebuildDataFromDOM() { 
     if (!document.body.classList.contains('edit-mode-active')) return;
     let flatUpdates = [];
+    
     function parse(container, parentId) { 
         Array.from(container.querySelectorAll(':scope > .tree-item-container')).forEach((div, index) => { 
             const id = div.getAttribute('data-id'); 
-            if (id) { flatUpdates.push({ id: id, parent_id: parentId, sort_order: index }); const sub = div.querySelector(':scope > .tree-group'); if(sub) parse(sub, id); }
+            if (id) { 
+                flatUpdates.push({ id: id, parent_id: parentId, sort_order: index }); 
+                const sub = div.querySelector(':scope > .tree-group'); 
+                if(sub) parse(sub, id); 
+            }
         }); 
     } 
+    
     const rg = document.querySelector('#tree > .tree-group'); 
     if(rg) { 
         parse(rg, null); 
-        try { await fetch('/api/tree', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(flatUpdates) }); await checkAndReloadData(); } 
-        catch(e) { console.error("Fehler:", e); }
+        try { 
+            await fetch('/api/tree', { 
+                method: 'POST', 
+                headers: { 'Content-Type': 'application/json' }, 
+                body: JSON.stringify(flatUpdates) 
+            }); 
+            await checkAndReloadData(); 
+        } catch(e) { 
+            console.error("Fehler:", e); 
+        }
     } 
 }
 
 window.toggleTask = async function(targetIdx, currentlyChecked) {
     if (!await acquireLock(activeId)) { 
         showModal("Gesperrt", "Checkbox kann nicht geändert werden.", [{ label: "OK", class: "btn-cancel", action: () => {} }]); 
-        renderDisplayArea(); return; 
+        renderDisplayArea(); 
+        return; 
     }
-    activeNoteData = await fetchNoteData(activeId);
-    if(!activeNoteData) { releaseLock(); return; }
     
-    let tIndex = 0; let lines = activeNoteData.text.split('\n');
+    activeNoteData = await fetchNoteData(activeId);
+    if(!activeNoteData) { 
+        releaseLock(); 
+        return; 
+    }
+    
+    let tIndex = 0; 
+    let lines = activeNoteData.text.split('\n');
+    
     for (let i = 0; i < lines.length; i++) {
         let t = lines[i].trim();
         if (t.startsWith('- [ ] ') || t.startsWith('- [x] ') || t.startsWith('- [X] ')) {
@@ -1630,12 +1780,21 @@ window.toggleTask = async function(targetIdx, currentlyChecked) {
         }
     }
     
-    activeNoteData.text = lines.join('\n'); activeNoteData.client_id = myClientId; 
+    activeNoteData.text = lines.join('\n'); 
+    activeNoteData.client_id = myClientId; 
+    
     try {
-        const res = await fetch(`/api/notes/${activeId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(activeNoteData) });
+        const res = await fetch(`/api/notes/${activeId}`, { 
+            method: 'PUT', 
+            headers: { 'Content-Type': 'application/json' }, 
+            body: JSON.stringify(activeNoteData) 
+        });
         if (res.status === 403) alert("Gesperrt");
-    } catch(e) { console.error(e); }
-    await releaseLock(); renderDisplayArea();
+    } catch(e) { 
+        console.error(e); 
+    }
+    await releaseLock(); 
+    renderDisplayArea();
 };
 
 function hasActiveReminder(node) {
@@ -1643,9 +1802,13 @@ function hasActiveReminder(node) {
         if (!node) return false;
         if (isReminderActive(node)) return true;
         if (node.children && Array.isArray(node.children)) {
-            for (let i = 0; i < node.children.length; i++) { if (hasActiveReminder(node.children[i])) return true; }
+            for (let i = 0; i < node.children.length; i++) { 
+                if (hasActiveReminder(node.children[i])) return true; 
+            }
         }
-    } catch(e) { console.error(e); }
+    } catch(e) { 
+        console.error(e); 
+    }
     return false;
 }
 
@@ -1655,64 +1818,158 @@ function isReminderActive(node) {
         const remDate = new Date(node.reminder);
         if (isNaN(remDate.getTime())) return false;
         return remDate <= new Date();
-    } catch(e) { return false; }
+    } catch(e) { 
+        return false; 
+    }
 }
 
 function renderItems(items, parent) { 
     if (!Array.isArray(items)) return;
     const isEdit = document.body.classList.contains('edit-mode-active'); 
+    const searchTerm = document.getElementById('search-input').value.trim();
+    
     items.forEach(item => { 
         if (!item || !item.id) return;
-        const isFolder = item.children && item.children.length > 0; 
-        const isCollapsed = isEdit ? false : collapsedIds.has(item.id); 
         
-        const div = document.createElement('div'); div.className = 'tree-item-container'; div.setAttribute('data-id', item.id); 
-        const wrapper = document.createElement('div'); wrapper.className = 'tree-item' + (item.id === activeId ? ' active' : ''); 
-        const handle = document.createElement('span'); handle.className = 'drag-handle'; handle.innerHTML = '⋮⋮';
-        const icon = document.createElement('span'); icon.className = 'tree-icon'; icon.innerText = isFolder ? (isCollapsed ? '📁' : '📂') : '📄';
+        const isFolder = item.children && item.children.length > 0; 
+        
+        // Ordner sind zugeklappt, wenn sie in collapsedIds sind.
+        // ABER beim aktiven Suchen heben wir das temporär auf, es sei denn der Nutzer klickt sie gezielt während der Suche zu.
+        let isCollapsed = false;
+        if (!isEdit) {
+            if (searchTerm !== '') {
+                // Suchmodus: Aufklappen erzwingen, außer Nutzer hat ihn während der Suche geschlossen
+                isCollapsed = collapsedIds.has(item.id);
+            } else {
+                // Normalmodus
+                isCollapsed = collapsedIds.has(item.id);
+            }
+        }
+        
+        const div = document.createElement('div'); 
+        div.className = 'tree-item-container'; 
+        div.setAttribute('data-id', item.id); 
+        
+        const wrapper = document.createElement('div'); 
+        wrapper.className = 'tree-item' + (item.id === activeId ? ' active' : ''); 
+        
+        const handle = document.createElement('span'); 
+        handle.className = 'drag-handle'; 
+        handle.innerHTML = '⋮⋮';
+        
+        const icon = document.createElement('span'); 
+        icon.className = 'tree-icon'; 
+        icon.innerText = isFolder ? (isCollapsed ? '📁' : '📂') : '📄';
         
         icon.onclick = (e) => { 
             e.stopPropagation(); 
             if (!isEdit && isFolder) { 
-                if (collapsedIds.has(item.id)) collapsedIds.delete(item.id); else collapsedIds.add(item.id); 
-                saveCollapsedToLocal(); renderTree(); 
+                if (collapsedIds.has(item.id)) {
+                    collapsedIds.delete(item.id); 
+                } else {
+                    collapsedIds.add(item.id); 
+                }
+                saveCollapsedToLocal(); 
+                
+                // Such-Fix: Wir rufen filterTree() auf, wenn wir suchen, damit das UI nicht zurückspringt
+                if (searchTerm !== '') {
+                    filterTree();
+                } else {
+                    renderTree(); 
+                }
             } 
         }; 
         
-        const text = document.createElement('span'); text.className = 'tree-text'; text.innerText = item.title || 'Unbenannt'; 
-        if (hasActiveReminder(item)) { const rSpan = document.createElement('span'); rSpan.className = 'reminder-icon'; rSpan.innerText = '⏰'; text.appendChild(rSpan); }
-        text.onclick = (e) => { e.stopPropagation(); if (!isEdit) selectNode(item.id); }; 
+        const text = document.createElement('span'); 
+        text.className = 'tree-text'; 
+        text.innerText = item.title || 'Unbenannt'; 
         
-        const addBtn = document.createElement('button'); addBtn.className = 'add-sub-btn'; addBtn.innerText = '+'; addBtn.onclick = (e) => { e.stopPropagation(); addItem(item.id); }; 
-        const delBtn = document.createElement('button'); delBtn.className = 'delete-btn'; delBtn.innerText = '×'; delBtn.onclick = (e) => { e.stopPropagation(); deleteItem(item.id); }; 
+        if (hasActiveReminder(item)) { 
+            const rSpan = document.createElement('span'); 
+            rSpan.className = 'reminder-icon'; 
+            rSpan.innerText = '⏰'; 
+            text.appendChild(rSpan); 
+        }
         
-        wrapper.append(handle, icon, text, addBtn, delBtn); div.appendChild(wrapper); 
-        const childGroup = document.createElement('div'); childGroup.className = 'tree-group'; 
-        if (isFolder && !isCollapsed) renderItems(item.children, childGroup); 
-        div.appendChild(childGroup); parent.appendChild(div); 
+        text.onclick = (e) => { 
+            e.stopPropagation(); 
+            if (!isEdit) selectNode(item.id); 
+        }; 
+        
+        const addBtn = document.createElement('button'); 
+        addBtn.className = 'add-sub-btn'; 
+        addBtn.innerText = '+'; 
+        addBtn.onclick = (e) => { 
+            e.stopPropagation(); 
+            addItem(item.id); 
+        }; 
+        
+        const delBtn = document.createElement('button'); 
+        delBtn.className = 'delete-btn'; 
+        delBtn.innerText = '×'; 
+        delBtn.onclick = (e) => { 
+            e.stopPropagation(); 
+            deleteItem(item.id); 
+        }; 
+        
+        wrapper.append(handle, icon, text, addBtn, delBtn); 
+        div.appendChild(wrapper); 
+        
+        const childGroup = document.createElement('div'); 
+        childGroup.className = 'tree-group'; 
+        
+        if (isFolder && !isCollapsed) {
+            renderItems(item.children, childGroup); 
+        }
+        
+        div.appendChild(childGroup); 
+        parent.appendChild(div); 
     }); 
 }
 
 function initSortables() { 
-    sortables.forEach(s => s.destroy()); sortables = []; 
+    sortables.forEach(s => s.destroy()); 
+    sortables = []; 
+    
     document.querySelectorAll('.tree-group').forEach(el => { 
-        sortables.push(new Sortable(el, { group: 'nested', animation: 150, handle: '.drag-handle', fallbackOnBody: true, onEnd: (evt) => { if (evt.oldIndex !== evt.newIndex || evt.to !== evt.from) rebuildDataFromDOM(); } })); 
+        sortables.push(new Sortable(el, { 
+            group: 'nested', 
+            animation: 150, 
+            handle: '.drag-handle', 
+            fallbackOnBody: true, 
+            onEnd: (evt) => { 
+                if (evt.oldIndex !== evt.newIndex || evt.to !== evt.from) {
+                    rebuildDataFromDOM(); 
+                }
+            } 
+        })); 
     }); 
 }
 
 function renderTree() { 
-    const container = document.getElementById('tree'); if (!container) return;
-    container.innerHTML = ''; const rootGroup = document.createElement('div'); rootGroup.className = 'tree-group'; container.appendChild(rootGroup); 
+    const container = document.getElementById('tree'); 
+    if (!container) return;
+    
+    container.innerHTML = ''; 
+    const rootGroup = document.createElement('div'); 
+    rootGroup.className = 'tree-group'; 
+    container.appendChild(rootGroup); 
+    
     renderItems(fullTree.content, rootGroup); 
-    if (document.body.classList.contains('edit-mode-active')) initSortables(); 
+    
+    if (document.body.classList.contains('edit-mode-active')) {
+        initSortables(); 
+    }
 }
 
 function renderMarkdown(text) { 
     if (!text) return ''; 
     let html = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); 
+    
     html = html.replace(/\[img:(.*?)\]/g, '<img src="/uploads/$1" class="note-img" onclick="openLightbox(this.src)">');
     html = html.replace(/\[sketch:([a-zA-Z0-9]+)\]/g, '<img src="/uploads/sketch_$1.png?v='+Date.now()+'" class="note-img sketch-img" title="Skizze bearbeiten" onclick="openSketch(\'$1\')">');
     html = html.replace(/\[file:([a-zA-Z0-9.\-]+)\|([^\]]+)\]/g, '<a href="/uploads/$1" target="_blank" class="note-link">📎 $2</a>');
+    
     html = html.replace(/\[note:([a-zA-Z0-9]+)\|([^\]]+)\]/g, (match, id, title) => '<a href="#" onclick="selectNode(\'' + id + '\'); return false;" class="note-link">@ ' + title + '</a>');
     html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" style="color:var(--accent); text-decoration:underline;">$1</a>');
     html = html.replace(/\[s=(.*?)\]\n?([\s\S]*?)\n?\[\/s\]/g, '<details class="spoiler"><summary>$1</summary><div class="spoiler-content">$2</div></details>');
@@ -1726,13 +1983,21 @@ function renderMarkdown(text) {
         html = html.replace(/~~(.*?)~~/g, '<s>$1</s>'); 
     } 
     
-    let parts = html.split("'''"); let res = ''; window.taskIndexCounter = 0; 
+    let parts = html.split("'''"); 
+    let res = ''; 
+    window.taskIndexCounter = 0; 
+    
     for (let i = 0; i < parts.length; i++) { 
         if (i % 2 === 1) { 
-            let content = parts[i].trim(); let lines = content.split('\n'); let langClass = ''; 
+            let content = parts[i].trim(); 
+            let lines = content.split('\n'); 
+            let langClass = ''; 
+            
             if (lines.length > 0 && lines[0].length < 15 && /^[a-z0-9]+$/.test(lines[0].trim())) { 
-                langClass = ' class="language-' + lines[0].trim() + '"'; content = lines.slice(1).join('\n'); 
+                langClass = ' class="language-' + lines[0].trim() + '"'; 
+                content = lines.slice(1).join('\n'); 
             } 
+            
             res += '<div class="code-container"><button class="copy-badge" onclick="copyToClipboard(this)">Copy</button><pre><code' + langClass + '>' + content + '</code></pre></div>'; 
         } else { 
             res += parts[i].split('\n').map(line => {
@@ -1742,9 +2007,18 @@ function renderMarkdown(text) {
                 if (t.startsWith('### ')) return '<h3>' + line.substring(4) + '</h3>'; 
                 if (t.startsWith('## ')) return '<h2>' + line.substring(3) + '</h2>'; 
                 if (t.startsWith('# ')) return '<h1>' + line.substring(2) + '</h1>';
-                if (t.startsWith('- [ ] ')) { let idx = window.taskIndexCounter++; return '<div class="task-list-item"><input type="checkbox" class="task-check" onclick="toggleTask(' + idx + ', false)"> <span>' + line.substring(line.indexOf('- [ ] ') + 6) + '</span></div>'; }
-                if (t.startsWith('- [x] ') || t.startsWith('- [X] ')) { let idx = window.taskIndexCounter++; return '<div class="task-list-item"><input type="checkbox" class="task-check" checked onclick="toggleTask(' + idx + ', true)"> <span><del>' + line.substring(line.indexOf('] ') + 2) + '</del></span></div>'; }
+                
+                if (t.startsWith('- [ ] ')) { 
+                    let idx = window.taskIndexCounter++; 
+                    return '<div class="task-list-item"><input type="checkbox" class="task-check" onclick="toggleTask(' + idx + ', false)"> <span>' + line.substring(line.indexOf('- [ ] ') + 6) + '</span></div>'; 
+                }
+                if (t.startsWith('- [x] ') || t.startsWith('- [X] ')) { 
+                    let idx = window.taskIndexCounter++; 
+                    return '<div class="task-list-item"><input type="checkbox" class="task-check" checked onclick="toggleTask(' + idx + ', true)"> <span><del>' + line.substring(line.indexOf('] ') + 2) + '</del></span></div>'; 
+                }
+                
                 if (t.startsWith('- ')) return '<div style="margin-left: 20px;">• ' + line.substring(line.indexOf('- ')+2) + '</div>'; 
+                
                 return '<div>' + line + '</div>';
             }).join(''); 
         } 
@@ -1755,41 +2029,89 @@ function renderMarkdown(text) {
 function openReminderModal() {
     if(!activeNoteData) return;
     document.getElementById('reminder-modal').style.display = 'flex';
-    const hasTimeCb = document.getElementById('reminder-has-time'), dateInp = document.getElementById('reminder-date'), dtInp = document.getElementById('reminder-datetime');
+    
+    const hasTimeCb = document.getElementById('reminder-has-time');
+    const dateInp = document.getElementById('reminder-date');
+    const dtInp = document.getElementById('reminder-datetime');
+    
     if (activeNoteData.reminder) { 
-        if (activeNoteData.reminder.includes('T')) { hasTimeCb.checked = true; dtInp.value = activeNoteData.reminder; } else { hasTimeCb.checked = false; dateInp.value = activeNoteData.reminder; } 
-    } else { hasTimeCb.checked = false; dateInp.value = ''; dtInp.value = ''; }
+        if (activeNoteData.reminder.includes('T')) { 
+            hasTimeCb.checked = true; 
+            dtInp.value = activeNoteData.reminder; 
+        } else { 
+            hasTimeCb.checked = false; 
+            dateInp.value = activeNoteData.reminder; 
+        } 
+    } else { 
+        hasTimeCb.checked = false; 
+        dateInp.value = ''; 
+        dtInp.value = ''; 
+    }
     toggleReminderInput();
 }
 
 function toggleReminderInput() { 
     const hasTime = document.getElementById('reminder-has-time').checked; 
-    document.getElementById('reminder-date').style.display = hasTime ? 'none' : 'block'; document.getElementById('reminder-datetime').style.display = hasTime ? 'block' : 'none';
+    document.getElementById('reminder-date').style.display = hasTime ? 'none' : 'block'; 
+    document.getElementById('reminder-datetime').style.display = hasTime ? 'block' : 'none';
 }
 
 async function saveReminder() {
     if(!activeNoteData) return;
     const hasTime = document.getElementById('reminder-has-time').checked; 
     let val = hasTime ? document.getElementById('reminder-datetime').value : document.getElementById('reminder-date').value;
+    
     if(val) { 
-        activeNoteData.reminder = val; activeNoteData.client_id = myClientId; 
+        activeNoteData.reminder = val; 
+        activeNoteData.client_id = myClientId; 
+        
         document.getElementById('reminder-modal').style.display = 'none'; 
-        await fetch(`/api/notes/${activeId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(activeNoteData) }); 
-        await checkAndReloadData(); renderDisplayArea(); 
+        
+        await fetch(`/api/notes/${activeId}`, { 
+            method: 'PUT', 
+            headers: { 'Content-Type': 'application/json' }, 
+            body: JSON.stringify(activeNoteData) 
+        }); 
+        
+        await checkAndReloadData(); 
+        renderDisplayArea(); 
     }
 }
 
 async function clearReminder() { 
     if(activeNoteData && activeNoteData.reminder) { 
-        activeNoteData.reminder = null; activeNoteData.client_id = myClientId; 
-        await fetch(`/api/notes/${activeId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(activeNoteData) }); 
-        await checkAndReloadData(); renderDisplayArea(); 
+        activeNoteData.reminder = null; 
+        activeNoteData.client_id = myClientId; 
+        
+        await fetch(`/api/notes/${activeId}`, { 
+            method: 'PUT', 
+            headers: { 'Content-Type': 'application/json' }, 
+            body: JSON.stringify(activeNoteData) 
+        }); 
+        
+        await checkAndReloadData(); 
+        renderDisplayArea(); 
     } 
 }
 
-// NEU: Historie Modal & Wiederherstellen (Zeitreise)
+// History & Lock System
 async function openHistoryModal() {
     if (!activeId) return;
+    
+    // Prüfen, ob die Historie überhaupt erlaubt ist
+    if (!fullTree.settings.history_enabled) {
+        alert("Der Versionsverlauf ist in den Einstellungen deaktiviert.");
+        return;
+    }
+    
+    // Historie darf nur geöffnet werden, wenn wir die Notiz sperren können!
+    if (!await acquireLock(activeId)) {
+        showModal("Gesperrt", "Der Verlauf kann nicht geöffnet werden, da die Notiz gerade auf einem anderen Gerät bearbeitet wird.", [
+            { label: "Verstanden", class: "btn-cancel", action: () => {} }
+        ]);
+        return;
+    }
+    
     document.getElementById('history-modal').style.display = 'flex';
     const listEl = document.getElementById('history-list');
     listEl.innerHTML = 'Lade Versionen...';
@@ -1843,11 +2165,14 @@ async function openHistoryModal() {
     }
 }
 
-async function restoreHistory(historyId) {
-    if (!await acquireLock(activeId, true)) {
-        alert("Fehler: Konnte Notiz nicht sperren.");
-        return;
+function closeHistoryModal() {
+    document.getElementById('history-modal').style.display = 'none';
+    if (document.getElementById('edit-mode').style.display !== 'block') {
+        releaseLock();
     }
+}
+
+async function restoreHistory(historyId) {
     try {
         const res = await fetch(`/api/notes/${activeId}/history/${historyId}`, {
             method: 'POST',
@@ -1856,15 +2181,41 @@ async function restoreHistory(historyId) {
         });
         
         if (res.status === 403) {
-            alert("Wiederherstellung blockiert: Gerät hat keine Sperre.");
+            alert("Wiederherstellung blockiert: Gerät hat keine Sperre mehr.");
         } else {
-            document.getElementById('history-modal').style.display = 'none';
-            await releaseLock();
+            closeHistoryModal();
             await checkAndReloadData();
             activeNoteData = await fetchNoteData(activeId);
             renderDisplayArea();
         }
-    } catch(e) { console.error(e); }
+    } catch(e) { 
+        console.error(e); 
+    }
+}
+
+function toggleHistorySettings() {
+    document.getElementById('history-settings-modal').style.display = 'flex';
+    document.getElementById('history-enabled').checked = fullTree.settings.history_enabled || false;
+    document.getElementById('history-days').value = fullTree.settings.history_days || 30;
+}
+
+async function saveHistorySettings() {
+    const payload = {
+        history_enabled: document.getElementById('history-enabled').checked,
+        history_days: document.getElementById('history-days').value
+    };
+    
+    await fetch('/api/settings', { 
+        method: 'POST', 
+        headers: { 'Content-Type': 'application/json' }, 
+        body: JSON.stringify(payload) 
+    });
+    
+    fullTree.settings.history_enabled = payload.history_enabled;
+    fullTree.settings.history_days = payload.history_days;
+    
+    document.getElementById('history-settings-modal').style.display = 'none';
+    renderDisplayArea(); 
 }
 
 function toggleWebhookModal() { 
@@ -1876,29 +2227,52 @@ function toggleWebhookModal() {
     toggleWebhookPayload(); 
 }
 
-function toggleWebhookPayload() { document.getElementById('webhook-payload-container').style.display = document.getElementById('webhook-method').value === 'POST' ? 'block' : 'none'; }
+function toggleWebhookPayload() { 
+    document.getElementById('webhook-payload-container').style.display = document.getElementById('webhook-method').value === 'POST' ? 'block' : 'none'; 
+}
 
 async function saveWebhook() {
-    const payload = { webhook_enabled: document.getElementById('webhook-enabled').checked, webhook_method: document.getElementById('webhook-method').value, webhook_url: document.getElementById('webhook-url').value, webhook_payload: document.getElementById('webhook-payload').value };
+    const payload = { 
+        webhook_enabled: document.getElementById('webhook-enabled').checked, 
+        webhook_method: document.getElementById('webhook-method').value, 
+        webhook_url: document.getElementById('webhook-url').value, 
+        webhook_payload: document.getElementById('webhook-payload').value 
+    };
     await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); 
-    fullTree.settings.webhook_enabled = payload.webhook_enabled; document.getElementById('webhook-modal').style.display = 'none'; updateMenuUI();
+    fullTree.settings.webhook_enabled = payload.webhook_enabled; 
+    document.getElementById('webhook-modal').style.display = 'none'; 
+    updateMenuUI();
 }
 
 function showModal(title, text, buttons, showInput=false) { 
-    document.getElementById('modal-title').innerText = title; document.getElementById('modal-text').innerText = text; 
-    const inp = document.getElementById('modal-input'); inp.style.display = showInput ? 'block' : 'none'; inp.value = ''; 
-    const container = document.getElementById('modal-btns-container'); container.innerHTML = ''; 
+    document.getElementById('modal-title').innerText = title; 
+    document.getElementById('modal-text').innerText = text; 
+    
+    const inp = document.getElementById('modal-input'); 
+    inp.style.display = showInput ? 'block' : 'none'; 
+    inp.value = ''; 
+    
+    const container = document.getElementById('modal-btns-container'); 
+    container.innerHTML = ''; 
+    
     buttons.forEach(btn => { 
-        const b = document.createElement('button'); b.innerText = btn.label; b.className = btn.class; 
+        const b = document.createElement('button'); 
+        b.innerText = btn.label; 
+        b.className = btn.class; 
         b.onclick = () => { document.getElementById('custom-modal').style.display = 'none'; btn.action(); }; 
         container.appendChild(b); 
     }); 
-    document.getElementById('custom-modal').style.display = 'flex'; if (showInput) setTimeout(() => { inp.focus(); }, 100); 
+    
+    document.getElementById('custom-modal').style.display = 'flex'; 
+    if (showInput) setTimeout(() => { inp.focus(); }, 100); 
 }
 
-function clearSearch() { document.getElementById('search-input').value = ''; document.getElementById('clear-search').style.display = 'none'; renderTree(); }
+function clearSearch() { 
+    document.getElementById('search-input').value = ''; 
+    document.getElementById('clear-search').style.display = 'none'; 
+    renderTree(); 
+}
 
-// FEATURE 1: Asynchrone Volltextsuche integriert
 async function filterTree() {
     const term = document.getElementById('search-input').value.toLowerCase().trim(); 
     const clearBtn = document.getElementById('clear-search');
@@ -1916,19 +2290,19 @@ async function filterTree() {
     searchTimeout = setTimeout(async () => {
         let matchedIds = new Set();
         
-        // Volltextsuche beim Backend anfragen (wenn länger als 1 Zeichen)
-        if (term.length > 1) {
-            try {
-                const res = await fetch('/api/search?q=' + encodeURIComponent(term));
-                if (res.ok) {
-                    const ids = await res.json();
-                    ids.forEach(id => matchedIds.add(id));
-                }
-            } catch(e) { console.error("Suchfehler:", e); }
+        try {
+            const res = await fetch('/api/search?q=' + encodeURIComponent(term));
+            if (res.ok) {
+                const ids = await res.json();
+                ids.forEach(id => matchedIds.add(id));
+            }
+        } catch(e) { 
+            console.error("Suchfehler:", e); 
         }
         
         const container = document.getElementById('tree'); 
         container.innerHTML = '';
+        
         const rootGroup = document.createElement('div'); 
         rootGroup.className = 'tree-group'; 
         container.appendChild(rootGroup);
@@ -1937,180 +2311,552 @@ async function filterTree() {
             let results = []; 
             items.forEach(item => { 
                 const matchInTitle = item.title && item.title.toLowerCase().includes(term); 
-                const matchInText = matchedIds.has(item.id); // Treffer aus FTS
+                const matchInText = matchedIds.has(item.id); 
                 let filteredChildren = item.children ? getFilteredItems(item.children) : [];
                 
                 if (matchInTitle || matchInText || filteredChildren.length > 0) {
+                    // Tree-Aufklapp-Fix: Wenn dieser Knoten im Pfad eines Treffers liegt, entfernen wir ihn aus collapsedIds
+                    if ((matchInTitle || matchInText || filteredChildren.length > 0) && collapsedIds.has(item.id)) {
+                        collapsedIds.delete(item.id);
+                    }
                     results.push({ ...item, children: filteredChildren }); 
                 }
             }); 
             return results; 
         }
+        
         renderItems(getFilteredItems(fullTree.content), rootGroup);
-    }, 300); // 300ms Debounce, um nicht bei jedem Tastendruck sofort den Server zu fluten
+    }, 300); 
 }
 
 function togglePassword() {
-    if (fullTree.settings.password_enabled) { showModal("Passwortschutz", "Deaktivieren?", [{ label: "Ja", class: "btn-discard", action: async () => { await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password_enabled: false }) }); fullTree.settings.password_enabled = false; updateMenuUI(); } }, { label: "Abbruch", class: "btn-cancel", action: () => {} }]); 
-    } else { showModal("Passwortschutz", "Neues Passwort:", [{ label: "Speichern", class: "btn-save", action: async () => { const pwd = document.getElementById('modal-input').value; if(pwd) { await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password_enabled: true, password: pwd }) }); fullTree.settings.password_enabled = true; updateMenuUI(); } } }, { label: "Abbruch", class: "btn-cancel", action: () => {} }], true); }
+    if (fullTree.settings.password_enabled) { 
+        showModal("Passwortschutz", "Deaktivieren?", [
+            { label: "Ja", class: "btn-discard", action: async () => { await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password_enabled: false }) }); fullTree.settings.password_enabled = false; updateMenuUI(); } }, 
+            { label: "Abbruch", class: "btn-cancel", action: () => {} }
+        ]); 
+    } else { 
+        showModal("Passwortschutz", "Neues Passwort:", [
+            { label: "Speichern", class: "btn-save", action: async () => { const pwd = document.getElementById('modal-input').value; if(pwd) { await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password_enabled: true, password: pwd }) }); fullTree.settings.password_enabled = true; updateMenuUI(); } } }, 
+            { label: "Abbruch", class: "btn-cancel", action: () => {} }
+        ], true); 
+    }
 }
 
 function toggleAllFolders() {
     const searchTerm = document.getElementById('search-input').value; 
     let totalFolders = 0;
-    function countFolders(items) { items.forEach(i => { if (i.children && i.children.length > 0) { totalFolders++; countFolders(i.children); } }); }
+    
+    function countFolders(items) { 
+        items.forEach(i => { 
+            if (i.children && i.children.length > 0) { totalFolders++; countFolders(i.children); } 
+        }); 
+    }
+    
     countFolders(fullTree.content);
-    if (collapsedIds.size >= totalFolders / 2 && totalFolders > 0) { collapsedIds.clear(); } else { function collect(items) { items.forEach(i => { if(i.children && i.children.length > 0) { collapsedIds.add(i.id); collect(i.children); } }); } collect(fullTree.content); }
-    saveCollapsedToLocal(); if (searchTerm) filterTree(); else renderTree();
+    
+    if (collapsedIds.size >= totalFolders / 2 && totalFolders > 0) { 
+        collapsedIds.clear(); 
+    } else { 
+        function collect(items) { 
+            items.forEach(i => { 
+                if(i.children && i.children.length > 0) { collapsedIds.add(i.id); collect(i.children); } 
+            }); 
+        } 
+        collect(fullTree.content); 
+    }
+    
+    saveCollapsedToLocal(); 
+    if (searchTerm) filterTree(); else renderTree();
 }
 
-function confirmAutoSort() { showModal("Sortieren?", "Automatisch alphabetisch sortieren?", [{ label: "Ja, Sortieren", class: "btn-discard", action: async () => { await applyAutoSort(); } }, { label: "Abbrechen", class: "btn-cancel", action: () => {} }]); }
+function confirmAutoSort() { 
+    showModal("Sortieren?", "Automatisch alphabetisch sortieren?", [
+        { label: "Ja, Sortieren", class: "btn-discard", action: async () => { await applyAutoSort(); } }, 
+        { label: "Abbrechen", class: "btn-cancel", action: () => {} }
+    ]); 
+}
 
 async function applyAutoSort() { 
-    const sortRecursive = (list) => { list.sort((a, b) => { const aIsFolder = a.children && a.children.length > 0; const bIsFolder = b.children && b.children.length > 0; if (aIsFolder && !bIsFolder) return -1; if (!aIsFolder && bIsFolder) return 1; return a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: 'base' }); }); list.forEach(item => { if(item.children) sortRecursive(item.children); }); }; 
-    sortRecursive(fullTree.content); document.body.classList.add('edit-mode-active'); renderTree(); await rebuildDataFromDOM(); document.body.classList.remove('edit-mode-active'); renderTree();
+    const sortRecursive = (list) => { 
+        list.sort((a, b) => { 
+            const aIsFolder = a.children && a.children.length > 0; 
+            const bIsFolder = b.children && b.children.length > 0; 
+            if (aIsFolder && !bIsFolder) return -1; 
+            if (!aIsFolder && bIsFolder) return 1; 
+            return a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: 'base' }); 
+        }); 
+        list.forEach(item => { if(item.children) sortRecursive(item.children); }); 
+    }; 
+    sortRecursive(fullTree.content); 
+    document.body.classList.add('edit-mode-active'); 
+    renderTree(); 
+    await rebuildDataFromDOM(); 
+    document.body.classList.remove('edit-mode-active'); 
+    renderTree();
 }
 
 function wrapSelection(b, a, p = "") { 
-    const ta = document.getElementById('node-text'); const s = ta.selectionStart; const e = ta.selectionEnd; let txt = ta.value.substring(s, e) || p;
-    ta.value = ta.value.substring(0, s) + b + txt + a + ta.value.substring(e); ta.focus(); ta.setSelectionRange(s + b.length, s + b.length + txt.length); 
+    const ta = document.getElementById('node-text'); 
+    const s = ta.selectionStart; 
+    const e = ta.selectionEnd; 
+    let txt = ta.value.substring(s, e) || p;
+    ta.value = ta.value.substring(0, s) + b + txt + a + ta.value.substring(e); 
+    ta.focus(); 
+    ta.setSelectionRange(s + b.length, s + b.length + txt.length); 
 }
 
 function handleListAction(prefix, placeholder) {
-    const ta = document.getElementById('node-text'); const start = ta.selectionStart; const end = ta.selectionEnd; const text = ta.value; const selectedText = text.substring(start, end);
-    if (selectedText.includes('\n')) { const newText = selectedText.split('\n').map(line => (line.trim() === '' || line.trim().startsWith(prefix.trim())) ? line : prefix + line).join('\n'); ta.value = text.substring(0, start) + newText + text.substring(end); ta.setSelectionRange(start, start + newText.length); ta.focus(); return; }
+    const ta = document.getElementById('node-text'); 
+    const start = ta.selectionStart; 
+    const end = ta.selectionEnd; 
+    const text = ta.value; 
+    const selectedText = text.substring(start, end);
+    
+    if (selectedText.includes('\n')) { 
+        const newText = selectedText.split('\n').map(line => (line.trim() === '' || line.trim().startsWith(prefix.trim())) ? line : prefix + line).join('\n'); 
+        ta.value = text.substring(0, start) + newText + text.substring(end); 
+        ta.setSelectionRange(start, start + newText.length); 
+        ta.focus(); 
+        return; 
+    }
+    
     const textBefore = text.substring(0, start);
-    if (selectedText === placeholder && textBefore.endsWith(prefix)) { const insertStr = '\n' + prefix + placeholder; ta.value = text.substring(0, end) + insertStr + text.substring(end); const newStart = end + '\n'.length + prefix.length; ta.setSelectionRange(newStart, newStart + placeholder.length); ta.focus(); return; }
-    let insertPrefix = (textBefore.length > 0 && !textBefore.endsWith('\n')) ? '\n' + prefix : prefix; let insertText = selectedText || placeholder;
-    ta.value = text.substring(0, start) + insertPrefix + insertText + text.substring(end); const selectStart = start + insertPrefix.length; ta.setSelectionRange(selectStart, selectStart + insertText.length); ta.focus();
+    if (selectedText === placeholder && textBefore.endsWith(prefix)) { 
+        const insertStr = '\n' + prefix + placeholder; 
+        ta.value = text.substring(0, end) + insertStr + text.substring(end); 
+        const newStart = end + '\n'.length + prefix.length; 
+        ta.setSelectionRange(newStart, newStart + placeholder.length); 
+        ta.focus(); 
+        return; 
+    }
+    
+    let insertPrefix = (textBefore.length > 0 && !textBefore.endsWith('\n')) ? '\n' + prefix : prefix; 
+    let insertText = selectedText || placeholder;
+    ta.value = text.substring(0, start) + insertPrefix + insertText + text.substring(end); 
+    const selectStart = start + insertPrefix.length; 
+    ta.setSelectionRange(selectStart, selectStart + insertText.length); 
+    ta.focus();
 }
 
-function insertCodeTag() { wrapSelection("'''\n", "\n'''", "CODE"); }
+function insertCodeTag() { 
+    wrapSelection("'''\n", "\n'''", "CODE"); 
+}
 
 function copyToClipboard(btn) { 
-    const el = document.createElement('textarea'); el.value = btn.nextElementSibling.innerText; document.body.appendChild(el); el.select(); document.execCommand('copy'); document.body.removeChild(el); btn.innerText = 'Copied!'; setTimeout(() => { btn.innerText = 'Copy'; }, 2000); 
+    const el = document.createElement('textarea'); 
+    el.value = btn.nextElementSibling.innerText; 
+    document.body.appendChild(el); 
+    el.select(); 
+    document.execCommand('copy'); 
+    document.body.removeChild(el); 
+    btn.innerText = 'Copied!'; 
+    setTimeout(() => { btn.innerText = 'Copy'; }, 2000); 
 }
 
-function toggleSettings(e) { e.stopPropagation(); const m = document.getElementById('dropdown-menu'); m.style.display = m.style.display === 'block' ? 'none' : 'block'; }
-document.addEventListener('click', () => { const m = document.getElementById('dropdown-menu'); if (m) m.style.display = 'none'; });
-function exportData() { window.location.href = '/api/export'; }
-function toggleSidebar() { const h = document.body.classList.toggle('sidebar-hidden'); localStorage.setItem('sidebarState', h ? 'closed' : 'open'); document.querySelector('#mobile-toggle-btn span').innerText = h ? '▶' : '◀'; }
+function toggleSettings(e) { 
+    e.stopPropagation(); 
+    const m = document.getElementById('dropdown-menu'); 
+    m.style.display = m.style.display === 'block' ? 'none' : 'block'; 
+}
+
+document.addEventListener('click', () => { 
+    const m = document.getElementById('dropdown-menu'); 
+    if (m) m.style.display = 'none'; 
+});
+
+function exportData() { 
+    window.location.href = '/api/export'; 
+}
+
+function toggleSidebar() { 
+    const h = document.body.classList.toggle('sidebar-hidden'); 
+    localStorage.setItem('sidebarState', h ? 'closed' : 'open'); 
+    document.querySelector('#mobile-toggle-btn span').innerText = h ? '▶' : '◀'; 
+}
 
 async function uploadImage() { 
-    const input = document.createElement('input'); input.type = 'file'; input.accept = 'image/*'; 
+    const input = document.createElement('input'); 
+    input.type = 'file'; 
+    input.accept = 'image/*'; 
     input.onchange = async (e) => { 
-        const file = e.target.files[0]; if (!file) return; const fd = new FormData(); fd.append('image', file); 
-        try { const res = await fetch('/api/upload', { method: 'POST', body: fd }); const data = await res.json(); if(data.filename) { wrapSelection(`[img:${data.filename}]`, '', ''); } else { showModal("Fehler", "Ungültig.", [{ label: "OK", class: "btn-cancel", action: () => {} }]); } } catch(err) { console.error(err); } 
-    }; input.click(); 
+        const file = e.target.files[0]; 
+        if (!file) return; 
+        
+        uploadWithProgress(file, (data) => {
+            if(data.filename) { 
+                wrapSelection(`[img:${data.filename}]`, '', ''); 
+            }
+        });
+    }; 
+    input.click(); 
 }
 
 async function uploadGenericFile() { 
-    const input = document.createElement('input'); input.type = 'file'; 
+    const input = document.createElement('input'); 
+    input.type = 'file'; 
     input.onchange = async (e) => { 
-        const file = e.target.files[0]; if (!file) return; if (file.size > 20 * 1024 * 1024) { showModal("Zu groß", "Max. 20 MB.", [{ label: "OK", class: "btn-cancel", action: () => {} }]); return; }
-        const fd = new FormData(); fd.append('file', file); 
-        try { const res = await fetch('/api/upload', { method: 'POST', body: fd }); const data = await res.json(); if(data.filename) { let txt = file.type.startsWith('image/') ? `[img:${data.filename}]` : `[file:${data.filename}|${data.original}]`; const ta = document.getElementById('node-text'); const s = ta.selectionStart; ta.value = ta.value.substring(0, s) + txt + ta.value.substring(ta.selectionEnd); ta.focus(); ta.setSelectionRange(s + txt.length, s + txt.length); } } catch(err) { console.error(err); } 
-    }; input.click(); 
+        const file = e.target.files[0]; 
+        if (!file) return; 
+        
+        uploadWithProgress(file, (data) => {
+            if(data.filename) { 
+                let txt = file.type.startsWith('image/') ? `[img:${data.filename}]` : `[file:${data.filename}|${data.original}]`; 
+                const ta = document.getElementById('node-text'); 
+                const s = ta.selectionStart; 
+                ta.value = ta.value.substring(0, s) + txt + ta.value.substring(ta.selectionEnd); 
+                ta.focus(); 
+                ta.setSelectionRange(s + txt.length, s + txt.length); 
+            }
+        });
+    }; 
+    input.click(); 
 }
 
-function openLightbox(src) { document.getElementById('lightbox-img').src = src; document.getElementById('lightbox').style.display = 'flex'; }
-function closeLightbox() { document.getElementById('lightbox').style.display = 'none'; document.getElementById('lightbox-img').src = ''; }
+function openLightbox(src) { 
+    document.getElementById('lightbox-img').src = src; 
+    document.getElementById('lightbox').style.display = 'flex'; 
+}
+
+function closeLightbox() { 
+    document.getElementById('lightbox').style.display = 'none'; 
+    document.getElementById('lightbox-img').src = ''; 
+}
 
 function getAllNotesFlat(nodes, path="") { 
-    let res = []; if (!Array.isArray(nodes)) return res;
-    nodes.forEach(n => { let currentPath = path ? path + " / " + n.title : n.title; res.push({ id: n.id, title: n.title, path: currentPath }); if(n.children) { res = res.concat(getAllNotesFlat(n.children, currentPath)); } }); return res; 
+    let res = []; 
+    if (!Array.isArray(nodes)) return res;
+    nodes.forEach(n => { 
+        let currentPath = path ? path + " / " + n.title : n.title; 
+        res.push({ id: n.id, title: n.title, path: currentPath }); 
+        if(n.children) { 
+            res = res.concat(getAllNotesFlat(n.children, currentPath)); 
+        } 
+    }); 
+    return res; 
 }
 
 function initMentionSystem() {
-    const ta = document.getElementById('node-text'); const dropdown = document.getElementById('mention-dropdown'); if(!ta || !dropdown) return;
+    const ta = document.getElementById('node-text'); 
+    const dropdown = document.getElementById('mention-dropdown'); 
+    if(!ta || !dropdown) return;
+    
     ta.addEventListener('input', function() {
         let match = ta.value.substring(0, ta.selectionStart).match(/(?:^|\s)@([^\n]{0,30})$/);
         if (match) {
-            let search = match[1].toLowerCase(); let filtered = getAllNotesFlat(fullTree.content).filter(n => n.id !== activeId && (n.title.toLowerCase().includes(search) || n.path.toLowerCase().includes(search)));
-            if (filtered.length > 0) { dropdown.innerHTML = ''; filtered.forEach(n => { let div = document.createElement('div'); div.className = 'mention-item'; div.innerHTML = `<strong>${n.title}</strong><span class="mention-path">${n.path}</span>`; div.onclick = () => insertMention(n.id, n.title, match[1].length + 1); dropdown.appendChild(div); }); dropdown.style.display = 'block'; } else { dropdown.style.display = 'none'; }
-        } else { dropdown.style.display = 'none'; }
+            let search = match[1].toLowerCase(); 
+            let filtered = getAllNotesFlat(fullTree.content).filter(n => n.id !== activeId && (n.title.toLowerCase().includes(search) || n.path.toLowerCase().includes(search)));
+            
+            if (filtered.length > 0) { 
+                dropdown.innerHTML = ''; 
+                filtered.forEach(n => { 
+                    let div = document.createElement('div'); 
+                    div.className = 'mention-item'; 
+                    div.innerHTML = `<strong>${n.title}</strong><span class="mention-path">${n.path}</span>`; 
+                    div.onclick = () => insertMention(n.id, n.title, match[1].length + 1); 
+                    dropdown.appendChild(div); 
+                }); 
+                dropdown.style.display = 'block'; 
+            } else { 
+                dropdown.style.display = 'none'; 
+            }
+        } else { 
+            dropdown.style.display = 'none'; 
+        }
     });
-    document.addEventListener('click', (e) => { if(e.target !== ta && !dropdown.contains(e.target)) dropdown.style.display = 'none'; });
+    document.addEventListener('click', (e) => { 
+        if(e.target !== ta && !dropdown.contains(e.target)) dropdown.style.display = 'none'; 
+    });
 }
 
 function insertMention(id, title, replaceLength) { 
-    let ta = document.getElementById('node-text'); let cursor = ta.selectionStart; let start = cursor - replaceLength; let linkCode = `[note:${id}|${title}] `; 
-    ta.value = ta.value.substring(0, start) + linkCode + ta.value.substring(cursor); ta.focus(); ta.setSelectionRange(start + linkCode.length, start + linkCode.length); document.getElementById('mention-dropdown').style.display = 'none'; 
+    let ta = document.getElementById('node-text'); 
+    let cursor = ta.selectionStart; 
+    let start = cursor - replaceLength; 
+    let linkCode = `[note:${id}|${title}] `; 
+    ta.value = ta.value.substring(0, start) + linkCode + ta.value.substring(cursor); 
+    ta.focus(); 
+    ta.setSelectionRange(start + linkCode.length, start + linkCode.length); 
+    document.getElementById('mention-dropdown').style.display = 'none'; 
 }
 
 function triggerMentionButton() { 
-    let ta = document.getElementById('node-text'); let s = ta.selectionStart; let prefix = (s === 0 || ta.value.charAt(s - 1) === '\n' || ta.value.charAt(s - 1) === ' ') ? '@' : ' @';
-    ta.value = ta.value.substring(0, s) + prefix + ta.value.substring(ta.selectionEnd); ta.focus(); ta.setSelectionRange(s + prefix.length, s + prefix.length); ta.dispatchEvent(new Event('input')); 
+    let ta = document.getElementById('node-text'); 
+    let s = ta.selectionStart; 
+    let prefix = (s === 0 || ta.value.charAt(s - 1) === '\n' || ta.value.charAt(s - 1) === ' ') ? '@' : ' @';
+    ta.value = ta.value.substring(0, s) + prefix + ta.value.substring(ta.selectionEnd); 
+    ta.focus(); 
+    ta.setSelectionRange(s + prefix.length, s + prefix.length); 
+    ta.dispatchEvent(new Event('input')); 
 }
 
 let sketchCanvas, sketchCtx, isDrawing = false, sketchStrokes = [], currentStroke = null, sketchColor = '#000000', sketchWidth = 8, sketchMode = 'pen', sketchBg = 'white', activeSketchId = null;
 
 async function openSketch(id = null) {
     const isEdit = document.getElementById('edit-mode').style.display === 'block';
-    if (!isEdit && !await acquireLock(activeId)) { showModal("Gesperrt", "Skizze kann nicht geöffnet werden.", [{ label: "OK", class: "btn-cancel", action: () => {} }]); return; }
-    document.getElementById('sketch-modal').style.display = 'flex'; if(!sketchCanvas) initSketcher(); activeSketchId = id; sketchStrokes = [];
-    if (id) { try { const res = await fetch(`/api/sketch/${id}`); if(res.ok) { const data = await res.json(); sketchBg = data.bg || 'white'; document.getElementById('sketch-bg-select').value = sketchBg; sketchStrokes = data.strokes || []; } } catch(e) { console.error(e); } } else { sketchBg = document.getElementById('sketch-bg-select').value; }
-    setSketchMode('pen'); redrawSketch();
+    if (!isEdit && !await acquireLock(activeId)) { 
+        showModal("Gesperrt", "Skizze kann nicht geöffnet werden.", [{ label: "OK", class: "btn-cancel", action: () => {} }]); 
+        return; 
+    }
+    
+    document.getElementById('sketch-modal').style.display = 'flex'; 
+    if(!sketchCanvas) initSketcher(); 
+    
+    activeSketchId = id; 
+    sketchStrokes = [];
+    
+    if (id) { 
+        try { 
+            const res = await fetch(`/api/sketch/${id}`); 
+            if(res.ok) { 
+                const data = await res.json(); 
+                sketchBg = data.bg || 'white'; 
+                document.getElementById('sketch-bg-select').value = sketchBg; 
+                sketchStrokes = data.strokes || []; 
+            } 
+        } catch(e) { 
+            console.error(e); 
+        } 
+    } else { 
+        sketchBg = document.getElementById('sketch-bg-select').value; 
+    }
+    setSketchMode('pen'); 
+    redrawSketch();
 }
 
-function closeSketch() { document.getElementById('sketch-modal').style.display = 'none'; if (document.getElementById('edit-mode').style.display !== 'block') releaseLock(); }
+function closeSketch() { 
+    document.getElementById('sketch-modal').style.display = 'none'; 
+    if (document.getElementById('edit-mode').style.display !== 'block') releaseLock(); 
+}
 
 async function saveSketch() {
     const payload = { id: activeSketchId, bg: sketchBg, strokes: sketchStrokes, image: sketchCanvas.toDataURL("image/png") };
-    const res = await fetch('/api/sketch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); const data = await res.json();
+    const res = await fetch('/api/sketch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); 
+    const data = await res.json();
+    
     if (!activeSketchId && data.id) wrapSelection(`[sketch:${data.id}]`, '', '');
-    document.getElementById('sketch-modal').style.display = 'none'; const ta = document.getElementById('node-text'); if (ta) ta.value = ta.value.replace(`[sketch:${data.id}]`, `[sketch:${data.id}] `).trim();
-    document.querySelectorAll('.sketch-img').forEach(img => { if (img.src.includes(data.id)) img.src = `/uploads/sketch_${data.id}.png?v=` + Date.now(); });
+    
+    document.getElementById('sketch-modal').style.display = 'none'; 
+    const ta = document.getElementById('node-text'); 
+    if (ta) ta.value = ta.value.replace(`[sketch:${data.id}]`, `[sketch:${data.id}] `).trim();
+    
+    document.querySelectorAll('.sketch-img').forEach(img => { 
+        if (img.src.includes(data.id)) img.src = `/uploads/sketch_${data.id}.png?v=` + Date.now(); 
+    });
+    
     if (document.getElementById('edit-mode').style.display !== 'block') releaseLock();
 }
 
 function initSketcher() {
-    sketchCanvas = document.getElementById('sketch-canvas'); sketchCtx = sketchCanvas.getContext('2d'); sketchCanvas.width = 1200; sketchCanvas.height = 900;
-    const getPos = (e) => { const r = sketchCanvas.getBoundingClientRect(); const scaleX = sketchCanvas.width / r.width; const scaleY = sketchCanvas.height / r.height; let cx = e.touches ? e.touches[0].clientX : e.clientX; let cy = e.touches ? e.touches[0].clientY : e.clientY; return { x: (cx - r.left) * scaleX, y: (cy - r.top) * scaleY }; };
-    const startDraw = (e) => { e.preventDefault(); isDrawing = true; currentStroke = { color: sketchMode === 'eraser' ? sketchBg : sketchColor, width: sketchWidth, mode: sketchMode, points: [getPos(e)] }; sketchStrokes.push(currentStroke); };
-    const draw = (e) => { if (!isDrawing) return; e.preventDefault(); currentStroke.points.push(getPos(e)); redrawSketch(); };
+    sketchCanvas = document.getElementById('sketch-canvas'); 
+    sketchCtx = sketchCanvas.getContext('2d'); 
+    sketchCanvas.width = 1200; 
+    sketchCanvas.height = 900;
+    
+    const getPos = (e) => { 
+        const r = sketchCanvas.getBoundingClientRect(); 
+        const scaleX = sketchCanvas.width / r.width; 
+        const scaleY = sketchCanvas.height / r.height; 
+        let cx = e.touches ? e.touches[0].clientX : e.clientX; 
+        let cy = e.touches ? e.touches[0].clientY : e.clientY; 
+        return { x: (cx - r.left) * scaleX, y: (cy - r.top) * scaleY }; 
+    };
+    
+    const startDraw = (e) => { 
+        e.preventDefault(); 
+        isDrawing = true; 
+        currentStroke = { color: sketchMode === 'eraser' ? sketchBg : sketchColor, width: sketchWidth, mode: sketchMode, points: [getPos(e)] }; 
+        sketchStrokes.push(currentStroke); 
+    };
+    
+    const draw = (e) => { 
+        if (!isDrawing) return; 
+        e.preventDefault(); 
+        currentStroke.points.push(getPos(e)); 
+        redrawSketch(); 
+    };
+    
     const endDraw = () => { isDrawing = false; };
-    sketchCanvas.addEventListener('mousedown', startDraw); sketchCanvas.addEventListener('mousemove', draw); window.addEventListener('mouseup', endDraw);
-    sketchCanvas.addEventListener('touchstart', startDraw, {passive: false}); sketchCanvas.addEventListener('touchmove', draw, {passive: false}); window.addEventListener('touchend', endDraw);
+    
+    sketchCanvas.addEventListener('mousedown', startDraw); 
+    sketchCanvas.addEventListener('mousemove', draw); 
+    window.addEventListener('mouseup', endDraw);
+    sketchCanvas.addEventListener('touchstart', startDraw, {passive: false}); 
+    sketchCanvas.addEventListener('touchmove', draw, {passive: false}); 
+    window.addEventListener('touchend', endDraw);
 }
 
 function redrawSketch() { 
-    sketchCtx.globalAlpha = 1.0; sketchCtx.fillStyle = sketchBg; sketchCtx.fillRect(0, 0, sketchCanvas.width, sketchCanvas.height); sketchCtx.lineCap = 'round'; sketchCtx.lineJoin = 'round'; 
-    for (let s of sketchStrokes) { if (s.points.length < 2) continue; sketchCtx.globalAlpha = s.mode === 'highlighter' ? 0.4 : 1.0; sketchCtx.beginPath(); sketchCtx.strokeStyle = s.color; sketchCtx.lineWidth = s.width; sketchCtx.moveTo(s.points[0].x, s.points[0].y); for (let i = 1; i < s.points.length - 1; i++) { let xc = (s.points[i].x + s.points[i + 1].x) / 2; let yc = (s.points[i].y + s.points[i + 1].y) / 2; sketchCtx.quadraticCurveTo(s.points[i].x, s.points[i].y, xc, yc); } sketchCtx.lineTo(s.points[s.points.length - 1].x, s.points[s.points.length - 1].y); sketchCtx.stroke(); } sketchCtx.globalAlpha = 1.0; 
+    sketchCtx.globalAlpha = 1.0; 
+    sketchCtx.fillStyle = sketchBg; 
+    sketchCtx.fillRect(0, 0, sketchCanvas.width, sketchCanvas.height); 
+    sketchCtx.lineCap = 'round'; 
+    sketchCtx.lineJoin = 'round'; 
+    
+    for (let s of sketchStrokes) { 
+        if (s.points.length < 2) continue; 
+        sketchCtx.globalAlpha = s.mode === 'highlighter' ? 0.4 : 1.0; 
+        sketchCtx.beginPath(); 
+        sketchCtx.strokeStyle = s.color; 
+        sketchCtx.lineWidth = s.width; 
+        sketchCtx.moveTo(s.points[0].x, s.points[0].y); 
+        for (let i = 1; i < s.points.length - 1; i++) { 
+            let xc = (s.points[i].x + s.points[i + 1].x) / 2; 
+            let yc = (s.points[i].y + s.points[i + 1].y) / 2; 
+            sketchCtx.quadraticCurveTo(s.points[i].x, s.points[i].y, xc, yc); 
+        } 
+        sketchCtx.lineTo(s.points[s.points.length - 1].x, s.points[s.points.length - 1].y); 
+        sketchCtx.stroke(); 
+    } 
+    sketchCtx.globalAlpha = 1.0; 
 }
 
-function undoSketch() { if (sketchStrokes.length > 0) { sketchStrokes.pop(); redrawSketch(); } }
-function setSketchMode(mode) { sketchMode = mode; document.getElementById('btn-pen').classList.toggle('active', mode === 'pen'); document.getElementById('btn-highlighter').classList.toggle('active', mode === 'highlighter'); document.getElementById('btn-eraser').classList.toggle('active', mode === 'eraser'); }
-function setSketchBg(bg) { sketchBg = bg; sketchStrokes.forEach(s => { if (s.mode === 'eraser') s.color = bg; else if (!s.mode && (s.color === 'white' || s.color === 'black')) { if (s.color !== bg && sketchMode === 'eraser') s.color = bg; } }); redrawSketch(); }
+function undoSketch() { 
+    if (sketchStrokes.length > 0) { sketchStrokes.pop(); redrawSketch(); } 
+}
 
-function applyAccentColor(hex) { document.documentElement.style.setProperty('--accent', hex); const r = parseInt(hex.slice(1,3), 16), g = parseInt(hex.slice(3,5), 16), b = parseInt(hex.slice(5,7), 16); document.documentElement.style.setProperty('--accent-rgb', `${r}, ${g}, ${b}`); const p = document.getElementById('accent-color-picker'); if(p) p.value = hex; }
-async function updateGlobalAccent(hex) { await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accent: hex }) }); fullTree.settings.accent = hex; applyAccentColor(hex); }
-async function toggleTheme() { const newTheme = document.body.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'; await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ theme: newTheme }) }); fullTree.settings.theme = newTheme; document.body.setAttribute('data-theme', newTheme); }
-function updateMenuUI() { const pwdBtn = document.getElementById('pwd-toggle-text'); const logoutBtn = document.getElementById('logout-btn'); const whToggleText = document.getElementById('webhook-toggle-text'); if(pwdBtn) pwdBtn.innerText = fullTree.settings.password_enabled ? '🔓 Passwortschutz aus' : '🔒 Passwortschutz an'; if(logoutBtn) logoutBtn.style.display = fullTree.settings.password_enabled ? 'flex' : 'none'; if(whToggleText) whToggleText.innerText = fullTree.settings.webhook_enabled ? '🔔 Webhook (Aktiviert)' : '🔕 Webhook (Deaktiviert)'; }
+function setSketchMode(mode) { 
+    sketchMode = mode; 
+    document.getElementById('btn-pen').classList.toggle('active', mode === 'pen'); 
+    document.getElementById('btn-highlighter').classList.toggle('active', mode === 'highlighter'); 
+    document.getElementById('btn-eraser').classList.toggle('active', mode === 'eraser'); 
+}
 
-async function addItem(parentId) { const newId = Date.now().toString() + Math.random().toString(36).substring(2, 6); const payload = { id: newId, parent_id: parentId, title: 'Neu', text: '' }; await fetch('/api/notes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); if (parentId) { collapsedIds.delete(parentId); saveCollapsedToLocal(); } await checkAndReloadData(); selectNode(newId); enableEdit(); }
-function deleteItem(id) { showModal("Löschen", "Sicher?", [ { label: "Löschen", class: "btn-discard", action: async () => { await fetch(`/api/notes/${id}`, { method: 'DELETE' }); if (activeId === id) { activeId = null; document.getElementById('edit-area').style.display = 'none'; } await checkAndReloadData(); } }, { label: "Abbruch", class: "btn-cancel", action: () => {} } ]); }
-function findNode(items, id) { if (!Array.isArray(items)) return null; for (let i of items) { if (i.id === id) return i; if (i.children) { const f = findNode(i.children, id); if (f) return f; } } return null; }
-function getPath(items, id, path = []) { if (!Array.isArray(items)) return null; for (let i of items) { const n = [...path, {title: i.title, id: i.id}]; if (i.id === id) return n; if (i.children) { const r = getPath(i.children, id, n); if (r) return r; } } return null; }
+function setSketchBg(bg) { 
+    sketchBg = bg; 
+    sketchStrokes.forEach(s => { 
+        if (s.mode === 'eraser') s.color = bg; 
+        else if (!s.mode && (s.color === 'white' || s.color === 'black')) { 
+            if (s.color !== bg && sketchMode === 'eraser') s.color = bg; 
+        } 
+    }); 
+    redrawSketch(); 
+}
+
+function applyAccentColor(hex) { 
+    document.documentElement.style.setProperty('--accent', hex); 
+    const r = parseInt(hex.slice(1,3), 16), g = parseInt(hex.slice(3,5), 16), b = parseInt(hex.slice(5,7), 16); 
+    document.documentElement.style.setProperty('--accent-rgb', `${r}, ${g}, ${b}`); 
+    const p = document.getElementById('accent-color-picker'); 
+    if(p) p.value = hex; 
+}
+
+async function updateGlobalAccent(hex) { 
+    await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accent: hex }) }); 
+    fullTree.settings.accent = hex; 
+    applyAccentColor(hex); 
+}
+
+async function toggleTheme() { 
+    const newTheme = document.body.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'; 
+    await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ theme: newTheme }) }); 
+    fullTree.settings.theme = newTheme; 
+    document.body.setAttribute('data-theme', newTheme); 
+}
+
+function updateMenuUI() { 
+    const pwdBtn = document.getElementById('pwd-toggle-text'); 
+    const logoutBtn = document.getElementById('logout-btn'); 
+    const whToggleText = document.getElementById('webhook-toggle-text'); 
+    if(pwdBtn) pwdBtn.innerText = fullTree.settings.password_enabled ? '🔓 Passwortschutz aus' : '🔒 Passwortschutz an'; 
+    if(logoutBtn) logoutBtn.style.display = fullTree.settings.password_enabled ? 'flex' : 'none'; 
+    if(whToggleText) whToggleText.innerText = fullTree.settings.webhook_enabled ? '🔔 Webhook (Aktiviert)' : '🔕 Webhook (Deaktiviert)'; 
+}
+
+async function addItem(parentId) { 
+    const newId = Date.now().toString() + Math.random().toString(36).substring(2, 6); 
+    const payload = { id: newId, parent_id: parentId, title: 'Neu', text: '' }; 
+    await fetch('/api/notes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); 
+    if (parentId) { collapsedIds.delete(parentId); saveCollapsedToLocal(); } 
+    await checkAndReloadData(); 
+    selectNode(newId); 
+    enableEdit(); 
+}
+
+function deleteItem(id) { 
+    showModal("Löschen", "Sicher?", [ 
+        { label: "Löschen", class: "btn-discard", action: async () => { 
+            await fetch(`/api/notes/${id}`, { method: 'DELETE' }); 
+            if (activeId === id) { activeId = null; document.getElementById('edit-area').style.display = 'none'; } 
+            await checkAndReloadData(); 
+        } }, 
+        { label: "Abbruch", class: "btn-cancel", action: () => {} } 
+    ]); 
+}
+
+function findNode(items, id) { 
+    if (!Array.isArray(items)) return null; 
+    for (let i of items) { 
+        if (i.id === id) return i; 
+        if (i.children) { 
+            const f = findNode(i.children, id); 
+            if (f) return f; 
+        } 
+    } 
+    return null; 
+}
+
+function getPath(items, id, path = []) { 
+    if (!Array.isArray(items)) return null; 
+    for (let i of items) { 
+        const n = [...path, {title: i.title, id: i.id}]; 
+        if (i.id === id) return n; 
+        if (i.children) { 
+            const r = getPath(i.children, id, n); 
+            if (r) return r; 
+        } 
+    } 
+    return null; 
+}
 
 function initDragAndDrop() { 
-    const ta = document.getElementById('node-text'); if (!ta) return;
-    ta.addEventListener('dragover', e => { e.preventDefault(); ta.style.border = '1px dashed var(--accent)'; }); 
-    ta.addEventListener('dragleave', e => { e.preventDefault(); ta.style.border = '1px solid var(--border-color)'; }); 
+    const ta = document.getElementById('node-text'); 
+    if (!ta) return;
+    
+    ta.addEventListener('dragover', e => { 
+        e.preventDefault(); 
+        ta.style.border = '1px dashed var(--accent)'; 
+    }); 
+    
+    ta.addEventListener('dragleave', e => { 
+        e.preventDefault(); 
+        ta.style.border = '1px solid var(--border-color)'; 
+    }); 
+    
     ta.addEventListener('drop', async e => { 
-        e.preventDefault(); ta.style.border = '1px solid var(--border-color)'; 
-        if(e.dataTransfer.files && e.dataTransfer.files.length > 0) { const f = e.dataTransfer.files[0]; if (f.size > 20 * 1024 * 1024) return; const fd = new FormData(); fd.append('file', f); try { const res = await fetch('/api/upload', { method: 'POST', body: fd }); const data = await res.json(); if(data.filename) { let txt = f.type.startsWith('image/') ? `[img:${data.filename}]` : `[file:${data.filename}|${data.original}]`; const s = ta.selectionStart; ta.value = ta.value.substring(0, s) + txt + ta.value.substring(ta.selectionEnd); ta.focus(); ta.setSelectionRange(s + txt.length, s + txt.length); } } catch(err) { console.error(err); } } 
+        e.preventDefault(); 
+        ta.style.border = '1px solid var(--border-color)'; 
+        
+        if(e.dataTransfer.files && e.dataTransfer.files.length > 0) { 
+            const f = e.dataTransfer.files[0]; 
+            
+            uploadWithProgress(f, (data) => {
+                if(data.filename) { 
+                    let txt = f.type.startsWith('image/') ? `[img:${data.filename}]` : `[file:${data.filename}|${data.original}]`; 
+                    const s = ta.selectionStart; 
+                    ta.value = ta.value.substring(0, s) + txt + ta.value.substring(ta.selectionEnd); 
+                    ta.focus(); 
+                    ta.setSelectionRange(s + txt.length, s + txt.length); 
+                }
+            });
+        } 
     }); 
 }
 
 document.addEventListener('keydown', function(e) {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { if (document.getElementById('edit-mode') && document.getElementById('edit-mode').style.display === 'block') { e.preventDefault(); saveChanges(); } }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { 
+        if (document.getElementById('edit-mode') && document.getElementById('edit-mode').style.display === 'block') { 
+            e.preventDefault(); 
+            saveChanges(); 
+        } 
+    }
     if (e.key === 'Escape') {
         if (document.getElementById('lightbox') && document.getElementById('lightbox').style.display === 'flex') closeLightbox();
         else if (document.getElementById('sketch-modal') && document.getElementById('sketch-modal').style.display === 'flex') closeSketch();
         else if (document.getElementById('custom-modal') && document.getElementById('custom-modal').style.display === 'flex') document.getElementById('custom-modal').style.display = 'none';
         else if (document.getElementById('reminder-modal') && document.getElementById('reminder-modal').style.display === 'flex') document.getElementById('reminder-modal').style.display = 'none';
-        else if (document.getElementById('history-modal') && document.getElementById('history-modal').style.display === 'flex') document.getElementById('history-modal').style.display = 'none';
+        else if (document.getElementById('history-modal') && document.getElementById('history-modal').style.display === 'flex') closeHistoryModal();
+        else if (document.getElementById('history-settings-modal') && document.getElementById('history-settings-modal').style.display === 'flex') document.getElementById('history-settings-modal').style.display = 'none';
         else if (document.getElementById('webhook-modal') && document.getElementById('webhook-modal').style.display === 'flex') document.getElementById('webhook-modal').style.display = 'none';
         else if (document.getElementById('restore-modal') && document.getElementById('restore-modal').style.display === 'flex') document.getElementById('restore-modal').style.display = 'none';
         else if (document.getElementById('edit-mode') && document.getElementById('edit-mode').style.display === 'block') cancelEdit();
@@ -2118,24 +2864,90 @@ document.addEventListener('keydown', function(e) {
 });
 
 async function openRestoreModal() {
-    document.getElementById('restore-modal').style.display = 'flex'; document.getElementById('restore-status').style.display = 'none'; document.getElementById('restore-file-upload').value = '';
-    const select = document.getElementById('server-backups'); select.innerHTML = '<option value="">-- Lade Backups... --</option>';
-    try { const res = await fetch('/api/backups'); const backups = await res.json(); if (backups.length === 0) { select.innerHTML = '<option value="">Keine automatischen Backups gefunden</option>'; } else { select.innerHTML = '<option value="">-- Auswählen --</option>'; backups.forEach(b => { const opt = document.createElement('option'); opt.value = b.filename; opt.innerText = `${b.date} (${b.size} MB) - ${b.filename}`; select.appendChild(opt); }); } } catch(e) { select.innerHTML = '<option value="">Fehler beim Laden</option>'; }
+    document.getElementById('restore-modal').style.display = 'flex'; 
+    document.getElementById('restore-status').style.display = 'none'; 
+    document.getElementById('restore-file-upload').value = '';
+    
+    const select = document.getElementById('server-backups'); 
+    select.innerHTML = '<option value="">-- Lade Backups... --</option>';
+    
+    try { 
+        const res = await fetch('/api/backups'); 
+        const backups = await res.json(); 
+        if (backups.length === 0) { 
+            select.innerHTML = '<option value="">Keine automatischen Backups gefunden</option>'; 
+        } else { 
+            select.innerHTML = '<option value="">-- Auswählen --</option>'; 
+            backups.forEach(b => { 
+                const opt = document.createElement('option'); 
+                opt.value = b.filename; 
+                opt.innerText = `${b.date} (${b.size} MB) - ${b.filename}`; 
+                select.appendChild(opt); 
+            }); 
+        } 
+    } catch(e) { 
+        select.innerHTML = '<option value="">Fehler beim Laden</option>'; 
+    }
 }
 
 async function executeRestore() {
-    const fileInput = document.getElementById('restore-file-upload'); const select = document.getElementById('server-backups'); const statusDiv = document.getElementById('restore-status'); const btn = document.getElementById('btn-do-restore');
-    const file = fileInput.files[0]; const serverFile = select.value;
-    if (!file && !serverFile) { statusDiv.innerText = "Bitte wähle ein Backup aus der Liste oder lade eine Datei hoch!"; statusDiv.style.color = '#e74c3c'; statusDiv.style.background = 'rgba(231, 76, 60, 0.1)'; statusDiv.style.display = 'block'; return; }
-    const fd = new FormData(); if (file) fd.append('file', file); else fd.append('server_file', serverFile);
-    btn.disabled = true; btn.innerText = "Verifiziere & Lade..."; statusDiv.style.display = 'none';
+    const fileInput = document.getElementById('restore-file-upload'); 
+    const select = document.getElementById('server-backups'); 
+    const statusDiv = document.getElementById('restore-status'); 
+    const btn = document.getElementById('btn-do-restore');
+    
+    const file = fileInput.files[0]; 
+    const serverFile = select.value;
+    
+    if (!file && !serverFile) { 
+        statusDiv.innerText = "Bitte wähle ein Backup aus der Liste oder lade eine Datei hoch!"; 
+        statusDiv.style.color = '#e74c3c'; 
+        statusDiv.style.background = 'rgba(231, 76, 60, 0.1)'; 
+        statusDiv.style.display = 'block'; 
+        return; 
+    }
+    
+    const fd = new FormData(); 
+    if (file) fd.append('file', file); else fd.append('server_file', serverFile);
+    
+    btn.disabled = true; 
+    btn.innerText = "Verifiziere & Lade..."; 
+    statusDiv.style.display = 'none';
+    
     try {
-        const res = await fetch('/api/restore', { method: 'POST', body: fd }); const data = await res.json();
-        if (data.status === 'success') { statusDiv.style.color = '#27ae60'; statusDiv.style.background = 'rgba(39, 174, 96, 0.1)'; statusDiv.innerText = "Erfolgreich! Die Seite wird nun neu geladen..."; statusDiv.style.display = 'block'; setTimeout(() => window.location.reload(), 2000); } else { statusDiv.style.color = '#e74c3c'; statusDiv.style.background = 'rgba(231, 76, 60, 0.1)'; statusDiv.innerText = "Fehler: " + (data.error || "Unbekannter Serverfehler"); statusDiv.style.display = 'block'; btn.disabled = false; btn.innerText = "Verifizieren & Wiederherstellen"; }
-    } catch (e) { statusDiv.style.color = '#e74c3c'; statusDiv.style.background = 'rgba(231, 76, 60, 0.1)'; statusDiv.innerText = "Netzwerkfehler beim Wiederherstellen."; statusDiv.style.display = 'block'; btn.disabled = false; btn.innerText = "Verifizieren & Wiederherstellen"; }
+        const res = await fetch('/api/restore', { method: 'POST', body: fd }); 
+        const data = await res.json();
+        
+        if (data.status === 'success') { 
+            statusDiv.style.color = '#27ae60'; 
+            statusDiv.style.background = 'rgba(39, 174, 96, 0.1)'; 
+            statusDiv.innerText = "Erfolgreich! Die Seite wird nun neu geladen..."; 
+            statusDiv.style.display = 'block'; 
+            setTimeout(() => window.location.reload(), 2000); 
+        } else { 
+            statusDiv.style.color = '#e74c3c'; 
+            statusDiv.style.background = 'rgba(231, 76, 60, 0.1)'; 
+            statusDiv.innerText = "Fehler: " + (data.error || "Unbekannter Serverfehler"); 
+            statusDiv.style.display = 'block'; 
+            btn.disabled = false; 
+            btn.innerText = "Wiederherstellen"; 
+        }
+    } catch (e) { 
+        statusDiv.style.color = '#e74c3c'; 
+        statusDiv.style.background = 'rgba(231, 76, 60, 0.1)'; 
+        statusDiv.innerText = "Netzwerkfehler beim Wiederherstellen."; 
+        statusDiv.style.display = 'block'; 
+        btn.disabled = false; 
+        btn.innerText = "Wiederherstellen"; 
+    }
 }
 
-window.onload = () => { loadData(); initDragAndDrop(); initMentionSystem(); setInterval(checkAndReloadData, 30000); };
+window.onload = () => { 
+    loadData(); 
+    initDragAndDrop(); 
+    initMentionSystem(); 
+    setInterval(checkAndReloadData, 30000); 
+};
 EOF
 
 # Sicherheit & Rechte
