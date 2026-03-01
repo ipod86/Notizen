@@ -6,7 +6,6 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# 1. Port & Einstellungen (Stark vereinfacht)
 echo "Welcher Port soll für das Notiz-Tool genutzt werden? (Standard: 8080)"
 read -p "Port: " USER_PORT
 if [ -z "$USER_PORT" ]; then 
@@ -19,7 +18,7 @@ if [ -z "$BACKUP_CONFIRM" ]; then
     BACKUP_CONFIRM="y"
 fi
 
-# Pflicht-Einstellungen (werden nicht mehr gefragt)
+# Pflicht-Einstellungen
 AUTOSTART_CONFIRM="y"
 CRON_CONFIRM="y"
 
@@ -29,22 +28,17 @@ SERVICE_NAME="notizen.service"
 echo "--- Stoppe alten Service (falls aktiv) ---"
 systemctl stop $SERVICE_NAME 2>/dev/null
 
-echo "--- Starte V2.2 Setup in $INSTALL_DIR auf Port $USER_PORT ---"
+echo "--- Starte Setup in $INSTALL_DIR auf Port $USER_PORT ---"
 
-# 2. Abhängigkeiten installieren
 apt update && apt install -y python3 python3-pip python3-venv cron sqlite3
 
-# 3. Verzeichnisstruktur erstellen
 mkdir -p $INSTALL_DIR/static 
 mkdir -p $INSTALL_DIR/templates 
 mkdir -p $INSTALL_DIR/uploads 
 mkdir -p $INSTALL_DIR/backups
 
-# 4. Python Umgebung einrichten
 python3 -m venv $INSTALL_DIR/venv
 $INSTALL_DIR/venv/bin/python3 -m pip install flask werkzeug requests
-
-# 5. Dateien schreiben
 
 # app.py (SQLite Backend)
 cat << 'EOF' > $INSTALL_DIR/app.py
@@ -121,7 +115,6 @@ def init_db():
             )
         ''')
         
-        # FIX: Alte Trigger aus vorherigen Versionen aus der SQLite-Datei radieren!
         conn.execute('DROP TRIGGER IF EXISTS save_note_history')
         conn.execute('DROP TRIGGER IF EXISTS keep_max_5_history')
         
@@ -236,7 +229,11 @@ def logout():
 
 @app.route('/')
 def index():
-    return render_template('index.html', v=str(time.time()))
+    sets = get_settings()
+    return render_template('index.html', 
+                           v=str(time.time()), 
+                           theme=sets.get('theme', 'dark'), 
+                           accent=sets.get('accent', '#27ae60'))
 
 @app.route('/api/tree', methods=['GET'])
 def get_tree():
@@ -270,7 +267,6 @@ def update_tree():
 def search_notes():
     q = request.args.get('q', '')
     if not q: return jsonify([])
-    
     safe_q = f'%{q}%'
     with get_db() as conn:
         rows = conn.execute("SELECT id FROM notes WHERE title LIKE ? OR text LIKE ?", (safe_q, safe_q)).fetchall()
@@ -333,7 +329,6 @@ def update_note(note_id):
             is_locked = lock_owner and (now - lock_time) < 30
             if is_locked and lock_owner != cid: return jsonify({"error": "Locked by another client"}), 403
 
-        # Python-basierter Historien-Speicher
         sets = get_settings()
         if sets.get('history_enabled', True):
             old_row = conn.execute("SELECT title, text FROM notes WHERE id=?", (note_id,)).fetchone()
@@ -532,7 +527,6 @@ if not os.path.exists(DB) or not os.path.exists(UPL): exit()
 
 conn = sqlite3.connect(DB)
 
-# 1. Historie bereinigen anhand der Einstellungen
 sets = dict(conn.execute("SELECT key, value FROM settings").fetchall())
 hist_enabled = sets.get('history_enabled', 'true') == 'true'
 hist_days = int(sets.get('history_days', '30'))
@@ -544,7 +538,6 @@ else:
     conn.execute("DELETE FROM note_history")
 conn.commit()
 
-# 2. Uploads bereinigen (scannt aktive Notizen UND lebendige Historie)
 used_files = set()
 rows = conn.execute("SELECT text FROM notes WHERE text IS NOT NULL").fetchall()
 hist_rows = conn.execute("SELECT text FROM note_history WHERE text IS NOT NULL").fetchall()
@@ -584,13 +577,23 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width,initial-scale=1.0">
-    <title>Notes V2.2</title>
+    <title>Notizen</title>
     <link rel="stylesheet" href="/static/style.css?v={{ v }}">
     <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/tomorrow-night-blue.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 </head>
-<body data-theme="dark">
+<body data-theme="{{ theme }}">
+    <script>
+        if (localStorage.getItem('sidebarState') === 'closed') {
+            document.body.classList.add('sidebar-hidden');
+        }
+        const initialAccent = '{{ accent }}';
+        document.documentElement.style.setProperty('--accent', initialAccent); 
+        const r = parseInt(initialAccent.slice(1,3), 16), g = parseInt(initialAccent.slice(3,5), 16), b = parseInt(initialAccent.slice(5,7), 16); 
+        document.documentElement.style.setProperty('--accent-rgb', `${r}, ${g}, ${b}`);
+    </script>
+    
     <div class="header-actions">
         <div class="dropdown">
             <button onclick="toggleSettings(event)" style="font-size:1.4em">⚙️</button>
@@ -1464,9 +1467,6 @@ function cleanDataArray(arr) {
 }
 
 async function loadData() { 
-    const sState = localStorage.getItem('sidebarState') || 'closed'; 
-    if (sState === 'closed') document.body.classList.add('sidebar-hidden'); 
-    
     const savedCollapsed = localStorage.getItem('collapsedNodes');
     if (savedCollapsed) {
         try { 
@@ -1504,7 +1504,6 @@ function saveCollapsedToLocal() {
     localStorage.setItem('collapsedNodes', JSON.stringify(Array.from(collapsedIds))); 
 }
 
-// Ladefunktion mit Fortschrittsbalken (XMLHttpRequest)
 function uploadWithProgress(file, onSuccess) {
     if (file.size > 50 * 1024 * 1024) { 
         showModal("Zu groß", "Die Datei darf maximal 50 MB groß sein.", [{ label: "OK", class: "btn-cancel", action: () => {} }]); 
@@ -1614,6 +1613,72 @@ async function saveChanges() {
 function cancelEdit() { 
     releaseLock(); 
     renderDisplayArea(); 
+}
+
+function renderMarkdown(text) { 
+    if (!text) return ''; 
+    let html = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); 
+    
+    html = html.replace(/\[img:(.*?)\]/g, '<img src="/uploads/$1" class="note-img" onclick="openLightbox(this.src)">');
+    html = html.replace(/\[sketch:([a-zA-Z0-9]+)\]/g, '<img src="/uploads/sketch_$1.png?v='+Date.now()+'" class="note-img sketch-img" title="Skizze bearbeiten" onclick="openSketch(\'$1\')">');
+    html = html.replace(/\[file:([a-zA-Z0-9.\-]+)\|([^\]]+)\]/g, '<a href="/uploads/$1" target="_blank" class="note-link">📎 $2</a>');
+    
+    html = html.replace(/\[note:([a-zA-Z0-9]+)\|([^\]]+)\]/g, (match, id, title) => '<a href="#" onclick="selectNode(\'' + id + '\'); return false;" class="note-link">@ ' + title + '</a>');
+    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" style="color:var(--accent); text-decoration:underline;">$1</a>');
+    html = html.replace(/\[s=(.*?)\]\n?([\s\S]*?)\n?\[\/s\]/g, '<details class="spoiler"><summary>$1</summary><div class="spoiler-content">$2</div></details>');
+
+    let last = ""; 
+    while (last !== html) { 
+        last = html; 
+        html = html.replace(/\[(#[0-9a-fA-F]{6})\]([\s\S]*?)\[\/#\]/g, '<span style="color:$1">$2</span>'); 
+        html = html.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>'); 
+        html = html.replace(/_(.*?)_/g, '<i>$1</i>'); 
+        html = html.replace(/~~(.*?)~~/g, '<s>$1</s>'); 
+    } 
+    
+    let parts = html.split("'''"); 
+    let res = ''; 
+    window.taskIndexCounter = 0; 
+    
+    for (let i = 0; i < parts.length; i++) { 
+        if (i % 2 === 1) { 
+            let content = parts[i].trim(); 
+            let lines = content.split('\n'); 
+            let langClass = ''; 
+            
+            if (lines.length > 0 && lines[0].length < 15 && /^[a-z0-9]+$/.test(lines[0].trim())) { 
+                langClass = ' class="language-' + lines[0].trim() + '"'; 
+                content = lines.slice(1).join('\n'); 
+            } 
+            
+            res += '<div class="code-container"><button class="copy-badge" onclick="copyToClipboard(this)">Copy</button><pre><code' + langClass + '>' + content + '</code></pre></div>'; 
+        } else { 
+            res += parts[i].split('\n').map(line => {
+                let t = line.trim(); 
+                if (t === '') return '<br>'; 
+                if (t === '---') return '<hr>';
+                if (t.startsWith('### ')) return '<h3>' + line.substring(4) + '</h3>'; 
+                if (t.startsWith('## ')) return '<h2>' + line.substring(3) + '</h2>'; 
+                if (t.startsWith('# ')) return '<h1>' + line.substring(2) + '</h1>';
+                
+                if (t.startsWith('&gt; ')) return '<blockquote>' + line.substring(line.indexOf('&gt; ') + 5) + '</blockquote>'; 
+                
+                if (t.startsWith('- [ ] ')) { 
+                    let idx = window.taskIndexCounter++; 
+                    return '<div class="task-list-item"><input type="checkbox" class="task-check" onclick="toggleTask(' + idx + ', false)"> <span>' + line.substring(line.indexOf('- [ ] ') + 6) + '</span></div>'; 
+                }
+                if (t.startsWith('- [x] ') || t.startsWith('- [X] ')) { 
+                    let idx = window.taskIndexCounter++; 
+                    return '<div class="task-list-item"><input type="checkbox" class="task-check" checked onclick="toggleTask(' + idx + ', true)"> <span><del>' + line.substring(line.indexOf('] ') + 2) + '</del></span></div>'; 
+                }
+                
+                if (t.startsWith('- ')) return '<div style="margin-left: 20px;">• ' + line.substring(line.indexOf('- ')+2) + '</div>'; 
+                
+                return '<div>' + line + '</div>';
+            }).join(''); 
+        } 
+    } 
+    return res; 
 }
 
 function renderDisplayArea() {
@@ -1828,15 +1893,11 @@ function renderItems(items, parent) {
         
         const isFolder = item.children && item.children.length > 0; 
         
-        // Ordner sind zugeklappt, wenn sie in collapsedIds sind.
-        // ABER beim aktiven Suchen heben wir das temporär auf, es sei denn der Nutzer klickt sie gezielt während der Suche zu.
         let isCollapsed = false;
         if (!isEdit) {
             if (searchTerm !== '') {
-                // Suchmodus: Aufklappen erzwingen, außer Nutzer hat ihn während der Suche geschlossen
                 isCollapsed = collapsedIds.has(item.id);
             } else {
-                // Normalmodus
                 isCollapsed = collapsedIds.has(item.id);
             }
         }
@@ -1866,7 +1927,6 @@ function renderItems(items, parent) {
                 }
                 saveCollapsedToLocal(); 
                 
-                // Such-Fix: Wir rufen filterTree() auf, wenn wir suchen, damit das UI nicht zurückspringt
                 if (searchTerm !== '') {
                     filterTree();
                 } else {
@@ -1957,70 +2017,6 @@ function renderTree() {
     }
 }
 
-function renderMarkdown(text) { 
-    if (!text) return ''; 
-    let html = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); 
-    
-    html = html.replace(/\[img:(.*?)\]/g, '<img src="/uploads/$1" class="note-img" onclick="openLightbox(this.src)">');
-    html = html.replace(/\[sketch:([a-zA-Z0-9]+)\]/g, '<img src="/uploads/sketch_$1.png?v='+Date.now()+'" class="note-img sketch-img" title="Skizze bearbeiten" onclick="openSketch(\'$1\')">');
-    html = html.replace(/\[file:([a-zA-Z0-9.\-]+)\|([^\]]+)\]/g, '<a href="/uploads/$1" target="_blank" class="note-link">📎 $2</a>');
-    
-    html = html.replace(/\[note:([a-zA-Z0-9]+)\|([^\]]+)\]/g, (match, id, title) => '<a href="#" onclick="selectNode(\'' + id + '\'); return false;" class="note-link">@ ' + title + '</a>');
-    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" style="color:var(--accent); text-decoration:underline;">$1</a>');
-    html = html.replace(/\[s=(.*?)\]\n?([\s\S]*?)\n?\[\/s\]/g, '<details class="spoiler"><summary>$1</summary><div class="spoiler-content">$2</div></details>');
-
-    let last = ""; 
-    while (last !== html) { 
-        last = html; 
-        html = html.replace(/\[(#[0-9a-fA-F]{6})\]([\s\S]*?)\[\/#\]/g, '<span style="color:$1">$2</span>'); 
-        html = html.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>'); 
-        html = html.replace(/_(.*?)_/g, '<i>$1</i>'); 
-        html = html.replace(/~~(.*?)~~/g, '<s>$1</s>'); 
-    } 
-    
-    let parts = html.split("'''"); 
-    let res = ''; 
-    window.taskIndexCounter = 0; 
-    
-    for (let i = 0; i < parts.length; i++) { 
-        if (i % 2 === 1) { 
-            let content = parts[i].trim(); 
-            let lines = content.split('\n'); 
-            let langClass = ''; 
-            
-            if (lines.length > 0 && lines[0].length < 15 && /^[a-z0-9]+$/.test(lines[0].trim())) { 
-                langClass = ' class="language-' + lines[0].trim() + '"'; 
-                content = lines.slice(1).join('\n'); 
-            } 
-            
-            res += '<div class="code-container"><button class="copy-badge" onclick="copyToClipboard(this)">Copy</button><pre><code' + langClass + '>' + content + '</code></pre></div>'; 
-        } else { 
-            res += parts[i].split('\n').map(line => {
-                let t = line.trim(); 
-                if (t === '') return '<br>'; 
-                if (t === '---') return '<hr>';
-                if (t.startsWith('### ')) return '<h3>' + line.substring(4) + '</h3>'; 
-                if (t.startsWith('## ')) return '<h2>' + line.substring(3) + '</h2>'; 
-                if (t.startsWith('# ')) return '<h1>' + line.substring(2) + '</h1>';
-                
-                if (t.startsWith('- [ ] ')) { 
-                    let idx = window.taskIndexCounter++; 
-                    return '<div class="task-list-item"><input type="checkbox" class="task-check" onclick="toggleTask(' + idx + ', false)"> <span>' + line.substring(line.indexOf('- [ ] ') + 6) + '</span></div>'; 
-                }
-                if (t.startsWith('- [x] ') || t.startsWith('- [X] ')) { 
-                    let idx = window.taskIndexCounter++; 
-                    return '<div class="task-list-item"><input type="checkbox" class="task-check" checked onclick="toggleTask(' + idx + ', true)"> <span><del>' + line.substring(line.indexOf('] ') + 2) + '</del></span></div>'; 
-                }
-                
-                if (t.startsWith('- ')) return '<div style="margin-left: 20px;">• ' + line.substring(line.indexOf('- ')+2) + '</div>'; 
-                
-                return '<div>' + line + '</div>';
-            }).join(''); 
-        } 
-    } 
-    return res; 
-}
-
 function openReminderModal() {
     if(!activeNoteData) return;
     document.getElementById('reminder-modal').style.display = 'flex';
@@ -2089,17 +2085,14 @@ async function clearReminder() {
     } 
 }
 
-// History & Lock System
 async function openHistoryModal() {
     if (!activeId) return;
     
-    // Prüfen, ob die Historie überhaupt erlaubt ist
     if (!fullTree.settings.history_enabled) {
         alert("Der Versionsverlauf ist in den Einstellungen deaktiviert.");
         return;
     }
     
-    // Historie darf nur geöffnet werden, wenn wir die Notiz sperren können!
     if (!await acquireLock(activeId)) {
         showModal("Gesperrt", "Der Verlauf kann nicht geöffnet werden, da die Notiz gerade auf einem anderen Gerät bearbeitet wird.", [
             { label: "Verstanden", class: "btn-cancel", action: () => {} }
@@ -2310,7 +2303,6 @@ async function filterTree() {
                 let filteredChildren = item.children ? getFilteredItems(item.children) : [];
                 
                 if (matchInTitle || matchInText || filteredChildren.length > 0) {
-                    // Tree-Aufklapp-Fix: Wenn dieser Knoten im Pfad eines Treffers liegt, entfernen wir ihn aus collapsedIds
                     if ((matchInTitle || matchInText || filteredChildren.length > 0) && collapsedIds.has(item.id)) {
                         collapsedIds.delete(item.id);
                     }
@@ -2909,32 +2901,72 @@ async function executeRestore() {
     btn.innerText = "Verifiziere & Lade..."; 
     statusDiv.style.display = 'none';
     
-    try {
-        const res = await fetch('/api/restore', { method: 'POST', body: fd }); 
-        const data = await res.json();
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/restore', true);
+
+    if (file) {
+        document.getElementById('restore-modal').style.display = 'none';
         
-        if (data.status === 'success') { 
-            statusDiv.style.color = '#27ae60'; 
-            statusDiv.style.background = 'rgba(39, 174, 96, 0.1)'; 
-            statusDiv.innerText = "Erfolgreich! Die Seite wird nun neu geladen..."; 
-            statusDiv.style.display = 'block'; 
-            setTimeout(() => window.location.reload(), 2000); 
-        } else { 
-            statusDiv.style.color = '#e74c3c'; 
-            statusDiv.style.background = 'rgba(231, 76, 60, 0.1)'; 
-            statusDiv.innerText = "Fehler: " + (data.error || "Unbekannter Serverfehler"); 
-            statusDiv.style.display = 'block'; 
-            btn.disabled = false; 
-            btn.innerText = "Wiederherstellen"; 
-        }
-    } catch (e) { 
-        statusDiv.style.color = '#e74c3c'; 
-        statusDiv.style.background = 'rgba(231, 76, 60, 0.1)'; 
-        statusDiv.innerText = "Netzwerkfehler beim Wiederherstellen."; 
-        statusDiv.style.display = 'block'; 
-        btn.disabled = false; 
-        btn.innerText = "Wiederherstellen"; 
+        const modal = document.getElementById('upload-modal');
+        const bar = document.getElementById('upload-progress-bar');
+        const percentTxt = document.getElementById('upload-percent');
+
+        modal.style.display = 'flex';
+        bar.style.width = '0%';
+        percentTxt.innerText = '0%';
+
+        xhr.upload.onprogress = function(e) {
+            if (e.lengthComputable) {
+                const percent = Math.round((e.loaded / e.total) * 100);
+                bar.style.width = percent + '%';
+                percentTxt.innerText = percent + '%';
+            }
+        };
     }
+    
+    xhr.onload = function() {
+        if (file) document.getElementById('upload-modal').style.display = 'none';
+        try {
+            const data = JSON.parse(xhr.responseText);
+            if (xhr.status === 200 && data.status === 'success') {
+                document.getElementById('restore-modal').style.display = 'flex';
+                statusDiv.style.color = '#27ae60';
+                statusDiv.style.background = 'rgba(39, 174, 96, 0.1)';
+                statusDiv.innerText = "Erfolgreich! Die Seite wird nun neu geladen...";
+                statusDiv.style.display = 'block';
+                setTimeout(() => window.location.reload(), 2000);
+            } else {
+                document.getElementById('restore-modal').style.display = 'flex';
+                statusDiv.style.color = '#e74c3c';
+                statusDiv.style.background = 'rgba(231, 76, 60, 0.1)';
+                statusDiv.innerText = "Fehler: " + (data.error || "Unbekannter Serverfehler");
+                statusDiv.style.display = 'block';
+                btn.disabled = false;
+                btn.innerText = "Wiederherstellen";
+            }
+        } catch (e) {
+            document.getElementById('restore-modal').style.display = 'flex';
+            statusDiv.style.color = '#e74c3c';
+            statusDiv.style.background = 'rgba(231, 76, 60, 0.1)';
+            statusDiv.innerText = "Netzwerkfehler beim Wiederherstellen.";
+            statusDiv.style.display = 'block';
+            btn.disabled = false;
+            btn.innerText = "Wiederherstellen";
+        }
+    };
+    
+    xhr.onerror = function() {
+        if (file) document.getElementById('upload-modal').style.display = 'none';
+        document.getElementById('restore-modal').style.display = 'flex';
+        statusDiv.style.color = '#e74c3c';
+        statusDiv.style.background = 'rgba(231, 76, 60, 0.1)';
+        statusDiv.innerText = "Netzwerkfehler beim Upload.";
+        statusDiv.style.display = 'block';
+        btn.disabled = false;
+        btn.innerText = "Wiederherstellen";
+    };
+
+    xhr.send(fd);
 }
 
 window.onload = () => { 
@@ -2945,7 +2977,6 @@ window.onload = () => {
 };
 EOF
 
-# Sicherheit & Rechte
 if ! id -u notizen > /dev/null 2>&1; then 
     useradd -r -s /bin/false notizen
 fi
@@ -2958,10 +2989,9 @@ chmod 750 $INSTALL_DIR/backup.sh
 chmod 750 $INSTALL_DIR/cleanup.py
 chmod +x $INSTALL_DIR/app.py
 
-# Systemd Autostart konfigurieren
 cat << EOF > /etc/systemd/system/$SERVICE_NAME
 [Unit]
-Description=Notizen V2.2
+Description=Notizen
 After=network.target
 
 [Service]
@@ -2978,7 +3008,6 @@ EOF
 systemctl daemon-reload
 systemctl enable $SERVICE_NAME
 
-# Cronjobs verwalten
 echo "--- Richte Cronjobs ein ---"
 rm -f /etc/cron.d/notizen-tool
 echo "0 3 * * * notizen /usr/bin/python3 $INSTALL_DIR/cleanup.py" >> /etc/cron.d/notizen-tool
@@ -2987,6 +3016,5 @@ if [[ "$BACKUP_CONFIRM" =~ ^[Yy]$ ]]; then
 fi
 chmod 644 /etc/cron.d/notizen-tool
 
-# Neustart
 systemctl restart $SERVICE_NAME
 echo "--- Setup abgeschlossen! Tool ist unter Port $USER_PORT erreichbar. ---"
