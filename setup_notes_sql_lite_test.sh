@@ -229,7 +229,11 @@ def logout():
 
 @app.route('/')
 def index():
-    return render_template('index.html', v=str(time.time()))
+    sets = get_settings()
+    return render_template('index.html', 
+                           v=str(time.time()), 
+                           theme=sets.get('theme', 'dark'), 
+                           accent=sets.get('accent', '#27ae60'))
 
 @app.route('/api/tree', methods=['GET'])
 def get_tree():
@@ -579,7 +583,17 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/tomorrow-night-blue.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 </head>
-<body data-theme="dark">
+<body data-theme="{{ theme }}">
+    <script>
+        if (localStorage.getItem('sidebarState') === 'closed') {
+            document.body.classList.add('sidebar-hidden');
+        }
+        const initialAccent = '{{ accent }}';
+        document.documentElement.style.setProperty('--accent', initialAccent); 
+        const r = parseInt(initialAccent.slice(1,3), 16), g = parseInt(initialAccent.slice(3,5), 16), b = parseInt(initialAccent.slice(5,7), 16); 
+        document.documentElement.style.setProperty('--accent-rgb', `${r}, ${g}, ${b}`);
+    </script>
+    
     <div class="header-actions">
         <div class="dropdown">
             <button onclick="toggleSettings(event)" style="font-size:1.4em">⚙️</button>
@@ -1453,9 +1467,6 @@ function cleanDataArray(arr) {
 }
 
 async function loadData() { 
-    const sState = localStorage.getItem('sidebarState') || 'closed'; 
-    if (sState === 'closed') document.body.classList.add('sidebar-hidden'); 
-    
     const savedCollapsed = localStorage.getItem('collapsedNodes');
     if (savedCollapsed) {
         try { 
@@ -1650,7 +1661,6 @@ function renderMarkdown(text) {
                 if (t.startsWith('## ')) return '<h2>' + line.substring(3) + '</h2>'; 
                 if (t.startsWith('# ')) return '<h1>' + line.substring(2) + '</h1>';
                 
-                // Zitat Bugfix (HTML-escaped '>' is '&gt;')
                 if (t.startsWith('&gt; ')) return '<blockquote>' + line.substring(line.indexOf('&gt; ') + 5) + '</blockquote>'; 
                 
                 if (t.startsWith('- [ ] ')) { 
@@ -2895,7 +2905,6 @@ async function executeRestore() {
     xhr.open('POST', '/api/restore', true);
 
     if (file) {
-        // Restore-Modal ausblenden, damit der Upload-Balken im Vordergrund sichtbar wird
         document.getElementById('restore-modal').style.display = 'none';
         
         const modal = document.getElementById('upload-modal');
@@ -2917,11 +2926,9 @@ async function executeRestore() {
     
     xhr.onload = function() {
         if (file) document.getElementById('upload-modal').style.display = 'none';
-        
         try {
             const data = JSON.parse(xhr.responseText);
             if (xhr.status === 200 && data.status === 'success') {
-                // Restore-Modal wieder einblenden für die Erfolgsmeldung
                 document.getElementById('restore-modal').style.display = 'flex';
                 statusDiv.style.color = '#27ae60';
                 statusDiv.style.background = 'rgba(39, 174, 96, 0.1)';
@@ -2950,7 +2957,6 @@ async function executeRestore() {
     
     xhr.onerror = function() {
         if (file) document.getElementById('upload-modal').style.display = 'none';
-        
         document.getElementById('restore-modal').style.display = 'flex';
         statusDiv.style.color = '#e74c3c';
         statusDiv.style.background = 'rgba(231, 76, 60, 0.1)';
