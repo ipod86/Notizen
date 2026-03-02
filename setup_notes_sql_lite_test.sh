@@ -646,13 +646,18 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
             
             <div id="view-mode">
                 <div style="display:flex; align-items:center; gap:12px; margin-bottom:20px; flex-wrap:wrap;">
-                    <h1 id="view-title" style="margin:0; overflow-wrap:anywhere; word-break:break-word; max-width:100%;"></h1>
+                    <h1 id="view-title" style="margin:0; overflow-wrap:anywhere; word-break:break-word; max-width:85%;"></h1>
                     <span id="view-reminder-badge" style="display:none; color:#e74c3c; font-size:1.2em; animation: pulse 2s infinite;" title="Erinnerung aktiv!">⏰</span>
                     <button id="view-reminder-ack" onclick="clearReminder()" style="display:none; background:#e74c3c !important; color:white; padding:4px 8px; border-radius:4px; font-size:0.8em; font-weight:bold;">Bestätigen</button>
                     
-                    <div style="margin-left:auto; display:flex; gap:10px;">
-                        <button id="btn-open-history" onclick="openHistoryModal()" style="font-size:1.2em;" title="Versionsverlauf">🕰️</button>
-                        <button onclick="enableEdit()" style="font-size:1.2em;" title="Bearbeiten">✏️</button>
+                    <div style="margin-left:auto; display:flex; align-items:center; position:relative;">
+                        <div class="dropdown">
+                            <button onclick="toggleNoteMenu(event)" style="font-size:1.4em; padding:0 5px; font-weight:bold; letter-spacing: 2px;">⋮</button>
+                            <div class="dropdown-content" id="note-menu-content" style="top:35px;">
+                                <div class="menu-row" onclick="enableEdit(); document.getElementById('note-menu-content').style.display='none';"><span>Bearbeiten</span></div>
+                                <div class="menu-row" id="menu-row-history" onclick="openHistoryModal(); document.getElementById('note-menu-content').style.display='none';"><span>Versionsverlauf</span></div>
+                            </div>
+                        </div>
                     </div>
                 </div>
                 <div id="display-area"></div>
@@ -1235,12 +1240,13 @@ body.sidebar-hidden #mobile-toggle-btn { left: 0; }
     border-radius: 8px; 
     overflow: hidden; 
     box-shadow: 0 4px 15px rgba(0,0,0,0.3); 
+    z-index: 1001;
 }
 
 .menu-row { display: flex; align-items: center; height: 50px; border-bottom: 1px solid var(--border-color); padding: 0 15px; box-sizing: border-box; cursor: pointer; font-size: 14px; transition: background 0.2s; }
 .menu-row:last-child { border-bottom: none; }
 .menu-row:hover { background: rgba(255,255,255,0.05); }
-.menu-row span { flex-grow: 1; }
+.menu-row span { flex-grow: 1; text-align: left; }
 
 #accent-color-picker { width: 40px; height: 25px; border: none; background: none; cursor: pointer; padding: 0; }
 
@@ -1840,9 +1846,9 @@ function renderDisplayArea() {
     document.getElementById('view-mode').style.display = 'block'; 
     document.getElementById('edit-mode').style.display = 'none'; 
     
-    const btnHistory = document.getElementById('btn-open-history');
-    if (btnHistory) {
-        btnHistory.style.display = (fullTree.settings.history_enabled) ? 'inline-block' : 'none';
+    const menuRowHistory = document.getElementById('menu-row-history');
+    if (menuRowHistory) {
+        menuRowHistory.style.display = (fullTree.settings.history_enabled) ? 'flex' : 'none';
     }
     
     fetch(`/api/notes/${activeId}/backlinks`).then(r => r.json()).then(bl => {
@@ -2580,11 +2586,23 @@ function toggleSettings(e) {
     e.stopPropagation(); 
     const m = document.getElementById('dropdown-menu'); 
     m.style.display = m.style.display === 'block' ? 'none' : 'block'; 
+    const m2 = document.getElementById('note-menu-content'); 
+    if (m2) m2.style.display = 'none';
+}
+
+function toggleNoteMenu(e) {
+    e.stopPropagation();
+    const m = document.getElementById('note-menu-content');
+    m.style.display = m.style.display === 'block' ? 'none' : 'block';
+    const mSettings = document.getElementById('dropdown-menu');
+    if (mSettings) mSettings.style.display = 'none';
 }
 
 document.addEventListener('click', () => { 
     const m = document.getElementById('dropdown-menu'); 
     if (m) m.style.display = 'none'; 
+    const m2 = document.getElementById('note-menu-content');
+    if (m2) m2.style.display = 'none';
 });
 
 function exportData() { 
