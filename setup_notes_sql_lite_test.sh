@@ -2765,6 +2765,8 @@ function deleteItem(id) {
         { label: "Löschen", class: "btn-discard", action: async () => { 
             await fetch(`/api/notes/${id}`, { method: 'DELETE' }); 
             if (activeId === id) { activeId = null; document.getElementById('edit-area').style.display = 'none'; } 
+            const el = document.querySelector(`.tree-item-container[data-id="${id}"]`);
+            if (el) el.remove(); 
             await checkAndReloadData(); 
         } }, 
         { label: "Abbruch", class: "btn-cancel", action: () => {} } 
@@ -2968,6 +2970,27 @@ async function executeRestore() {
 
     xhr.send(fd);
 }
+
+let touchStartX = 0;
+let touchEndX = 0;
+
+document.addEventListener('touchstart', e => { 
+    touchStartX = e.changedTouches[0].screenX; 
+}, {passive: true});
+
+document.addEventListener('touchend', e => {
+    touchEndX = e.changedTouches[0].screenX;
+    if (window.innerWidth <= 768) {
+        const swipeDist = touchEndX - touchStartX;
+        const isHidden = document.body.classList.contains('sidebar-hidden');
+        
+        if (swipeDist > 70 && isHidden && touchStartX < 50) {
+            toggleSidebar();
+        } else if (swipeDist < -70 && !isHidden) {
+            toggleSidebar();
+        }
+    }
+}, {passive: true});
 
 window.onload = () => { 
     loadData(); 
