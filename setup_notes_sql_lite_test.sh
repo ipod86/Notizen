@@ -1374,16 +1374,20 @@ input[type="checkbox"].task-check { width: 16px; height: 16px; margin: 0; cursor
         background: white !important;
         color: black !important;
         height: auto !important;
+        width: auto !important;
         overflow: visible !important;
         display: block !important;
+        position: static !important;
     }
 
     #editor {
         padding: 0 !important;
         margin: 0 !important;
         height: auto !important;
+        width: auto !important;
         overflow: visible !important;
         display: block !important;
+        position: static !important;
     }
 
     /* Verhindere, dass Bilder, Code oder Listen in der Mitte zerschnitten werden */
