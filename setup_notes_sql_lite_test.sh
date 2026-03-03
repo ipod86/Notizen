@@ -105,6 +105,12 @@ def init_db():
             )
         ''')
         
+        # Migration: Add Trash and Share fields if they don't exist
+        try: conn.execute('ALTER TABLE notes ADD COLUMN is_trashed INTEGER DEFAULT 0')
+        except sqlite3.OperationalError: pass
+        try: conn.execute('ALTER TABLE notes ADD COLUMN share_id TEXT')
+        except sqlite3.OperationalError: pass
+        
         conn.execute('''
             CREATE TABLE IF NOT EXISTS note_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -114,9 +120,6 @@ def init_db():
                 saved_at REAL
             )
         ''')
-        
-        conn.execute('DROP TRIGGER IF EXISTS save_note_history')
-        conn.execute('DROP TRIGGER IF EXISTS keep_max_5_history')
         
         if not conn.execute("SELECT key FROM settings WHERE key='theme'").fetchone():
             conn.execute("INSERT INTO settings (key, value) VALUES ('theme', 'dark')")
@@ -157,7 +160,7 @@ def webhook_worker():
                     payload = payload_r['value'] if payload_r else ''
                     now = datetime.now()
                     
-                    reminders = conn.execute("SELECT id, title, reminder FROM notes WHERE reminder IS NOT NULL AND reminder != ''").fetchall()
+                    reminders = conn.execute("SELECT id, title, reminder FROM notes WHERE reminder IS NOT NULL AND reminder != '' AND is_trashed=0").fetchall()
                     
                     for r in reminders:
                         try:
@@ -205,7 +208,7 @@ def get_settings():
 
 @app.before_request
 def require_login():
-    if request.endpoint in ['login', 'static']: return
+    if request.endpoint in ['login', 'static', 'view_shared_note', 'uploaded_file']: return
     sets = get_settings()
     if sets.get('password_enabled') and not session.get('logged_in'):
         if request.path.startswith('/api/'): return jsonify({"error": "Unauthorized"}), 401
@@ -238,7 +241,7 @@ def index():
 @app.route('/api/tree', methods=['GET'])
 def get_tree():
     with get_db() as conn:
-        rows = conn.execute("SELECT id, parent_id, sort_order, title, reminder FROM notes ORDER BY sort_order").fetchall()
+        rows = conn.execute("SELECT id, parent_id, sort_order, title, reminder FROM notes WHERE is_trashed=0 ORDER BY sort_order").fetchall()
         sets = get_settings()
         all_ids = {r['id'] for r in rows}
         nodes_by_parent = {}
@@ -269,20 +272,20 @@ def search_notes():
     if not q: return jsonify([])
     safe_q = f'%{q}%'
     with get_db() as conn:
-        rows = conn.execute("SELECT id FROM notes WHERE title LIKE ? OR text LIKE ?", (safe_q, safe_q)).fetchall()
+        rows = conn.execute("SELECT id FROM notes WHERE is_trashed=0 AND (title LIKE ? OR text LIKE ?)", (safe_q, safe_q)).fetchall()
         return jsonify([r['id'] for r in rows])
 
 @app.route('/api/notes/<note_id>', methods=['GET'])
 def get_note(note_id):
     with get_db() as conn:
-        row = conn.execute("SELECT id, title, text, reminder FROM notes WHERE id=?", (note_id,)).fetchone()
+        row = conn.execute("SELECT id, title, text, reminder FROM notes WHERE id=? AND is_trashed=0", (note_id,)).fetchone()
         if row: return jsonify(dict(row))
         return jsonify({"error": "Not found"}), 404
 
 @app.route('/api/notes/<note_id>/backlinks', methods=['GET'])
 def get_backlinks(note_id):
     with get_db() as conn:
-        rows = conn.execute("SELECT id, title FROM notes WHERE text LIKE ?", (f'%[note:{note_id}|%',)).fetchall()
+        rows = conn.execute("SELECT id, title FROM notes WHERE is_trashed=0 AND text LIKE ?", (f'%[note:{note_id}|%',)).fetchall()
         return jsonify([dict(r) for r in rows])
 
 @app.route('/api/notes/<note_id>/history', methods=['GET'])
@@ -347,12 +350,110 @@ def update_note(note_id):
 @app.route('/api/notes/<note_id>', methods=['DELETE'])
 def delete_note(note_id):
     with get_db() as conn:
-        def delete_recursive(nid):
+        def trash_recursive(nid):
             children = conn.execute("SELECT id FROM notes WHERE parent_id=?", (nid,)).fetchall()
-            for c in children: delete_recursive(c['id'])
-            conn.execute("DELETE FROM notes WHERE id=?", (nid,))
-            conn.execute("DELETE FROM note_history WHERE note_id=?", (nid,))
-        delete_recursive(note_id)
+            for c in children: trash_recursive(c['id'])
+            conn.execute("UPDATE notes SET is_trashed=1 WHERE id=?", (nid,))
+        trash_recursive(note_id)
+    return jsonify({"status": "success"})
+
+@app.route('/api/trash', methods=['GET'])
+def get_trash():
+    with get_db() as conn:
+        rows = conn.execute("SELECT id, title FROM notes WHERE is_trashed=1").fetchall()
+        return jsonify([dict(r) for r in rows])
+
+@app.route('/api/trash/restore/<note_id>', methods=['POST'])
+def restore_trash(note_id):
+    with get_db() as conn:
+        conn.execute("UPDATE notes SET is_trashed=0, parent_id=NULL WHERE id=?", (note_id,))
+    return jsonify({"status": "success"})
+
+@app.route('/api/trash/empty', methods=['DELETE'])
+def empty_trash():
+    with get_db() as conn:
+        rows = conn.execute("SELECT id FROM notes WHERE is_trashed=1").fetchall()
+        for r in rows:
+            conn.execute("DELETE FROM note_history WHERE note_id=?", (r['id'],))
+        conn.execute("DELETE FROM notes WHERE is_trashed=1")
+    return jsonify({"status": "success"})
+
+@app.route('/api/notes/<note_id>/share', methods=['POST'])
+def share_note(note_id):
+    with get_db() as conn:
+        row = conn.execute("SELECT share_id FROM notes WHERE id=?", (note_id,)).fetchone()
+        if row and row['share_id']:
+            sid = row['share_id']
+        else:
+            sid = uuid.uuid4().hex
+            conn.execute("UPDATE notes SET share_id=? WHERE id=?", (sid, note_id))
+    return jsonify({"url": request.host_url + 'share/' + sid})
+
+@app.route('/api/notes/<note_id>/unshare', methods=['POST'])
+def unshare_note(note_id):
+    with get_db() as conn:
+        conn.execute("UPDATE notes SET share_id=NULL WHERE id=?", (note_id,))
+    return jsonify({"status": "success"})
+
+@app.route('/share/<share_id>')
+def view_shared_note(share_id):
+    sets = get_settings()
+    with get_db() as conn:
+        row = conn.execute("SELECT title, text FROM notes WHERE share_id=? AND is_trashed=0", (share_id,)).fetchone()
+        if not row: return "Notiz nicht gefunden oder Freigabe wurde beendet.", 404
+        
+        text_b64 = base64.b64encode((row['text'] or '').encode('utf-8')).decode('utf-8')
+        return render_template('share.html', 
+                               title=row['title'], 
+                               text_b64=text_b64, 
+                               theme=sets.get('theme', 'dark'), 
+                               accent=sets.get('accent', '#27ae60'),
+                               v=str(time.time()))
+
+@app.route('/api/todos', methods=['GET'])
+def get_todos():
+    with get_db() as conn:
+        rows = conn.execute("SELECT id, title, text FROM notes WHERE is_trashed=0 AND (text LIKE '%- [ ]%' OR text LIKE '%- [x]%' OR text LIKE '%- [X]%')").fetchall()
+        todos = []
+        for r in rows:
+            text = r['text'] or ''
+            lines = text.split('\n')
+            t_idx = 0
+            for line in lines:
+                t = line.strip()
+                if t.startswith('- [ ]') or t.startswith('- [x]') or t.startswith('- [X]'):
+                    is_checked = not t.startswith('- [ ]')
+                    task_text = t[5:].strip()
+                    todos.append({
+                        "note_id": r['id'],
+                        "note_title": r['title'],
+                        "task_index": t_idx,
+                        "text": task_text,
+                        "checked": is_checked
+                    })
+                    t_idx += 1
+        return jsonify(todos)
+
+@app.route('/api/todos/toggle', methods=['POST'])
+def toggle_todo_global():
+    data = request.json
+    nid = data['note_id']
+    t_idx = data['task_index']
+    with get_db() as conn:
+        row = conn.execute("SELECT text FROM notes WHERE id=?", (nid,)).fetchone()
+        if not row: return jsonify({"error": "not found"}), 404
+        lines = row['text'].split('\n')
+        curr_idx = 0
+        for i, line in enumerate(lines):
+            t = line.strip()
+            if t.startswith('- [ ]') or t.startswith('- [x]') or t.startswith('- [X]'):
+                if curr_idx == t_idx:
+                    if t.startswith('- [ ]'): lines[i] = line.replace('- [ ]', '- [x]', 1)
+                    else: lines[i] = line.replace('- [x]', '- [ ]', 1).replace('- [X]', '- [ ]', 1)
+                    break
+                curr_idx += 1
+        new_text = '\n'.join(lines)
+        conn.execute("UPDATE notes SET text=? WHERE id=?", (new_text, nid))
     return jsonify({"status": "success"})
 
 @app.route('/api/settings', methods=['POST'])
@@ -374,8 +475,7 @@ def test_webhook():
     method = data.get('method', 'GET')
     payload = data.get('payload', '')
 
-    if not url:
-        return jsonify({"error": "Keine Ziel-URL angegeben."}), 400
+    if not url: return jsonify({"error": "Keine Ziel-URL angegeben."}), 400
 
     title = "TEST-ERINNERUNG"
     now_str = datetime.now().strftime('%Y-%m-%d %H:%M')
@@ -394,10 +494,7 @@ def test_webhook():
             pd = payload.replace('{{TITLE}}', sj).replace('{{TIME}}', now_str)
             r = requests.post(final_url, data=pd.encode('utf-8'), headers={'Content-Type': 'application/json'}, timeout=10)
             
-        return jsonify({
-            "status_code": r.status_code,
-            "response_text": r.text[:500] 
-        })
+        return jsonify({"status_code": r.status_code, "response_text": r.text[:500]})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -573,7 +670,7 @@ else:
 conn.commit()
 
 used_files = set()
-rows = conn.execute("SELECT text FROM notes WHERE text IS NOT NULL").fetchall()
+rows = conn.execute("SELECT text FROM notes WHERE text IS NOT NULL AND is_trashed=0").fetchall()
 hist_rows = conn.execute("SELECT text FROM note_history WHERE text IS NOT NULL").fetchall()
 
 all_texts = [r[0] for r in rows] + [r[0] for r in hist_rows]
@@ -604,6 +701,49 @@ if [ -f data.db ]; then
 fi
 EOF
 
+# templates/share.html (NEUES LESE-ONLY TEMPLATE)
+cat << 'EOF' > $INSTALL_DIR/templates/share.html
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1.0">
+    <title>{{ title }} - Geteilte Notiz</title>
+    <link rel="stylesheet" href="/static/style.css?v={{ v }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/tomorrow-night-blue.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head>
+<body data-theme="{{ theme }}">
+    <script>
+        window.isShareView = true;
+        const initialAccent = '{{ accent }}';
+        document.documentElement.style.setProperty('--accent', initialAccent); 
+        const r = parseInt(initialAccent.slice(1,3), 16), g = parseInt(initialAccent.slice(3,5), 16), b = parseInt(initialAccent.slice(5,7), 16); 
+        document.documentElement.style.setProperty('--accent-rgb', `${r}, ${g}, ${b}`);
+    </script>
+    
+    <div style="max-width: 900px; width: 100%; margin: 40px auto; padding: 30px; background: var(--sidebar-bg); border-radius: 8px; border: 1px solid var(--border-color); box-shadow: 0 10px 30px rgba(0,0,0,0.2); box-sizing: border-box; overflow-y: auto; max-height: 90vh;">
+        <div style="display:flex; justify-content:space-between; align-items:center; border-bottom: 1px dashed var(--border-color); padding-bottom: 15px; margin-bottom: 25px;">
+            <h1 style="margin:0; overflow-wrap:anywhere; word-break:break-word;">{{ title }}</h1>
+            <span style="background: var(--accent); color: white; padding: 4px 10px; border-radius: 4px; font-size: 0.8em; font-weight: bold; flex-shrink: 0;">Lesezugriff</span>
+        </div>
+        <div id="display-area"></div>
+    </div>
+    
+    <div id="lightbox" onclick="closeLightbox()">
+        <img id="lightbox-img" src="">
+    </div>
+    
+    <script src="/static/script.js?v={{ v }}"></script>
+    <script>
+        const rawB64 = "{{ text_b64 }}";
+        const rawText = decodeURIComponent(escape(window.atob(rawB64)));
+        document.getElementById('display-area').innerHTML = renderMarkdown(rawText);
+    </script>
+</body>
+</html>
+EOF
+
 # templates/index.html 
 cat << 'EOF' > $INSTALL_DIR/templates/index.html
 <!DOCTYPE html>
@@ -629,7 +769,10 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
     </script>
     
     <div class="header-actions" style="display: flex; gap: 15px; align-items: center;">
-        <div id="notification-bell" style="position: relative; cursor: pointer; font-size: 1.4em;" onclick="openNotificationsModal()">
+        <div id="todo-dashboard-btn" style="cursor: pointer; font-size: 1.4em;" onclick="openTodoModal()" title="Meine Aufgaben">
+            ☑️
+        </div>
+        <div id="notification-bell" style="position: relative; cursor: pointer; font-size: 1.4em;" onclick="openNotificationsModal()" title="Erinnerungen">
             🔔
             <span id="notification-badge" style="display: none; position: absolute; top: -5px; right: -8px; background: #e74c3c; color: white; border-radius: 50%; padding: 2px 6px; font-size: 0.5em; font-weight: bold; border: 2px solid var(--bg-color);">0</span>
         </div>
@@ -647,6 +790,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
                 <div class="menu-row" onclick="togglePassword()"><span id="pwd-toggle-text">🔒 Passwortschutz an</span></div>
                 <div class="menu-row" onclick="toggleWebhookModal()"><span id="webhook-toggle-text">🔔 Webhook (Push)</span></div>
                 <div class="menu-row" onclick="toggleHistorySettings()"><span>🕰️ Historien-Optionen</span></div>
+                <div class="menu-row" onclick="openTrashModal()"><span>🗑️ Papierkorb</span></div>
                 <div class="menu-row" id="logout-btn" style="display:none; color:#e74c3c;" onclick="window.location.href='/logout'"><span>🚪 Abmelden</span></div>
             </div>
         </div>
@@ -689,6 +833,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
                             <button onclick="toggleNoteMenu(event)" style="font-size:1.4em; padding:0 5px; font-weight:bold; letter-spacing: 2px;">⋮</button>
                             <div class="dropdown-content" id="note-menu-content" style="top:35px;">
                                 <div class="menu-row" onclick="enableEdit(); document.getElementById('note-menu-content').style.display='none';"><span>Bearbeiten</span></div>
+                                <div class="menu-row" onclick="shareNote(); document.getElementById('note-menu-content').style.display='none';"><span>🔗 Freigabe-Link</span></div>
                                 <div class="menu-row" id="menu-row-history" onclick="openHistoryModal(); document.getElementById('note-menu-content').style.display='none';"><span>Versionsverlauf</span></div>
                                 <div class="menu-row" onclick="window.print(); document.getElementById('note-menu-content').style.display='none';"><span>Drucken / PDF</span></div>
                             </div>
@@ -710,6 +855,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
                     <button class="tool-btn" onclick="wrapSelection('### ','', 'Überschrift')"><i style="font-weight:bold;">H</i><span>Titel</span></button>
                     <button class="tool-btn" onclick="handleListAction('- ', 'Punkt')"><i style="font-weight:bold;">•—</i><span>Liste</span></button>
                     <button class="tool-btn" onclick="handleListAction('- [ ] ', 'Aufgabe')"><i>☑</i><span>To-Do</span></button>
+                    <button class="tool-btn" onclick="wrapSelection('\n| Spalte 1 | Spalte 2 |\n|---|---|\n| Wert 1 | Wert 2 |\n', '', 'Tabelle')"><i>📊</i><span>Tabelle</span></button>
                     <button class="tool-btn" onclick="wrapSelection('> ','', 'Zitat')"><i style="font-family:serif;">"</i><span>Zitat</span></button>
                     <button class="tool-btn" onclick="wrapSelection('[s=Spoiler-Titel]\n','\n[/s]', 'Text hier...')"><i>👁️‍🗨️</i><span>Spoiler</span></button>
                     <button class="tool-btn" onclick="wrapSelection('\n---\n','', '')"><i>—</i><span>Linie</span></button>
@@ -745,6 +891,31 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
         </div>
     </div>
     
+    <div id="todo-modal" class="modal-overlay">
+        <div class="modal" style="width: 650px; max-width: 95vw;">
+            <h3 style="margin-top:0">Meine Aufgaben</h3>
+            <div id="todo-list" style="text-align:left; max-height: 60vh; overflow-y: auto; margin-bottom: 20px;">
+                Lade...
+            </div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('todo-modal').style.display='none'">Schließen</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="trash-modal" class="modal-overlay">
+        <div class="modal" style="width: 500px; max-width: 95vw;">
+            <h3 style="margin-top:0">Papierkorb</h3>
+            <div id="trash-list" style="text-align:left; max-height: 50vh; overflow-y: auto; margin-bottom: 20px;">
+                Lade...
+            </div>
+            <div class="modal-btns" style="justify-content: space-between;">
+                <button class="btn-discard" onclick="emptyTrash()">🗑️ Alle endgültig löschen</button>
+                <button class="btn-cancel" onclick="document.getElementById('trash-modal').style.display='none'">Schließen</button>
+            </div>
+        </div>
+    </div>
+
     <div id="history-modal" class="modal-overlay">
         <div class="modal" style="width: 700px; max-width: 95vw;">
             <h3 style="margin-top:0">Versionsverlauf</h3>
@@ -1247,9 +1418,9 @@ input, textarea {
 }
 
 .modal-btns { display: flex; gap: 10px; justify-content: center; margin-top: 20px; }
-.btn-save { background: var(--accent) !important; color: white; padding: 8px 20px; border-radius: 5px; }
-.btn-discard { background: #e74c3c !important; color: white; padding: 8px 20px; border-radius: 5px; }
-.btn-cancel { border: 1px solid var(--border-color) !important; padding: 8px 20px; border-radius: 5px; }
+.btn-save { background: var(--accent) !important; color: white; padding: 8px 20px; border-radius: 5px; border: none; cursor: pointer; }
+.btn-discard { background: #e74c3c !important; color: white; padding: 8px 20px; border-radius: 5px; border: none; cursor: pointer; }
+.btn-cancel { border: 1px solid var(--border-color) !important; padding: 8px 20px; border-radius: 5px; background: transparent; cursor: pointer; color: inherit; }
 
 #mobile-toggle-btn { 
     position: fixed; 
@@ -1349,6 +1520,11 @@ input[type="checkbox"].task-check { width: 16px; height: 16px; margin: 0; cursor
 .reminder-icon { color: #e74c3c; margin-left: 6px; font-size: 0.9em; animation: pulse 2s infinite; }
 @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1; } }
 
+/* NEU: Markdown Tabellen */
+.md-table { width: 100%; border-collapse: collapse; margin: 15px 0; background: rgba(0,0,0,0.1); border-radius: 5px; overflow: hidden; box-shadow: 0 0 0 1px var(--border-color); }
+.md-table th, .md-table td { padding: 8px 12px; border: 1px solid var(--border-color); }
+.md-table th { background: rgba(var(--accent-rgb), 0.2); font-weight: bold; text-align: left; }
+
 #sketch-modal .modal { width: 1000px; max-width: 95vw; max-height: 95vh; display: flex; flex-direction: column; padding: 15px; box-sizing: border-box; }
 #sketch-toolbar { display: flex; gap: 15px; margin-bottom: 10px; align-items: center; flex-wrap: wrap; background: rgba(255,255,255,0.05); padding: 10px; border-radius: 8px; flex-shrink: 0; max-height: 40vh; overflow-y: auto; }
 #canvas-wrapper { display: flex; justify-content: center; align-items: center; width: 100%; }
@@ -1364,82 +1540,20 @@ input[type="checkbox"].task-check { width: 16px; height: 16px; margin: 0; cursor
 
 /* --- DRUCK-LAYOUT (PDF EXPORT) --- */
 @media print {
-    /* Verstecke alles, was nicht zur reinen Notiz gehört */
-    #sidebar, .header-actions, #mobile-toggle-btn, .toolbar, #edit-mode, #breadcrumb, #view-reminder-badge, #view-reminder-ack, .dropdown, #note-menu-content, #no-selection, #add-sub-level-btn {
-        display: none !important;
-    }
-
-    /* Setze das Layout zurück, damit es auf Papier/PDF passt */
-    body, html {
-        background: white !important;
-        color: black !important;
-        height: auto !important;
-        width: auto !important;
-        overflow: visible !important;
-        display: block !important;
-        position: static !important;
-    }
-
-    #editor {
-        padding: 0 !important;
-        margin: 0 !important;
-        height: auto !important;
-        width: auto !important;
-        overflow: visible !important;
-        display: block !important;
-        position: static !important;
-    }
-
-    /* Verhindere, dass Bilder, Code oder Listen in der Mitte zerschnitten werden */
-    img, pre, blockquote, .code-container, .task-list-item, .spoiler {
-        page-break-inside: avoid;
-        break-inside: avoid;
-    }
-    
-    /* NEU: Überschriften nicht von ihrem Text trennen */
-    h1, h2, h3, h4, h5, h6 {
-        page-break-after: avoid;
-        break-after: avoid;
-    }
-    
-    /* NEU: Verhindert "Schusterjungen" und "Hurenkinder" bei Textabsätzen (mind. 3 Zeilen zusammen) */
-    p, li, div {
-        orphans: 3;
-        widows: 3;
-    }
-
-    /* Erzwinge Zeilenumbrüche bei langem Code und passe Farben an */
-    pre code {
-        white-space: pre-wrap !important;
-        word-wrap: break-word !important;
-    }
-    
-    .code-container {
-        background: #f8f9fa !important;
-        color: #000 !important;
-        border: 1px solid #ccc !important;
-    }
-
-    /* Verstecke den Copy-Button beim Drucken */
-    .copy-badge {
-        display: none !important;
-    }
-    
-    /* Links schlicht darstellen */
-    .note-link {
-        border: none !important;
-        background: none !important;
-        text-decoration: underline !important;
-        color: black !important;
-    }
-    
-    /* Spoiler für den Druck immer aufklappen */
-    .spoiler-content {
-        display: block !important;
-    }
-    details.spoiler {
-        border: 1px solid #ccc;
-    }
+    #sidebar, .header-actions, #mobile-toggle-btn, .toolbar, #edit-mode, #breadcrumb, #view-reminder-badge, #view-reminder-ack, .dropdown, #note-menu-content, #no-selection, #add-sub-level-btn { display: none !important; }
+    body, html { background: white !important; color: black !important; height: auto !important; width: auto !important; overflow: visible !important; display: block !important; position: static !important; }
+    #editor { padding: 0 !important; margin: 0 !important; height: auto !important; width: auto !important; overflow: visible !important; display: block !important; position: static !important; }
+    img, pre, blockquote, .code-container, .task-list-item, .spoiler, .md-table { page-break-inside: avoid; break-inside: avoid; }
+    h1, h2, h3, h4, h5, h6 { page-break-after: avoid; break-after: avoid; }
+    p, li, div { orphans: 3; widows: 3; }
+    pre code { white-space: pre-wrap !important; word-wrap: break-word !important; }
+    .code-container { background: #f8f9fa !important; color: #000 !important; border: 1px solid #ccc !important; }
+    .copy-badge { display: none !important; }
+    .note-link { border: none !important; background: none !important; text-decoration: underline !important; color: black !important; }
+    .spoiler-content { display: block !important; }
+    details.spoiler { border: 1px solid #ccc; }
+    .md-table th, .md-table td { border-color: #aaa !important; color: #000 !important; }
+    .md-table th { background: #eee !important; }
 }
 EOF
 
@@ -1880,7 +1994,7 @@ function renderMarkdown(text) {
     html = html.replace(/\[sketch:([a-zA-Z0-9]+)\]/g, '<img src="/uploads/sketch_$1.png?v='+Date.now()+'" class="note-img sketch-img" title="Skizze bearbeiten" onclick="openSketch(\'$1\')">');
     html = html.replace(/\[file:([a-zA-Z0-9.\-]+)\|([^\]]+)\]/g, '<a href="/uploads/$1" target="_blank" class="note-link">📎 $2</a>');
     
-    html = html.replace(/\[note:([a-zA-Z0-9]+)\|([^\]]+)\]/g, (match, id, title) => '<a href="#" onclick="selectNode(\'' + id + '\'); return false;" class="note-link">@ ' + title + '</a>');
+    html = html.replace(/\[note:([a-zA-Z0-9]+)\|([^\]]+)\]/g, (match, id, title) => `<a href="#" onclick="if(!window.isShareView){selectNode('${id}'); return false;}" class="note-link">@ ${title}</a>`);
     html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" style="color:var(--accent); text-decoration:underline;">$1</a>');
     html = html.replace(/\[s=(.*?)\]\n?([\s\S]*?)\n?\[\/s\]/g, '<details class="spoiler"><summary>$1</summary><div class="spoiler-content">$2</div></details>');
 
@@ -1892,6 +2006,24 @@ function renderMarkdown(text) {
         html = html.replace(/_(.*?)_/g, '<i>$1</i>'); 
         html = html.replace(/~~(.*?)~~/g, '<s>$1</s>'); 
     } 
+    
+    // Tabellen-Parser
+    let tableRegex = /((?:\|[^\n]+\|\n?)+)/g;
+    html = html.replace(tableRegex, function(match) {
+        let rows = match.trim().split('\n');
+        let table = '<table class="md-table">';
+        let isHeader = true;
+        for(let r of rows) {
+            r = r.trim();
+            if(r.match(/^\|[-:| ]+\|$/)) { isHeader = false; continue; }
+            let cells = r.split('|').map(c=>c.trim());
+            cells.shift(); cells.pop();
+            if (cells.length === 0) continue;
+            table += '<tr>' + cells.map(c => isHeader ? `<th>${c}</th>` : `<td>${c}</td>`).join('') + '</tr>';
+        }
+        table += '</table>';
+        return table;
+    });
     
     let parts = html.split("'''"); 
     let res = ''; 
@@ -1912,6 +2044,8 @@ function renderMarkdown(text) {
         } else { 
             res += parts[i].split('\n').map(line => {
                 let t = line.trim(); 
+                if (t.startsWith('<table') || t.startsWith('</table') || t.startsWith('<tr') || t.startsWith('</tr') || t.startsWith('<td') || t.startsWith('</td') || t.startsWith('<th') || t.startsWith('</th')) return line;
+                
                 if (t === '') return '<br>'; 
                 if (t === '---') return '<hr>';
                 if (t.startsWith('### ')) return '<h3>' + line.substring(4) + '</h3>'; 
@@ -1922,11 +2056,13 @@ function renderMarkdown(text) {
                 
                 if (t.startsWith('- [ ] ')) { 
                     let idx = window.taskIndexCounter++; 
-                    return '<div class="task-list-item"><input type="checkbox" class="task-check" onclick="toggleTask(' + idx + ', false)"> <span>' + line.substring(line.indexOf('- [ ] ') + 6) + '</span></div>'; 
+                    let dis = window.isShareView ? 'disabled' : `onclick="toggleTask(${idx}, false)"`;
+                    return '<div class="task-list-item"><input type="checkbox" class="task-check" ' + dis + '> <span>' + line.substring(line.indexOf('- [ ] ') + 6) + '</span></div>'; 
                 }
                 if (t.startsWith('- [x] ') || t.startsWith('- [X] ')) { 
                     let idx = window.taskIndexCounter++; 
-                    return '<div class="task-list-item"><input type="checkbox" class="task-check" checked onclick="toggleTask(' + idx + ', true)"> <span><del>' + line.substring(line.indexOf('] ') + 2) + '</del></span></div>'; 
+                    let dis = window.isShareView ? 'disabled' : `onclick="toggleTask(${idx}, true)"`;
+                    return '<div class="task-list-item"><input type="checkbox" class="task-check" checked ' + dis + '> <span><del>' + line.substring(line.indexOf('] ') + 2) + '</del></span></div>'; 
                 }
                 
                 if (t.startsWith('- ')) return '<div style="margin-left: 20px;">• ' + line.substring(line.indexOf('- ')+2) + '</div>'; 
@@ -2070,6 +2206,7 @@ async function rebuildDataFromDOM() {
 }
 
 window.toggleTask = async function(targetIdx, currentlyChecked) {
+    if (window.isShareView) return;
     if (!await acquireLock(activeId)) { 
         showModal("Gesperrt", "Checkbox kann nicht geändert werden.", [{ label: "OK", class: "btn-cancel", action: () => {} }]); 
         renderDisplayArea(); 
@@ -2340,6 +2477,135 @@ async function clearReminder() {
         await checkAndReloadData(); 
         renderDisplayArea(); 
     } 
+}
+
+async function shareNote() {
+    if (!activeId) return;
+    try {
+        const res = await fetch(`/api/notes/${activeId}/share`, {method: 'POST'});
+        const data = await res.json();
+        if (data.url) {
+            showModal("Lese-Link generiert", `Dein Link:\n\n${data.url}\n\nJeder mit diesem Link kann die Notiz lesen.`, [
+                { label: "Kopieren", class: "btn-save", action: () => { navigator.clipboard.writeText(data.url); } },
+                { label: "Freigabe aufheben", class: "btn-discard", action: async () => { await fetch(`/api/notes/${activeId}/unshare`, {method: 'POST'}); } },
+                { label: "Schließen", class: "btn-cancel", action: () => {} }
+            ]);
+        }
+    } catch(e) { console.error(e); }
+}
+
+async function openTodoModal() {
+    document.getElementById('todo-modal').style.display = 'flex';
+    const list = document.getElementById('todo-list');
+    list.innerHTML = 'Lade Aufgaben...';
+    
+    try {
+        const res = await fetch('/api/todos');
+        const data = await res.json();
+        
+        if(data.length === 0) { 
+            list.innerHTML = '<p style="opacity:0.5;text-align:center;">Keine Aufgaben gefunden. Erstelle welche mit - [ ] im Text.</p>'; 
+            return; 
+        }
+        
+        list.innerHTML = '';
+        data.forEach(t => {
+            const d = document.createElement('div');
+            d.style = "display:flex; align-items:flex-start; gap:10px; padding:10px; border-bottom:1px solid var(--border-color);";
+            
+            const cb = document.createElement('input');
+            cb.type = 'checkbox'; 
+            cb.className = 'task-check'; 
+            cb.checked = t.checked;
+            cb.onclick = async (e) => {
+                e.preventDefault();
+                await fetch('/api/todos/toggle', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({note_id: t.note_id, task_index: t.task_index})
+                });
+                if (activeId === t.note_id && activeNoteData && document.getElementById('edit-mode').style.display !== 'block') {
+                    activeNoteData = await fetchNoteData(activeId);
+                    renderDisplayArea();
+                }
+                openTodoModal(); 
+            };
+            
+            const info = document.createElement('div');
+            const txt = document.createElement('div');
+            if(t.checked) {
+                txt.innerHTML = `<s>${t.text}</s>`;
+                txt.style.opacity = '0.5';
+            } else {
+                txt.innerText = t.text;
+            }
+            
+            const link = document.createElement('a');
+            link.href = "#"; 
+            link.style = "font-size:0.8em; color:var(--accent); text-decoration:none;";
+            link.innerText = "Aus Notiz: " + t.note_title;
+            link.onclick = (e) => { 
+                e.preventDefault(); 
+                document.getElementById('todo-modal').style.display = 'none'; 
+                selectNode(t.note_id); 
+            };
+            
+            info.appendChild(txt); 
+            info.appendChild(link);
+            d.appendChild(cb); 
+            d.appendChild(info);
+            list.appendChild(d);
+        });
+    } catch(e) {
+        list.innerHTML = 'Fehler beim Laden.';
+    }
+}
+
+async function openTrashModal() {
+    document.getElementById('trash-modal').style.display = 'flex';
+    const list = document.getElementById('trash-list');
+    list.innerHTML = 'Lade Papierkorb...';
+    
+    try {
+        const res = await fetch('/api/trash');
+        const data = await res.json();
+        
+        if(data.length === 0) { 
+            list.innerHTML = '<p style="opacity:0.5;text-align:center;">Der Papierkorb ist leer.</p>'; 
+            return; 
+        }
+        
+        list.innerHTML = '';
+        data.forEach(item => {
+            const d = document.createElement('div');
+            d.style = "display:flex; justify-content:space-between; align-items:center; padding:10px; border-bottom:1px solid var(--border-color);";
+            
+            const s = document.createElement('span'); 
+            s.innerText = item.title || 'Unbenannt';
+            
+            const btn = document.createElement('button');
+            btn.innerText = "Wiederherstellen"; 
+            btn.className = "btn-save"; 
+            btn.style.padding = "5px 10px";
+            btn.onclick = async () => {
+                await fetch(`/api/trash/restore/${item.id}`, {method:'POST'});
+                openTrashModal();
+                await checkAndReloadData();
+            };
+            
+            d.appendChild(s); 
+            d.appendChild(btn); 
+            list.appendChild(d);
+        });
+    } catch(e) {
+        list.innerHTML = 'Fehler beim Laden.';
+    }
+}
+
+async function emptyTrash() {
+    if(confirm("Alle gelöschten Notizen im Papierkorb wirklich endgültig entfernen? Das kann nicht rückgängig gemacht werden!")) {
+        await fetch('/api/trash/empty', {method: 'DELETE'});
+        openTrashModal();
+    }
 }
 
 async function openHistoryModal() {
@@ -3157,6 +3423,8 @@ document.addEventListener('keydown', function(e) {
         else if (document.getElementById('webhook-modal') && document.getElementById('webhook-modal').style.display === 'flex') document.getElementById('webhook-modal').style.display = 'none';
         else if (document.getElementById('restore-modal') && document.getElementById('restore-modal').style.display === 'flex') document.getElementById('restore-modal').style.display = 'none';
         else if (document.getElementById('notifications-modal') && document.getElementById('notifications-modal').style.display === 'flex') document.getElementById('notifications-modal').style.display = 'none';
+        else if (document.getElementById('todo-modal') && document.getElementById('todo-modal').style.display === 'flex') document.getElementById('todo-modal').style.display = 'none';
+        else if (document.getElementById('trash-modal') && document.getElementById('trash-modal').style.display === 'flex') document.getElementById('trash-modal').style.display = 'none';
         else if (document.getElementById('edit-mode') && document.getElementById('edit-mode').style.display === 'block') cancelEdit();
     }
 });
@@ -3320,6 +3588,10 @@ window.addEventListener('afterprint', () => {
 });
 
 window.onload = () => { 
+    if (window.isShareView) {
+        if (window.hljs) hljs.highlightAll();
+        return;
+    }
     loadData(); 
     initDragAndDrop(); 
     initMentionSystem(); 
