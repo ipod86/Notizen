@@ -690,6 +690,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
                             <div class="dropdown-content" id="note-menu-content" style="top:35px;">
                                 <div class="menu-row" onclick="enableEdit(); document.getElementById('note-menu-content').style.display='none';"><span>Bearbeiten</span></div>
                                 <div class="menu-row" id="menu-row-history" onclick="openHistoryModal(); document.getElementById('note-menu-content').style.display='none';"><span>Versionsverlauf</span></div>
+                                <div class="menu-row" onclick="window.print(); document.getElementById('note-menu-content').style.display='none';"><span>🖨️ Drucken / PDF</span></div>
                             </div>
                         </div>
                     </div>
@@ -1360,6 +1361,70 @@ input[type="checkbox"].task-check { width: 16px; height: 16px; margin: 0; cursor
 .history-item summary { cursor: pointer; font-weight: bold; padding: 10px; background: rgba(255,255,255,0.05); border-radius: 5px; transition: background 0.2s; }
 .history-item summary:hover { background: rgba(var(--accent-rgb), 0.2); }
 .history-item[open] summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; border-bottom: 1px solid var(--border-color); }
+
+/* --- DRUCK-LAYOUT (PDF EXPORT) --- */
+@media print {
+    /* Verstecke alles, was nicht zur reinen Notiz gehört */
+    #sidebar, .header-actions, #mobile-toggle-btn, .toolbar, #edit-mode, #breadcrumb, #view-reminder-badge, #view-reminder-ack, .dropdown, #note-menu-content, #no-selection {
+        display: none !important;
+    }
+
+    /* Setze das Layout zurück, damit es auf Papier/PDF passt */
+    body, html {
+        background: white !important;
+        color: black !important;
+        height: auto !important;
+        overflow: visible !important;
+        display: block !important;
+    }
+
+    #editor {
+        padding: 0 !important;
+        margin: 0 !important;
+        height: auto !important;
+        overflow: visible !important;
+        display: block !important;
+    }
+
+    /* Verhindere, dass Bilder, Code oder Listen in der Mitte zerschnitten werden */
+    img, pre, blockquote, .code-container, .task-list-item, .spoiler {
+        page-break-inside: avoid;
+        break-inside: avoid;
+    }
+
+    /* Erzwinge Zeilenumbrüche bei langem Code und passe Farben an */
+    pre code {
+        white-space: pre-wrap !important;
+        word-wrap: break-word !important;
+    }
+    
+    .code-container {
+        background: #f8f9fa !important;
+        color: #000 !important;
+        border: 1px solid #ccc !important;
+    }
+
+    /* Verstecke den Copy-Button beim Drucken */
+    .copy-badge {
+        display: none !important;
+    }
+    
+    /* Links schlicht darstellen */
+    .note-link {
+        border: none !important;
+        background: none !important;
+        text-decoration: underline !important;
+        color: black !important;
+    }
+    
+    /* Spoiler für den Druck immer aufklappen */
+    .spoiler-content {
+        display: block !important;
+    }
+    details.spoiler {
+        border: 1px solid #ccc;
+    }
+}
 EOF
 
 # static/script.js - UNKOMPRIMIERT
