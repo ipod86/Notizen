@@ -105,7 +105,6 @@ def init_db():
             )
         ''')
         
-        # Migration: Add Trash and Share fields if they don't exist
         try: conn.execute('ALTER TABLE notes ADD COLUMN is_trashed INTEGER DEFAULT 0')
         except sqlite3.OperationalError: pass
         try: conn.execute('ALTER TABLE notes ADD COLUMN share_id TEXT')
@@ -377,6 +376,12 @@ def empty_trash():
             conn.execute("DELETE FROM note_history WHERE note_id=?", (r['id'],))
         conn.execute("DELETE FROM notes WHERE is_trashed=1")
     return jsonify({"status": "success"})
+
+@app.route('/api/shares', methods=['GET'])
+def get_shares():
+    with get_db() as conn:
+        rows = conn.execute("SELECT id, title, share_id FROM notes WHERE share_id IS NOT NULL AND is_trashed=0").fetchall()
+        return jsonify([dict(r) for r in rows])
 
 @app.route('/api/notes/<note_id>/share', methods=['POST'])
 def share_note(note_id):
@@ -670,7 +675,8 @@ else:
 conn.commit()
 
 used_files = set()
-rows = conn.execute("SELECT text FROM notes WHERE text IS NOT NULL AND is_trashed=0").fetchall()
+# HIER WURDE DER FEHLER BEHOBEN: Wir scannen nun auch Notizen, die im Papierkorb liegen!
+rows = conn.execute("SELECT text FROM notes WHERE text IS NOT NULL").fetchall()
 hist_rows = conn.execute("SELECT text FROM note_history WHERE text IS NOT NULL").fetchall()
 
 all_texts = [r[0] for r in rows] + [r[0] for r in hist_rows]
@@ -701,7 +707,7 @@ if [ -f data.db ]; then
 fi
 EOF
 
-# templates/share.html (NEUES LESE-ONLY TEMPLATE)
+# templates/share.html
 cat << 'EOF' > $INSTALL_DIR/templates/share.html
 <!DOCTYPE html>
 <html lang="de">
@@ -790,6 +796,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
                 <div class="menu-row" onclick="togglePassword()"><span id="pwd-toggle-text">🔒 Passwortschutz an</span></div>
                 <div class="menu-row" onclick="toggleWebhookModal()"><span id="webhook-toggle-text">🔔 Webhook (Push)</span></div>
                 <div class="menu-row" onclick="toggleHistorySettings()"><span>🕰️ Historien-Optionen</span></div>
+                <div class="menu-row" onclick="openShareOverviewModal()"><span>🌍 Freigaben verwalten</span></div>
                 <div class="menu-row" onclick="openTrashModal()"><span>🗑️ Papierkorb</span></div>
                 <div class="menu-row" id="logout-btn" style="display:none; color:#e74c3c;" onclick="window.location.href='/logout'"><span>🚪 Abmelden</span></div>
             </div>
@@ -893,12 +900,30 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
     
     <div id="todo-modal" class="modal-overlay">
         <div class="modal" style="width: 650px; max-width: 95vw;">
-            <h3 style="margin-top:0">Meine Aufgaben</h3>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+                <h3 style="margin:0">Meine Aufgaben</h3>
+                <label style="font-size:0.9em; cursor:pointer;">
+                    <input type="checkbox" id="todo-show-all" onchange="renderTodoList()"> Alle anzeigen
+                </label>
+            </div>
             <div id="todo-list" style="text-align:left; max-height: 60vh; overflow-y: auto; margin-bottom: 20px;">
                 Lade...
             </div>
             <div class="modal-btns">
                 <button class="btn-cancel" onclick="document.getElementById('todo-modal').style.display='none'">Schließen</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="share-overview-modal" class="modal-overlay">
+        <div class="modal" style="width: 550px; max-width: 95vw;">
+            <h3 style="margin-top:0">Aktive Freigaben</h3>
+            <p style="font-size:0.85em; opacity:0.7; text-align:left; margin-bottom:15px;">Hier siehst du alle Notizen, die aktuell über einen Link für Dritte erreichbar sind.</p>
+            <div id="share-list" style="text-align:left; max-height: 50vh; overflow-y: auto; margin-bottom: 20px;">
+                Lade...
+            </div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('share-overview-modal').style.display='none'">Schließen</button>
             </div>
         </div>
     </div>
@@ -1436,6 +1461,7 @@ input, textarea {
 body.sidebar-hidden #mobile-toggle-btn { left: 0; }
 .header-actions { position: fixed; top: 15px; right: 20px; z-index: 1000; }
 
+/* HIER: Z-Index extrem hoch gesetzt, damit es über allem liegt */
 .dropdown-content { 
     display: none; 
     position: absolute; 
@@ -1447,7 +1473,7 @@ body.sidebar-hidden #mobile-toggle-btn { left: 0; }
     border-radius: 8px; 
     overflow: hidden; 
     box-shadow: 0 4px 15px rgba(0,0,0,0.3); 
-    z-index: 1001;
+    z-index: 3000;
 }
 
 .menu-row { display: flex; align-items: center; height: 50px; border-bottom: 1px solid var(--border-color); padding: 0 15px; box-sizing: border-box; cursor: pointer; font-size: 14px; transition: background 0.2s; }
@@ -1520,7 +1546,6 @@ input[type="checkbox"].task-check { width: 16px; height: 16px; margin: 0; cursor
 .reminder-icon { color: #e74c3c; margin-left: 6px; font-size: 0.9em; animation: pulse 2s infinite; }
 @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1; } }
 
-/* NEU: Markdown Tabellen */
 .md-table { width: 100%; border-collapse: collapse; margin: 15px 0; background: rgba(0,0,0,0.1); border-radius: 5px; overflow: hidden; box-shadow: 0 0 0 1px var(--border-color); }
 .md-table th, .md-table td { padding: 8px 12px; border: 1px solid var(--border-color); }
 .md-table th { background: rgba(var(--accent-rgb), 0.2); font-weight: bold; text-align: left; }
@@ -1566,6 +1591,9 @@ var collapsedIds = new Set();
 var sortables = [];
 var currentTreeLastMod = null;
 var searchTimeout = null;
+
+// Neu: Speichert die geladenen Todos lokal, um filtern zu können ohne Neuladen
+var currentTodosList = [];
 
 let myClientId = sessionStorage.getItem('clientId');
 if (!myClientId) {
@@ -2007,7 +2035,6 @@ function renderMarkdown(text) {
         html = html.replace(/~~(.*?)~~/g, '<s>$1</s>'); 
     } 
     
-    // Tabellen-Parser
     let tableRegex = /((?:\|[^\n]+\|\n?)+)/g;
     html = html.replace(tableRegex, function(match) {
         let rows = match.trim().split('\n');
@@ -2494,6 +2521,49 @@ async function shareNote() {
     } catch(e) { console.error(e); }
 }
 
+async function openShareOverviewModal() {
+    document.getElementById('share-overview-modal').style.display = 'flex';
+    const list = document.getElementById('share-list');
+    list.innerHTML = 'Lade...';
+    try {
+        const res = await fetch('/api/shares');
+        const data = await res.json();
+        
+        if(data.length === 0) { 
+            list.innerHTML = '<p style="opacity:0.5;text-align:center;">Es gibt aktuell keine aktiven Freigabe-Links.</p>'; 
+            return; 
+        }
+        
+        list.innerHTML = '';
+        data.forEach(s => {
+            const d = document.createElement('div');
+            d.style = "display:flex; justify-content:space-between; align-items:center; padding:10px; border-bottom:1px solid var(--border-color);";
+            
+            const link = document.createElement('a');
+            link.href = '/share/' + s.share_id;
+            link.target = '_blank';
+            link.style.color = 'var(--accent)';
+            link.style.textDecoration = 'none';
+            link.innerText = s.title || 'Unbenannt';
+            
+            const btn = document.createElement('button');
+            btn.innerText = "Freigabe aufheben"; 
+            btn.className = "btn-discard"; 
+            btn.style.padding = "5px 10px";
+            btn.onclick = async () => {
+                await fetch(`/api/notes/${s.id}/unshare`, {method:'POST'});
+                openShareOverviewModal(); 
+            };
+            
+            d.appendChild(link); 
+            d.appendChild(btn); 
+            list.appendChild(d);
+        });
+    } catch(e) {
+        list.innerHTML = 'Fehler beim Laden.';
+    }
+}
+
 async function openTodoModal() {
     document.getElementById('todo-modal').style.display = 'flex';
     const list = document.getElementById('todo-list');
@@ -2501,63 +2571,72 @@ async function openTodoModal() {
     
     try {
         const res = await fetch('/api/todos');
-        const data = await res.json();
-        
-        if(data.length === 0) { 
-            list.innerHTML = '<p style="opacity:0.5;text-align:center;">Keine Aufgaben gefunden. Erstelle welche mit - [ ] im Text.</p>'; 
-            return; 
-        }
-        
-        list.innerHTML = '';
-        data.forEach(t => {
-            const d = document.createElement('div');
-            d.style = "display:flex; align-items:flex-start; gap:10px; padding:10px; border-bottom:1px solid var(--border-color);";
-            
-            const cb = document.createElement('input');
-            cb.type = 'checkbox'; 
-            cb.className = 'task-check'; 
-            cb.checked = t.checked;
-            cb.onclick = async (e) => {
-                e.preventDefault();
-                await fetch('/api/todos/toggle', {
-                    method: 'POST', headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({note_id: t.note_id, task_index: t.task_index})
-                });
-                if (activeId === t.note_id && activeNoteData && document.getElementById('edit-mode').style.display !== 'block') {
-                    activeNoteData = await fetchNoteData(activeId);
-                    renderDisplayArea();
-                }
-                openTodoModal(); 
-            };
-            
-            const info = document.createElement('div');
-            const txt = document.createElement('div');
-            if(t.checked) {
-                txt.innerHTML = `<s>${t.text}</s>`;
-                txt.style.opacity = '0.5';
-            } else {
-                txt.innerText = t.text;
-            }
-            
-            const link = document.createElement('a');
-            link.href = "#"; 
-            link.style = "font-size:0.8em; color:var(--accent); text-decoration:none;";
-            link.innerText = "Aus Notiz: " + t.note_title;
-            link.onclick = (e) => { 
-                e.preventDefault(); 
-                document.getElementById('todo-modal').style.display = 'none'; 
-                selectNode(t.note_id); 
-            };
-            
-            info.appendChild(txt); 
-            info.appendChild(link);
-            d.appendChild(cb); 
-            d.appendChild(info);
-            list.appendChild(d);
-        });
+        currentTodosList = await res.json();
+        renderTodoList();
     } catch(e) {
         list.innerHTML = 'Fehler beim Laden.';
     }
+}
+
+function renderTodoList() {
+    const list = document.getElementById('todo-list');
+    const showAll = document.getElementById('todo-show-all').checked;
+    list.innerHTML = '';
+    
+    const filteredTodos = showAll ? currentTodosList : currentTodosList.filter(t => !t.checked);
+    
+    if(filteredTodos.length === 0) { 
+        list.innerHTML = '<p style="opacity:0.5;text-align:center;">' + (showAll ? 'Keine Aufgaben gefunden.' : 'Glückwunsch! Alle Aufgaben sind erledigt.') + '</p>'; 
+        return; 
+    }
+    
+    filteredTodos.forEach(t => {
+        const d = document.createElement('div');
+        d.style = "display:flex; align-items:flex-start; gap:10px; padding:10px; border-bottom:1px solid var(--border-color);";
+        
+        const cb = document.createElement('input');
+        cb.type = 'checkbox'; 
+        cb.className = 'task-check'; 
+        cb.checked = t.checked;
+        cb.onclick = async (e) => {
+            e.preventDefault();
+            await fetch('/api/todos/toggle', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({note_id: t.note_id, task_index: t.task_index})
+            });
+            if (activeId === t.note_id && activeNoteData && document.getElementById('edit-mode').style.display !== 'block') {
+                activeNoteData = await fetchNoteData(activeId);
+                renderDisplayArea();
+            }
+            // Aktualisiere Liste neu
+            openTodoModal(); 
+        };
+        
+        const info = document.createElement('div');
+        const txt = document.createElement('div');
+        if(t.checked) {
+            txt.innerHTML = `<s>${t.text}</s>`;
+            txt.style.opacity = '0.5';
+        } else {
+            txt.innerText = t.text;
+        }
+        
+        const link = document.createElement('a');
+        link.href = "#"; 
+        link.style = "font-size:0.8em; color:var(--accent); text-decoration:none;";
+        link.innerText = "Aus Notiz: " + t.note_title;
+        link.onclick = (e) => { 
+            e.preventDefault(); 
+            document.getElementById('todo-modal').style.display = 'none'; 
+            selectNode(t.note_id); 
+        };
+        
+        info.appendChild(txt); 
+        info.appendChild(link);
+        d.appendChild(cb); 
+        d.appendChild(info);
+        list.appendChild(d);
+    });
 }
 
 async function openTrashModal() {
@@ -3425,6 +3504,7 @@ document.addEventListener('keydown', function(e) {
         else if (document.getElementById('notifications-modal') && document.getElementById('notifications-modal').style.display === 'flex') document.getElementById('notifications-modal').style.display = 'none';
         else if (document.getElementById('todo-modal') && document.getElementById('todo-modal').style.display === 'flex') document.getElementById('todo-modal').style.display = 'none';
         else if (document.getElementById('trash-modal') && document.getElementById('trash-modal').style.display === 'flex') document.getElementById('trash-modal').style.display = 'none';
+        else if (document.getElementById('share-overview-modal') && document.getElementById('share-overview-modal').style.display === 'flex') document.getElementById('share-overview-modal').style.display = 'none';
         else if (document.getElementById('edit-mode') && document.getElementById('edit-mode').style.display === 'block') cancelEdit();
     }
 });
