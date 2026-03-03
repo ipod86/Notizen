@@ -367,6 +367,40 @@ def update_settings():
             conn.execute("REPLACE INTO settings (key, value) VALUES (?, ?)", (k, val_str))
     return jsonify({"status": "success"})
 
+@app.route('/api/webhook/test', methods=['POST'])
+def test_webhook():
+    data = request.json
+    url = data.get('url', '')
+    method = data.get('method', 'GET')
+    payload = data.get('payload', '')
+
+    if not url:
+        return jsonify({"error": "Keine Ziel-URL angegeben."}), 400
+
+    title = "TEST-ERINNERUNG"
+    now_str = datetime.now().strftime('%Y-%m-%d %H:%M')
+
+    try:
+        if method == 'GET':
+            su = urllib.parse.quote(title)
+            st = urllib.parse.quote(now_str)
+            final_url = url.replace('{{TITLE}}', su).replace('{{TIME}}', st)
+            r = requests.get(final_url, timeout=10)
+        else:
+            su = urllib.parse.quote(title)
+            st = urllib.parse.quote(now_str)
+            final_url = url.replace('{{TITLE}}', su).replace('{{TIME}}', st)
+            sj = title.replace('"', '\\"').replace('\n', ' ')
+            pd = payload.replace('{{TITLE}}', sj).replace('{{TIME}}', now_str)
+            r = requests.post(final_url, data=pd.encode('utf-8'), headers={'Content-Type': 'application/json'}, timeout=10)
+            
+        return jsonify({
+            "status_code": r.status_code,
+            "response_text": r.text[:500] 
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/lock/<note_id>', methods=['POST'])
 def handle_lock(note_id):
     req = request.json
@@ -853,6 +887,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
             </div>
             <div class="modal-btns">
                 <button class="btn-cancel" onclick="document.getElementById('webhook-modal').style.display='none'">Abbruch</button>
+                <button class="btn-cancel" onclick="testWebhook()" style="border-color: var(--accent) !important; color: var(--accent);">Testen</button>
                 <button class="btn-save" onclick="saveWebhook()">Speichern</button>
             </div>
         </div>
@@ -861,7 +896,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
     <div id="custom-modal" class="modal-overlay">
         <div class="modal">
             <h3 id="modal-title"></h3>
-            <p id="modal-text" style="white-space: pre-wrap;"></p>
+            <p id="modal-text" style="white-space: pre-wrap; word-break: break-word;"></p>
             <input type="password" id="modal-input" style="display:none; margin-top: 15px; width: 100%; box-sizing: border-box;" placeholder="Passwort...">
             <div class="modal-btns" id="modal-btns-container"></div>
         </div>
@@ -2358,6 +2393,45 @@ function toggleWebhookModal() {
 
 function toggleWebhookPayload() { 
     document.getElementById('webhook-payload-container').style.display = document.getElementById('webhook-method').value === 'POST' ? 'block' : 'none'; 
+}
+
+async function testWebhook() {
+    const payload = {
+        url: document.getElementById('webhook-url').value,
+        method: document.getElementById('webhook-method').value,
+        payload: document.getElementById('webhook-payload').value
+    };
+    
+    if (!payload.url) {
+        alert("Bitte zuerst eine Ziel-URL eintragen!");
+        return;
+    }
+    
+    document.getElementById('webhook-modal').style.display = 'none';
+    
+    try {
+        const res = await fetch('/api/webhook/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        
+        const data = await res.json();
+        
+        if (res.ok) {
+            showModal("Test-Ergebnis", `Status-Code: ${data.status_code}\n\nAntwort des Servers:\n${data.response_text || '(Keine Text-Antwort)'}`, [
+                { label: "Zurück zu Einstellungen", class: "btn-cancel", action: () => { document.getElementById('webhook-modal').style.display = 'flex'; } }
+            ]);
+        } else {
+            showModal("Fehler beim Senden", `Der Test konnte nicht ausgeführt werden:\n\n${data.error}`, [
+                { label: "Zurück zu Einstellungen", class: "btn-cancel", action: () => { document.getElementById('webhook-modal').style.display = 'flex'; } }
+            ]);
+        }
+    } catch(e) {
+        showModal("Netzwerkfehler", `Es gab ein Problem beim Verbinden zum Server:\n\n${e}`, [
+            { label: "Zurück zu Einstellungen", class: "btn-cancel", action: () => { document.getElementById('webhook-modal').style.display = 'flex'; } }
+        ]);
+    }
 }
 
 async function saveWebhook() {
