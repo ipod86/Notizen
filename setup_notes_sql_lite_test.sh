@@ -690,7 +690,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
                             <div class="dropdown-content" id="note-menu-content" style="top:35px;">
                                 <div class="menu-row" onclick="enableEdit(); document.getElementById('note-menu-content').style.display='none';"><span>Bearbeiten</span></div>
                                 <div class="menu-row" id="menu-row-history" onclick="openHistoryModal(); document.getElementById('note-menu-content').style.display='none';"><span>Versionsverlauf</span></div>
-                                <div class="menu-row" onclick="window.print(); document.getElementById('note-menu-content').style.display='none';"><span>🖨️ Drucken / PDF</span></div>
+                                <div class="menu-row" onclick="window.print(); document.getElementById('note-menu-content').style.display='none';"><span>Drucken / PDF</span></div>
                             </div>
                         </div>
                     </div>
@@ -741,7 +741,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
                 <textarea id="node-text" placeholder="Text oder Bild hier ablegen..." style="height:60vh"></textarea>
             </div>
             
-            <button onclick="addItem(activeId)" style="margin-top:20px;border:1px solid var(--accent) !important;color:var(--accent);padding:5px 10px;border-radius:4px;">+ Unter-Ebene</button>
+            <button id="add-sub-level-btn" onclick="addItem(activeId)" style="margin-top:20px;border:1px solid var(--accent) !important;color:var(--accent);padding:5px 10px;border-radius:4px;">+ Unter-Ebene</button>
         </div>
     </div>
     
@@ -1365,7 +1365,7 @@ input[type="checkbox"].task-check { width: 16px; height: 16px; margin: 0; cursor
 /* --- DRUCK-LAYOUT (PDF EXPORT) --- */
 @media print {
     /* Verstecke alles, was nicht zur reinen Notiz gehört */
-    #sidebar, .header-actions, #mobile-toggle-btn, .toolbar, #edit-mode, #breadcrumb, #view-reminder-badge, #view-reminder-ack, .dropdown, #note-menu-content, #no-selection {
+    #sidebar, .header-actions, #mobile-toggle-btn, .toolbar, #edit-mode, #breadcrumb, #view-reminder-badge, #view-reminder-ack, .dropdown, #note-menu-content, #no-selection, #add-sub-level-btn {
         display: none !important;
     }
 
@@ -3286,6 +3286,22 @@ document.addEventListener('touchend', e => {
         }
     }
 }, {passive: true});
+
+let initiallyClosedSpoilers = [];
+
+window.addEventListener('beforeprint', () => {
+    document.querySelectorAll('details.spoiler').forEach(s => {
+        if (!s.hasAttribute('open')) {
+            initiallyClosedSpoilers.push(s);
+            s.setAttribute('open', '');
+        }
+    });
+});
+
+window.addEventListener('afterprint', () => {
+    initiallyClosedSpoilers.forEach(s => s.removeAttribute('open'));
+    initiallyClosedSpoilers = [];
+});
 
 window.onload = () => { 
     loadData(); 
