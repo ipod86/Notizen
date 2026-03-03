@@ -1395,6 +1395,18 @@ input[type="checkbox"].task-check { width: 16px; height: 16px; margin: 0; cursor
         page-break-inside: avoid;
         break-inside: avoid;
     }
+    
+    /* NEU: Überschriften nicht von ihrem Text trennen */
+    h1, h2, h3, h4, h5, h6 {
+        page-break-after: avoid;
+        break-after: avoid;
+    }
+    
+    /* NEU: Verhindert "Schusterjungen" und "Hurenkinder" bei Textabsätzen (mind. 3 Zeilen zusammen) */
+    p, li, div {
+        orphans: 3;
+        widows: 3;
+    }
 
     /* Erzwinge Zeilenumbrüche bei langem Code und passe Farben an */
     pre code {
