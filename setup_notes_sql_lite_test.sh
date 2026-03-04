@@ -18,10 +18,6 @@ if [ -z "$BACKUP_CONFIRM" ]; then
     BACKUP_CONFIRM="y"
 fi
 
-# Pflicht-Einstellungen
-AUTOSTART_CONFIRM="y"
-CRON_CONFIRM="y"
-
 INSTALL_DIR="/opt/notiz-tool"
 SERVICE_NAME="notizen.service"
 
@@ -40,7 +36,7 @@ mkdir -p $INSTALL_DIR/backups
 python3 -m venv $INSTALL_DIR/venv
 $INSTALL_DIR/venv/bin/python3 -m pip install flask werkzeug requests
 
-# app.py (SQLite Backend)
+# app.py 
 cat << 'EOF' > $INSTALL_DIR/app.py
 from flask import Flask, render_template, request, jsonify, send_from_directory, session, redirect, url_for, send_file
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -359,13 +355,28 @@ def delete_note(note_id):
 @app.route('/api/trash', methods=['GET'])
 def get_trash():
     with get_db() as conn:
-        rows = conn.execute("SELECT id, title FROM notes WHERE is_trashed=1").fetchall()
+        rows = conn.execute("SELECT id, title, parent_id FROM notes WHERE is_trashed=1").fetchall()
         return jsonify([dict(r) for r in rows])
 
 @app.route('/api/trash/restore/<note_id>', methods=['POST'])
 def restore_trash(note_id):
     with get_db() as conn:
-        conn.execute("UPDATE notes SET is_trashed=0, parent_id=NULL WHERE id=?", (note_id,))
+        def do_restore(nid, check_parent=True):
+            row = conn.execute("SELECT parent_id FROM notes WHERE id=?", (nid,)).fetchone()
+            pid = row['parent_id'] if row else None
+            
+            if check_parent and pid:
+                p_row = conn.execute("SELECT is_trashed FROM notes WHERE id=?", (pid,)).fetchone()
+                if not p_row or p_row['is_trashed'] == 1:
+                    pid = None
+                    
+            conn.execute("UPDATE notes SET is_trashed=0, parent_id=? WHERE id=?", (pid, nid))
+            
+            children = conn.execute("SELECT id FROM notes WHERE parent_id=? AND is_trashed=1", (nid,)).fetchall()
+            for c in children:
+                do_restore(c['id'], False)
+                
+        do_restore(note_id, True)
     return jsonify({"status": "success"})
 
 @app.route('/api/trash/empty', methods=['DELETE'])
@@ -675,7 +686,6 @@ else:
 conn.commit()
 
 used_files = set()
-# HIER WURDE DER FEHLER BEHOBEN: Wir scannen nun auch Notizen, die im Papierkorb liegen!
 rows = conn.execute("SELECT text FROM notes WHERE text IS NOT NULL").fetchall()
 hist_rows = conn.execute("SELECT text FROM note_history WHERE text IS NOT NULL").fetchall()
 
@@ -775,12 +785,13 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
     </script>
     
     <div class="header-actions" style="display: flex; gap: 15px; align-items: center;">
-        <div id="todo-dashboard-btn" style="cursor: pointer; font-size: 1.4em;" onclick="openTodoModal()" title="Meine Aufgaben">
+        <div id="todo-dashboard-btn" style="position: relative; cursor: pointer; font-size: 1.4em;" onclick="openTodoModal()" title="Meine Aufgaben">
             ☑️
+            <span id="todo-badge" class="icon-badge">0</span>
         </div>
         <div id="notification-bell" style="position: relative; cursor: pointer; font-size: 1.4em;" onclick="openNotificationsModal()" title="Erinnerungen">
             🔔
-            <span id="notification-badge" style="display: none; position: absolute; top: -5px; right: -8px; background: #e74c3c; color: white; border-radius: 50%; padding: 2px 6px; font-size: 0.5em; font-weight: bold; border: 2px solid var(--bg-color);">0</span>
+            <span id="notification-badge" class="icon-badge">0</span>
         </div>
 
         <div class="dropdown">
@@ -797,7 +808,12 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
                 <div class="menu-row" onclick="toggleWebhookModal()"><span id="webhook-toggle-text">🔔 Webhook (Push)</span></div>
                 <div class="menu-row" onclick="toggleHistorySettings()"><span>🕰️ Historien-Optionen</span></div>
                 <div class="menu-row" onclick="openShareOverviewModal()"><span>🌍 Freigaben verwalten</span></div>
-                <div class="menu-row" onclick="openTrashModal()"><span>🗑️ Papierkorb</span></div>
+                <div class="menu-row" onclick="openTrashModal()">
+                    <span style="display:flex; align-items:center; width:100%;">
+                        <span style="flex-grow:1;">🗑️ Papierkorb</span>
+                        <span id="trash-badge" class="menu-badge">0</span>
+                    </span>
+                </div>
                 <div class="menu-row" id="logout-btn" style="display:none; color:#e74c3c;" onclick="window.location.href='/logout'"><span>🚪 Abmelden</span></div>
             </div>
         </div>
@@ -840,7 +856,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
                             <button onclick="toggleNoteMenu(event)" style="font-size:1.4em; padding:0 5px; font-weight:bold; letter-spacing: 2px;">⋮</button>
                             <div class="dropdown-content" id="note-menu-content" style="top:35px;">
                                 <div class="menu-row" onclick="enableEdit(); document.getElementById('note-menu-content').style.display='none';"><span>Bearbeiten</span></div>
-                                <div class="menu-row" onclick="shareNote(); document.getElementById('note-menu-content').style.display='none';"><span>🔗 Freigabe-Link</span></div>
+                                <div class="menu-row" onclick="shareNote(); document.getElementById('note-menu-content').style.display='none';"><span>Freigabe-Link</span></div>
                                 <div class="menu-row" id="menu-row-history" onclick="openHistoryModal(); document.getElementById('note-menu-content').style.display='none';"><span>Versionsverlauf</span></div>
                                 <div class="menu-row" onclick="window.print(); document.getElementById('note-menu-content').style.display='none';"><span>Drucken / PDF</span></div>
                             </div>
@@ -862,7 +878,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
                     <button class="tool-btn" onclick="wrapSelection('### ','', 'Überschrift')"><i style="font-weight:bold;">H</i><span>Titel</span></button>
                     <button class="tool-btn" onclick="handleListAction('- ', 'Punkt')"><i style="font-weight:bold;">•—</i><span>Liste</span></button>
                     <button class="tool-btn" onclick="handleListAction('- [ ] ', 'Aufgabe')"><i>☑</i><span>To-Do</span></button>
-                    <button class="tool-btn" onclick="wrapSelection('\n| Spalte 1 | Spalte 2 |\n|---|---|\n| Wert 1 | Wert 2 |\n', '', 'Tabelle')"><i>📊</i><span>Tabelle</span></button>
+                    <button class="tool-btn" onclick="wrapSelection('\n| Spalte 1 | Spalte 2 |\n|---|---|\n| Wert 1 | Wert 2 |\n| Wert 1 | Wert 2 |\n', '', 'Tabelle')"><i>📊</i><span>Tabelle</span></button>
                     <button class="tool-btn" onclick="wrapSelection('> ','', 'Zitat')"><i style="font-family:serif;">"</i><span>Zitat</span></button>
                     <button class="tool-btn" onclick="wrapSelection('[s=Spoiler-Titel]\n','\n[/s]', 'Text hier...')"><i>👁️‍🗨️</i><span>Spoiler</span></button>
                     <button class="tool-btn" onclick="wrapSelection('\n---\n','', '')"><i>—</i><span>Linie</span></button>
@@ -929,7 +945,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
     </div>
 
     <div id="trash-modal" class="modal-overlay">
-        <div class="modal" style="width: 500px; max-width: 95vw;">
+        <div class="modal" style="width: 600px; max-width: 95vw;">
             <h3 style="margin-top:0">Papierkorb</h3>
             <div id="trash-list" style="text-align:left; max-height: 50vh; overflow-y: auto; margin-bottom: 20px;">
                 Lade...
@@ -1156,7 +1172,7 @@ body {
     flex-direction: column; 
     transition: margin-left 0.3s ease; 
     flex-shrink: 0; 
-    z-index: 10; 
+    z-index: 1500; 
 }
 
 body.sidebar-hidden #sidebar { 
@@ -1420,6 +1436,31 @@ input, textarea {
     opacity: 0.7; 
 }
 
+.icon-badge {
+    position: absolute;
+    top: -5px;
+    right: -8px;
+    background: #e74c3c;
+    color: white;
+    border-radius: 50%;
+    padding: 2px 6px;
+    font-size: 0.5em;
+    font-weight: bold;
+    border: 2px solid var(--bg-color);
+    display: none;
+}
+
+.menu-badge {
+    background: #e74c3c;
+    color: white;
+    border-radius: 10px;
+    padding: 2px 8px;
+    font-size: 0.8em;
+    font-weight: bold;
+    margin-left: 10px;
+    display: none;
+}
+
 .modal-overlay { 
     display: none; 
     position: fixed; 
@@ -1451,7 +1492,7 @@ input, textarea {
     position: fixed; 
     left: var(--sidebar-width); 
     top: 20px; 
-    z-index: 1010; 
+    z-index: 1510; 
     background: var(--accent) !important; 
     color: white; 
     padding: 10px !important; 
@@ -1461,7 +1502,6 @@ input, textarea {
 body.sidebar-hidden #mobile-toggle-btn { left: 0; }
 .header-actions { position: fixed; top: 15px; right: 20px; z-index: 1000; }
 
-/* HIER: Z-Index extrem hoch gesetzt, damit es über allem liegt */
 .dropdown-content { 
     display: none; 
     position: absolute; 
@@ -1592,7 +1632,6 @@ var sortables = [];
 var currentTreeLastMod = null;
 var searchTimeout = null;
 
-// Neu: Speichert die geladenen Todos lokal, um filtern zu können ohne Neuladen
 var currentTodosList = [];
 
 let myClientId = sessionStorage.getItem('clientId');
@@ -1603,6 +1642,33 @@ if (!myClientId) {
 
 let lockInterval = null;
 let currentLockedNote = null;
+
+function fallbackCopyTextToClipboard(text) {
+    var textArea = document.createElement("textarea");
+    textArea.value = text;
+    textArea.style.top = "0";
+    textArea.style.left = "0";
+    textArea.style.position = "fixed";
+    document.body.appendChild(textArea);
+    textArea.focus();
+    textArea.select();
+    try {
+        document.execCommand('copy');
+    } catch (err) {
+        console.error('Fallback: Oops, unable to copy', err);
+    }
+    document.body.removeChild(textArea);
+}
+
+function copyText(text) {
+    if (!navigator.clipboard) {
+        fallbackCopyTextToClipboard(text);
+        return;
+    }
+    navigator.clipboard.writeText(text).catch(function(err) {
+        fallbackCopyTextToClipboard(text);
+    });
+}
 
 async function acquireLock(noteId, override = false) {
     try {
@@ -1680,6 +1746,35 @@ window.addEventListener('beforeunload', () => {
         navigator.sendBeacon(`/api/lock/${currentLockedNote}`, blob);
     }
 });
+
+async function updateBadges() {
+    try {
+        const resT = await fetch('/api/todos');
+        if (resT.ok) {
+            currentTodosList = await resT.json();
+            const openTasks = currentTodosList.filter(t => !t.checked).length;
+            const badge = document.getElementById('todo-badge');
+            if (openTasks > 0) {
+                badge.innerText = openTasks;
+                badge.style.display = 'inline-block';
+            } else {
+                badge.style.display = 'none';
+            }
+        }
+        
+        const resTr = await fetch('/api/trash');
+        if (resTr.ok) {
+            const trashData = await resTr.json();
+            const badge = document.getElementById('trash-badge');
+            if (trashData.length > 0) {
+                badge.innerText = trashData.length;
+                badge.style.display = 'inline-block';
+            } else {
+                badge.style.display = 'none';
+            }
+        }
+    } catch(e) {}
+}
 
 function updateNotificationBadge() {
     let overdueNotes = [];
@@ -1830,6 +1925,8 @@ async function checkAndReloadData() {
                 }
             }
         }
+        
+        await updateBadges();
 
         if (activeId) {
             const editModeEl = document.getElementById('edit-mode');
@@ -2513,7 +2610,7 @@ async function shareNote() {
         const data = await res.json();
         if (data.url) {
             showModal("Lese-Link generiert", `Dein Link:\n\n${data.url}\n\nJeder mit diesem Link kann die Notiz lesen.`, [
-                { label: "Kopieren", class: "btn-save", action: () => { navigator.clipboard.writeText(data.url); } },
+                { label: "Kopieren", class: "btn-save", action: () => { copyText(data.url); } },
                 { label: "Freigabe aufheben", class: "btn-discard", action: async () => { await fetch(`/api/notes/${activeId}/unshare`, {method: 'POST'}); } },
                 { label: "Schließen", class: "btn-cancel", action: () => {} }
             ]);
@@ -2608,7 +2705,6 @@ function renderTodoList() {
                 activeNoteData = await fetchNoteData(activeId);
                 renderDisplayArea();
             }
-            // Aktualisiere Liste neu
             openTodoModal(); 
         };
         
@@ -2646,20 +2742,46 @@ async function openTrashModal() {
     
     try {
         const res = await fetch('/api/trash');
-        const data = await res.json();
+        let data = await res.json();
         
         if(data.length === 0) { 
             list.innerHTML = '<p style="opacity:0.5;text-align:center;">Der Papierkorb ist leer.</p>'; 
             return; 
         }
+
+        const map = {};
+        data.forEach(n => map[n.id] = n);
+        
+        data.forEach(n => {
+            let p = n;
+            let path = [];
+            while(p) {
+                path.unshift(p.title || 'Unbenannt');
+                p = map[p.parent_id];
+            }
+            n.pathStr = path.join(' / ');
+        });
+
+        data.sort((a,b) => a.pathStr.localeCompare(b.pathStr));
         
         list.innerHTML = '';
         data.forEach(item => {
             const d = document.createElement('div');
             d.style = "display:flex; justify-content:space-between; align-items:center; padding:10px; border-bottom:1px solid var(--border-color);";
             
-            const s = document.createElement('span'); 
-            s.innerText = item.title || 'Unbenannt';
+            const info = document.createElement('div');
+            
+            const titleSpan = document.createElement('div');
+            titleSpan.innerText = item.title || 'Unbenannt';
+            titleSpan.style.fontWeight = 'bold';
+            
+            const pathSpan = document.createElement('div');
+            pathSpan.innerText = item.pathStr;
+            pathSpan.style.fontSize = '0.75em';
+            pathSpan.style.color = '#888';
+            
+            info.appendChild(titleSpan);
+            if (item.pathStr.includes(' / ')) info.appendChild(pathSpan);
             
             const btn = document.createElement('button');
             btn.innerText = "Wiederherstellen"; 
@@ -2671,7 +2793,7 @@ async function openTrashModal() {
                 await checkAndReloadData();
             };
             
-            d.appendChild(s); 
+            d.appendChild(info); 
             d.appendChild(btn); 
             list.appendChild(d);
         });
@@ -2680,11 +2802,15 @@ async function openTrashModal() {
     }
 }
 
-async function emptyTrash() {
-    if(confirm("Alle gelöschten Notizen im Papierkorb wirklich endgültig entfernen? Das kann nicht rückgängig gemacht werden!")) {
-        await fetch('/api/trash/empty', {method: 'DELETE'});
-        openTrashModal();
-    }
+function emptyTrash() {
+    showModal("Papierkorb leeren", "Alle gelöschten Notizen wirklich endgültig entfernen?\n\nDas kann nicht rückgängig gemacht werden!", [
+        { label: "Ja, endgültig löschen", class: "btn-discard", action: async () => { 
+            await fetch('/api/trash/empty', {method: 'DELETE'});
+            openTrashModal();
+            checkAndReloadData();
+        }},
+        { label: "Abbrechen", class: "btn-cancel", action: () => {} }
+    ]);
 }
 
 async function openHistoryModal() {
