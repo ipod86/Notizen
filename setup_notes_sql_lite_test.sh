@@ -365,18 +365,16 @@ def restore_trash(note_id):
             row = conn.execute("SELECT parent_id FROM notes WHERE id=?", (nid,)).fetchone()
             pid = row['parent_id'] if row else None
             
-            # Prüfen ob Eltern-Ordner überhaupt existiert und nicht im Papierkorb ist
             if check_parent and pid:
                 p_row = conn.execute("SELECT is_trashed FROM notes WHERE id=?", (pid,)).fetchone()
                 if not p_row or p_row['is_trashed'] == 1:
-                    pid = None # Wenn nicht verfügbar, ab ins Hauptverzeichnis (Root)
+                    pid = None 
                     
             conn.execute("UPDATE notes SET is_trashed=0, parent_id=? WHERE id=?", (pid, nid))
             
-            # Alle Kinder, die diesem Ordner gehören, rekursiv mit-wiederherstellen
             children = conn.execute("SELECT id FROM notes WHERE parent_id=? AND is_trashed=1", (nid,)).fetchall()
             for c in children:
-                do_restore(c['id'], False) # Für Kinder check_parent=False, da der Parent ja gerade wiederhergestellt wird
+                do_restore(c['id'], False) 
                 
         do_restore(note_id, True)
     return jsonify({"status": "success"})
@@ -661,8 +659,6 @@ if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=False)
 EOF
 
-echo "app.run(host='0.0.0.0', port=$USER_PORT, debug=False)" >> $INSTALL_DIR/app.py
-
 # cleanup.py 
 cat << 'EOF' > $INSTALL_DIR/cleanup.py
 import sqlite3
@@ -804,11 +800,38 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
                     <span>🎨 Akzentfarbe</span>
                     <input type="color" id="accent-color-picker" onchange="updateGlobalAccent(this.value)" onclick="event.stopPropagation()">
                 </div>
-                <div class="menu-row" onclick="exportData()"><span>📥 DB-Backup herunterladen</span></div>
-                <div class="menu-row" onclick="openRestoreModal()"><span>🔄 Backup Wiederherstellen</span></div>
-                <div class="menu-row" onclick="togglePassword()"><span id="pwd-toggle-text">🔒 Passwortschutz an</span></div>
-                <div class="menu-row" onclick="toggleWebhookModal()"><span id="webhook-toggle-text">🔔 Webhook (Push)</span></div>
-                <div class="menu-row" onclick="toggleHistorySettings()"><span>🕰️ Historien-Optionen</span></div>
+                
+                <div class="dropdown-submenu" onclick="toggleSubmenu(this, event)">
+                    <div class="menu-row">
+                        <span>📁 Allgemeine Einstellungen</span><span class="submenu-arrow">▶</span>
+                    </div>
+                    <div class="submenu-content">
+                        <div class="menu-row" onclick="handleMenuAction(event, togglePassword)"><span id="pwd-toggle-text">🔒 Passwortschutz an</span></div>
+                        <div class="menu-row" onclick="handleMenuAction(event, toggleHistorySettings)"><span>🕰️ Historien-Optionen</span></div>
+                    </div>
+                </div>
+
+                <div class="dropdown-submenu" onclick="toggleSubmenu(this, event)">
+                    <div class="menu-row">
+                        <span>🔔 Benachrichtigungen</span><span class="submenu-arrow">▶</span>
+                    </div>
+                    <div class="submenu-content">
+                        <div class="menu-row" onclick="toggleHeaderIcon('tasks', event)"><span id="toggle-tasks-text">☑️ Aufgaben-Icon: An</span></div>
+                        <div class="menu-row" onclick="toggleHeaderIcon('reminders', event)"><span id="toggle-reminders-text">⏰ Erinnerungs-Icon: An</span></div>
+                        <div class="menu-row" onclick="handleMenuAction(event, toggleWebhookModal)"><span id="webhook-toggle-text">📡 Webhook (Push)</span></div>
+                    </div>
+                </div>
+
+                <div class="dropdown-submenu" onclick="toggleSubmenu(this, event)">
+                    <div class="menu-row">
+                        <span>💾 Backup & Restore</span><span class="submenu-arrow">▶</span>
+                    </div>
+                    <div class="submenu-content">
+                        <div class="menu-row" onclick="handleMenuAction(event, exportData)"><span>📥 Backup herunterladen</span></div>
+                        <div class="menu-row" onclick="handleMenuAction(event, openRestoreModal)"><span>🔄 Wiederherstellen</span></div>
+                    </div>
+                </div>
+                
                 <div class="menu-row" onclick="openShareOverviewModal()"><span>🌍 Freigaben verwalten</span></div>
                 <div class="menu-row" onclick="openTrashModal()">
                     <span style="display:flex; align-items:center; width:100%;">
@@ -857,10 +880,10 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
                         <div class="dropdown">
                             <button onclick="toggleNoteMenu(event)" style="font-size:1.4em; padding:0 5px; font-weight:bold; letter-spacing: 2px;">⋮</button>
                             <div class="dropdown-content" id="note-menu-content" style="top:35px;">
-                                <div class="menu-row" onclick="enableEdit(); document.getElementById('note-menu-content').style.display='none';"><span>Bearbeiten</span></div>
-                                <div class="menu-row" onclick="shareNote(); document.getElementById('note-menu-content').style.display='none';"><span>Freigabe-Link</span></div>
-                                <div class="menu-row" id="menu-row-history" onclick="openHistoryModal(); document.getElementById('note-menu-content').style.display='none';"><span>Versionsverlauf</span></div>
-                                <div class="menu-row" onclick="window.print(); document.getElementById('note-menu-content').style.display='none';"><span>Drucken / PDF</span></div>
+                                <div class="menu-row" onclick="handleMenuAction(event, enableEdit)"><span>Bearbeiten</span></div>
+                                <div class="menu-row" onclick="handleMenuAction(event, shareNote)"><span>Freigabe-Link</span></div>
+                                <div class="menu-row" id="menu-row-history" onclick="handleMenuAction(event, openHistoryModal)"><span>Versionsverlauf</span></div>
+                                <div class="menu-row" onclick="handleMenuAction(event, window.print)"><span>Drucken / PDF</span></div>
                             </div>
                         </div>
                     </div>
@@ -1515,17 +1538,52 @@ body.sidebar-hidden #mobile-toggle-btn { left: 0; }
     top: 40px; 
     background: var(--sidebar-bg); 
     border: 1px solid var(--border-color); 
-    min-width: 220px; 
+    min-width: 250px; 
     border-radius: 8px; 
     overflow: hidden; 
     box-shadow: 0 4px 15px rgba(0,0,0,0.3); 
     z-index: 3000;
 }
 
+.dropdown-submenu {
+    position: relative;
+    cursor: pointer;
+}
+
 .menu-row { display: flex; align-items: center; height: 50px; border-bottom: 1px solid var(--border-color); padding: 0 15px; box-sizing: border-box; cursor: pointer; font-size: 14px; transition: background 0.2s; }
 .menu-row:last-child { border-bottom: none; }
 .menu-row:hover { background: rgba(255,255,255,0.05); }
 .menu-row span { flex-grow: 1; text-align: left; }
+
+.dropdown-submenu .menu-row { border-bottom: none; }
+.dropdown-submenu { border-bottom: 1px solid var(--border-color); }
+.dropdown-submenu:last-child { border-bottom: none; }
+
+.submenu-arrow {
+    font-size: 0.8em;
+    opacity: 0.5;
+    flex-grow: 0 !important;
+}
+
+.submenu-content {
+    display: none;
+    position: absolute;
+    right: 100%;
+    top: 0;
+    background: var(--sidebar-bg);
+    border: 1px solid var(--border-color);
+    min-width: 230px;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+    z-index: 3001;
+}
+
+@media (hover: hover) {
+    .dropdown-submenu:hover > .submenu-content {
+        display: block;
+    }
+}
 
 #accent-color-picker { width: 40px; height: 25px; border: none; background: none; cursor: pointer; padding: 0; }
 
@@ -1674,6 +1732,32 @@ function copyText(text) {
     navigator.clipboard.writeText(text).catch(function(err) {
         fallbackCopyTextToClipboard(text);
     });
+}
+
+function closeAllMenus() {
+    const m = document.getElementById('dropdown-menu');
+    if (m) m.style.display = 'none';
+    const m2 = document.getElementById('note-menu-content');
+    if (m2) m2.style.display = 'none';
+    document.querySelectorAll('.submenu-content').forEach(s => s.style.display = 'none');
+}
+
+function handleMenuAction(e, actionFunc) {
+    if (e) e.stopPropagation();
+    closeAllMenus();
+    actionFunc();
+}
+
+function toggleSubmenu(el, e) {
+    if (e) e.stopPropagation();
+    const sub = el.querySelector('.submenu-content');
+    const isVisible = sub && sub.style.display === 'block';
+
+    document.querySelectorAll('.submenu-content').forEach(s => s.style.display = 'none');
+
+    if (!isVisible && sub) {
+        sub.style.display = 'block';
+    }
 }
 
 async function acquireLock(noteId, override = false) {
@@ -3018,6 +3102,22 @@ async function saveWebhook() {
     updateMenuUI();
 }
 
+async function toggleHeaderIcon(type, event) {
+    if (event) event.stopPropagation();
+    const key = type === 'tasks' ? 'icon_tasks_enabled' : 'icon_reminders_enabled';
+    const currentVal = fullTree.settings[key] !== false && fullTree.settings[key] !== 'false';
+    const newVal = !currentVal;
+
+    fullTree.settings[key] = newVal;
+    updateMenuUI();
+
+    await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ [key]: newVal })
+    });
+}
+
 function showModal(title, text, buttons, showInput=false) { 
     document.getElementById('modal-title').innerText = title; 
     document.getElementById('modal-text').innerText = text; 
@@ -3228,26 +3328,23 @@ function copyToClipboard(btn) {
 }
 
 function toggleSettings(e) { 
-    e.stopPropagation(); 
-    const m = document.getElementById('dropdown-menu'); 
-    m.style.display = m.style.display === 'block' ? 'none' : 'block'; 
-    const m2 = document.getElementById('note-menu-content'); 
-    if (m2) m2.style.display = 'none';
+    if (e) e.stopPropagation(); 
+    const m = document.getElementById('dropdown-menu');
+    const isVisible = m.style.display === 'block';
+    closeAllMenus();
+    if (!isVisible) m.style.display = 'block';
 }
 
 function toggleNoteMenu(e) {
-    e.stopPropagation();
+    if (e) e.stopPropagation();
     const m = document.getElementById('note-menu-content');
-    m.style.display = m.style.display === 'block' ? 'none' : 'block';
-    const mSettings = document.getElementById('dropdown-menu');
-    if (mSettings) mSettings.style.display = 'none';
+    const isVisible = m.style.display === 'block';
+    closeAllMenus();
+    if (!isVisible) m.style.display = 'block';
 }
 
 document.addEventListener('click', () => { 
-    const m = document.getElementById('dropdown-menu'); 
-    if (m) m.style.display = 'none'; 
-    const m2 = document.getElementById('note-menu-content');
-    if (m2) m2.style.display = 'none';
+    closeAllMenus();
 });
 
 function exportData() { 
@@ -3545,7 +3642,21 @@ function updateMenuUI() {
     const whToggleText = document.getElementById('webhook-toggle-text'); 
     if(pwdBtn) pwdBtn.innerText = fullTree.settings.password_enabled ? '🔓 Passwortschutz aus' : '🔒 Passwortschutz an'; 
     if(logoutBtn) logoutBtn.style.display = fullTree.settings.password_enabled ? 'flex' : 'none'; 
-    if(whToggleText) whToggleText.innerText = fullTree.settings.webhook_enabled ? '🔔 Webhook (Aktiviert)' : '🔕 Webhook (Deaktiviert)'; 
+    if(whToggleText) whToggleText.innerText = fullTree.settings.webhook_enabled ? '📡 Webhook (Aktiviert)' : '📡 Webhook (Push)'; 
+
+    const taskToggleText = document.getElementById('toggle-tasks-text');
+    const remToggleText = document.getElementById('toggle-reminders-text');
+    
+    const tasksEnabled = fullTree.settings.icon_tasks_enabled !== false && fullTree.settings.icon_tasks_enabled !== 'false';
+    const remEnabled = fullTree.settings.icon_reminders_enabled !== false && fullTree.settings.icon_reminders_enabled !== 'false';
+
+    if(taskToggleText) taskToggleText.innerText = tasksEnabled ? '☑️ Aufgaben-Icon: An' : '☑️ Aufgaben-Icon: Aus';
+    if(remToggleText) remToggleText.innerText = remEnabled ? '⏰ Erinnerungs-Icon: An' : '⏰ Erinnerungs-Icon: Aus';
+
+    const btnTask = document.getElementById('todo-dashboard-btn');
+    const btnRem = document.getElementById('notification-bell');
+    if(btnTask) btnTask.style.display = tasksEnabled ? '' : 'none';
+    if(btnRem) btnRem.style.display = remEnabled ? '' : 'none';
 }
 
 async function addItem(parentId) { 
