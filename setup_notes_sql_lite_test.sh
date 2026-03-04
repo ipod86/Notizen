@@ -365,16 +365,18 @@ def restore_trash(note_id):
             row = conn.execute("SELECT parent_id FROM notes WHERE id=?", (nid,)).fetchone()
             pid = row['parent_id'] if row else None
             
+            # Prüfen ob Eltern-Ordner überhaupt existiert und nicht im Papierkorb ist
             if check_parent and pid:
                 p_row = conn.execute("SELECT is_trashed FROM notes WHERE id=?", (pid,)).fetchone()
                 if not p_row or p_row['is_trashed'] == 1:
-                    pid = None
+                    pid = None # Wenn nicht verfügbar, ab ins Hauptverzeichnis (Root)
                     
             conn.execute("UPDATE notes SET is_trashed=0, parent_id=? WHERE id=?", (pid, nid))
             
+            # Alle Kinder, die diesem Ordner gehören, rekursiv mit-wiederherstellen
             children = conn.execute("SELECT id FROM notes WHERE parent_id=? AND is_trashed=1", (nid,)).fetchall()
             for c in children:
-                do_restore(c['id'], False)
+                do_restore(c['id'], False) # Für Kinder check_parent=False, da der Parent ja gerade wiederhergestellt wird
                 
         do_restore(note_id, True)
     return jsonify({"status": "success"})
@@ -1442,23 +1444,27 @@ input, textarea {
     right: -8px;
     background: #e74c3c;
     color: white;
-    border-radius: 50%;
-    padding: 2px 6px;
+    border-radius: 12px;
+    padding: 2px 5px;
     font-size: 0.5em;
     font-weight: bold;
     border: 2px solid var(--bg-color);
     display: none;
+    min-width: 12px;
+    text-align: center;
 }
 
 .menu-badge {
     background: #e74c3c;
     color: white;
-    border-radius: 10px;
-    padding: 2px 8px;
+    border-radius: 12px;
+    padding: 2px 6px;
     font-size: 0.8em;
     font-weight: bold;
     margin-left: 10px;
     display: none;
+    min-width: 14px;
+    text-align: center;
 }
 
 .modal-overlay { 
@@ -2371,7 +2377,8 @@ window.toggleTask = async function(targetIdx, currentlyChecked) {
     } catch(e) { 
         console.error(e); 
     }
-    await releaseLock(); 
+    await releaseLock();
+    updateBadges(); 
     renderDisplayArea();
 };
 
@@ -2701,6 +2708,7 @@ function renderTodoList() {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({note_id: t.note_id, task_index: t.task_index})
             });
+            updateBadges(); 
             if (activeId === t.note_id && activeNoteData && document.getElementById('edit-mode').style.display !== 'block') {
                 activeNoteData = await fetchNoteData(activeId);
                 renderDisplayArea();
@@ -2749,54 +2757,64 @@ async function openTrashModal() {
             return; 
         }
 
-        const map = {};
-        data.forEach(n => map[n.id] = n);
-        
+        const trashIds = new Set(data.map(d => d.id));
+        const roots = [];
+        const childrenMap = {};
+
         data.forEach(n => {
-            let p = n;
-            let path = [];
-            while(p) {
-                path.unshift(p.title || 'Unbenannt');
-                p = map[p.parent_id];
+            if (n.parent_id && trashIds.has(n.parent_id)) {
+                if (!childrenMap[n.parent_id]) childrenMap[n.parent_id] = [];
+                childrenMap[n.parent_id].push(n);
+            } else {
+                roots.push(n);
             }
-            n.pathStr = path.join(' / ');
         });
 
-        data.sort((a,b) => a.pathStr.localeCompare(b.pathStr));
-        
         list.innerHTML = '';
-        data.forEach(item => {
+
+        function renderNode(node, level) {
             const d = document.createElement('div');
-            d.style = "display:flex; justify-content:space-between; align-items:center; padding:10px; border-bottom:1px solid var(--border-color);";
-            
+            d.style = `display:flex; justify-content:space-between; align-items:center; padding:8px 10px; border-bottom:1px solid var(--border-color); margin-left: ${level * 20}px;`;
+            if (level > 0) d.style.borderLeft = '2px solid var(--border-color)';
+
             const info = document.createElement('div');
-            
+            info.style.display = 'flex';
+            info.style.alignItems = 'center';
+            info.style.gap = '8px';
+
+            const icon = document.createElement('span');
+            icon.innerText = childrenMap[node.id] ? '📁' : '📄';
+
             const titleSpan = document.createElement('div');
-            titleSpan.innerText = item.title || 'Unbenannt';
-            titleSpan.style.fontWeight = 'bold';
-            
-            const pathSpan = document.createElement('div');
-            pathSpan.innerText = item.pathStr;
-            pathSpan.style.fontSize = '0.75em';
-            pathSpan.style.color = '#888';
-            
+            titleSpan.innerText = node.title || 'Unbenannt';
+            titleSpan.style.fontWeight = level === 0 ? 'bold' : 'normal';
+
+            info.appendChild(icon);
             info.appendChild(titleSpan);
-            if (item.pathStr.includes(' / ')) info.appendChild(pathSpan);
-            
+
             const btn = document.createElement('button');
             btn.innerText = "Wiederherstellen"; 
             btn.className = "btn-save"; 
-            btn.style.padding = "5px 10px";
+            btn.style.padding = "4px 8px";
+            btn.style.fontSize = "0.85em";
             btn.onclick = async () => {
-                await fetch(`/api/trash/restore/${item.id}`, {method:'POST'});
+                await fetch(`/api/trash/restore/${node.id}`, {method:'POST'});
+                updateBadges(); 
                 openTrashModal();
-                await checkAndReloadData();
+                checkAndReloadData();
             };
             
             d.appendChild(info); 
             d.appendChild(btn); 
             list.appendChild(d);
-        });
+
+            if (childrenMap[node.id]) {
+                childrenMap[node.id].forEach(child => renderNode(child, level + 1));
+            }
+        }
+
+        roots.forEach(r => renderNode(r, 0));
+        
     } catch(e) {
         list.innerHTML = 'Fehler beim Laden.';
     }
@@ -2806,6 +2824,7 @@ function emptyTrash() {
     showModal("Papierkorb leeren", "Alle gelöschten Notizen wirklich endgültig entfernen?\n\nDas kann nicht rückgängig gemacht werden!", [
         { label: "Ja, endgültig löschen", class: "btn-discard", action: async () => { 
             await fetch('/api/trash/empty', {method: 'DELETE'});
+            updateBadges(); 
             openTrashModal();
             checkAndReloadData();
         }},
@@ -3546,6 +3565,7 @@ function deleteItem(id) {
             if (activeId === id) { activeId = null; document.getElementById('edit-area').style.display = 'none'; } 
             const el = document.querySelector(`.tree-item-container[data-id="${id}"]`);
             if (el) el.remove(); 
+            updateBadges(); 
             await checkAndReloadData(); 
         } }, 
         { label: "Abbruch", class: "btn-cancel", action: () => {} } 
