@@ -1540,10 +1540,12 @@ body.sidebar-hidden #mobile-toggle-btn { left: 0; }
     border: 1px solid var(--border-color); 
     min-width: 250px; 
     border-radius: 8px; 
-    overflow: hidden; 
     box-shadow: 0 4px 15px rgba(0,0,0,0.3); 
     z-index: 3000;
 }
+
+.dropdown-content > *:first-child { border-top-left-radius: 7px; border-top-right-radius: 7px; }
+.dropdown-content > *:last-child { border-bottom-left-radius: 7px; border-bottom-right-radius: 7px; }
 
 .dropdown-submenu {
     position: relative;
@@ -1569,19 +1571,45 @@ body.sidebar-hidden #mobile-toggle-btn { left: 0; }
     display: none;
     position: absolute;
     right: 100%;
-    top: 0;
+    top: -1px;
     background: var(--sidebar-bg);
     border: 1px solid var(--border-color);
     min-width: 230px;
     border-radius: 8px;
-    overflow: hidden;
     box-shadow: 0 4px 15px rgba(0,0,0,0.3);
     z-index: 3001;
 }
 
+.submenu-content > *:first-child { border-top-left-radius: 7px; border-top-right-radius: 7px; }
+.submenu-content > *:last-child { border-bottom-left-radius: 7px; border-bottom-right-radius: 7px; }
+
 @media (hover: hover) {
     .dropdown-submenu:hover > .submenu-content {
         display: block;
+    }
+}
+
+/* --- MOBILE ANPASSUNGEN FÜR UNTERMENÜS --- */
+@media screen and (max-width: 600px) {
+    .submenu-content {
+        position: relative;
+        right: auto;
+        top: auto;
+        width: 100%;
+        min-width: auto;
+        border: none;
+        border-top: 1px dashed var(--border-color);
+        box-shadow: inset 0 5px 10px rgba(0,0,0,0.15);
+        border-radius: 0 !important;
+        background: rgba(0,0,0,0.15);
+    }
+    .submenu-content .menu-row {
+        padding-left: 35px; /* Unterpunkte leicht einrücken */
+        height: 45px;
+    }
+    .dropdown-content {
+        max-height: 80vh; /* Verhindert, dass das ausgeklappte Menü über den Bildschirmrand hinausgeht */
+        overflow-y: auto;
     }
 }
 
