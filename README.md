@@ -4,20 +4,30 @@ Ein schlankes, schnelles und vollständig selbstgehostetes Web-Notizbuch. Es kom
 
 ## ✨ Features
 
-* **Einfacher Editor:** Markdown-Unterstützung (Fett, Kursiv, Listen, Code-Blöcke mit Highlighting, Zitate, Spoiler).
-* **Live-Sync & Sperrsystem (Locking):** Automatische Aktualisierung im Hintergrund. Ein intelligentes Sperrsystem blockiert die Notiz für andere Geräte, sobald jemand tippt oder in der Historie wühlt – so werden Überschreibungen zu 100 % verhindert.
-* **Versionsverlauf (Historie):** Mache Fehler rückgängig! Einstellbare Lebensdauer für alte Versionen (z. B. 30 Tage) inklusive nahtloser Wiederherstellung auf Knopfdruck.
-* **Globales Aufgaben-Dashboard (To-Dos):** Sammelt alle Checklisten (`- [ ]` und `- [x]`) aus sämtlichen Notizen an einem zentralen Ort. Aufgaben können direkt im Dashboard abgehakt werden und synchronisieren sich live.
-* **Öffentliche Freigaben (Share Links):** Generiere sichere Lese-Links für Dritte (ohne Login erreichbar). Über eine Übersicht lassen sich alle Freigaben zentral verwalten und widerrufen.
-* **Papierkorb (Trash):** Gelöschte Notizen landen zunächst im Papierkorb. Von dort können sie samt ihrer Unterstruktur wiederhergestellt oder endgültig vernichtet werden.
-* **Dateien & Bilder:** Drag & Drop Upload für Bilder und beliebige Dateien (bis zu 50 MB) mit nativem Fortschrittsbalken.
-* **Skizzenblock:** Integriertes Zeichen-Tool für schnelle handschriftliche Notizen oder Skizzen (funktioniert per Touch am Handy, inkl. Dark-/Light-Backgrounds).
-* **Erinnerungen & Webhooks:** Setze fällige Termine (Datum oder exakte Uhrzeit) und lass dich über anpassbare HTTP-Webhooks (GET/POST) via Push-Nachricht (z. B. ntfy.sh oder Discord) benachrichtigen. Informiert auch sofort über fehlgeschlagene Logins (inkl. Angreifer-IP).
-* **Smarte Suche:** Durchsucht Titel und Texte rasend schnell (findet auch Wort-Teile) und klappt den Notiz-Baum automatisch genau dort auf, wo sich der Treffer befindet.
-* **Organisation:** Unendlich verschachtelbare Ordnerstruktur, Drag & Drop Sortierung, @-Erwähnungen (Verlinkungen) und automatische Backlink-Anzeige (wer verlinkt auf diese Notiz?).
-* **Sicherheit & Wartung:** Optionaler Passwortschutz mit serverseitigem Brute-Force-Schutz (5-Minuten-Sperre nach 5 Fehlversuchen pro IP), intelligenter nächtlicher Cronjob (löscht verwaiste Uploads erst, wenn sie auch aus der Historie abgelaufen sind).
-* **Backup & Restore:** Tägliche automatische Voll-Backups (`.tar.gz`). Wiederherstellung alter Server-Backups oder das Hochladen eigener Archive funktioniert **direkt über die Benutzeroberfläche** (kein Konsolenzugriff nötig).
-* **Anpassbar:** Dark- und Light-Mode sowie frei wählbare Akzentfarben direkt im Menü.
+Das Notiz-Tool bietet eine Vielzahl an Funktionen, die es zu einer vollwertigen, selbstgehosteten Notiz- und Wissensdatenbank machen:
+
+### 🛡️ Sicherheit & Multi-Device
+* **Multi-Instanz fähig:** Komfortables Setup-Skript zum Anlegen, Updaten und Löschen beliebig vieler unabhängiger Instanzen auf einem Server.
+* **Passwortschutz:** Optionaler Zugriffsschutz für die gesamte Instanz.
+* **Brute-Force-Schutz:** Intelligente IP-Sperre bei zu vielen fehlerhaften Login-Versuchen.
+* **Kollisions-Schutz (Locking):** Sperrt Notizen für andere Geräte/Tabs, während sie von jemandem bearbeitet werden, um unbeabsichtigtes Überschreiben zu verhindern.
+
+### 🔔 Benachrichtigungen & Aufgaben
+* **Push-Benachrichtigungen (Webhooks):** Sende zeitgesteuerte Erinnerungen an dein Smartphone (z.B. via ntfy.sh) oder als formatierte Nachricht an Discord (unterstützt GET und POST mit JSON-Payload).
+* **To-Do Dashboard:** Eine zentrale Übersicht aller offenen und erledigten Checkboxen aus allen Notizen.
+
+### 📝 Editor & Inhalte
+* **Markdown-Support:** Umfangreiche Formatierungen (Fett, Kursiv, Tabellen, Zitate, Code-Blöcke).
+* **Drag & Drop Uploads:** Bilder und Dateien einfach in den Textbereich ziehen.
+* **Skizzen-Block:** Integriertes Zeichen-Tool mit Stift, Textmarker und Radiergummi für handschriftliche Notizen.
+* **Verlinkungen (Mentions):** Tippe `@`, um blitzschnell andere Notizen im Text zu verlinken.
+
+### 🌍 Freigaben & Verwaltung
+* **Öffentliche Freigabe-Links:** Generiere Lese-Links für einzelne Notizen, um sie mit Leuten ohne Account zu teilen.
+* **Versionsverlauf (Historie):** Jeder Speichervorgang wird gesichert. Kehre jederzeit zu einer alten Version einer Notiz zurück.
+* **Papierkorb:** Gelöschte Notizen landen im Papierkorb und können samt Unterstruktur wiederhergestellt werden.
+* **Automatisches Sortieren:** Notizen lassen sich auf Knopfdruck alphabetisch ordnen (Ordner stehen immer oben).
+* **Backup & Restore:** Vollautomatische nächtliche Backups, die direkt über die Web-Oberfläche heruntergeladen oder wiederhergestellt werden können.
 
 ## 🚀 Installation
 
