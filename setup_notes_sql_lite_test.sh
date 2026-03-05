@@ -6,38 +6,46 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-echo "Welcher Port soll für das Notiz-Tool genutzt werden? (Standard: 8080)"
-read -p "Port: " USER_PORT
-if [ -z "$USER_PORT" ]; then 
-    USER_PORT=8080
+BASE_DIR="/opt"
+
+# Suche nach bestehenden Instanzen
+mapfile -t INSTANCES < <(find $BASE_DIR -maxdepth 1 -type d -name "notiz-*" 2>/dev/null)
+
+echo "=========================================="
+echo " 📝 Notiz-Tool Setup & Instanz-Manager"
+echo "=========================================="
+echo ""
+
+if [ ${#INSTANCES[@]} -gt 0 ]; then
+    echo "Gefundene Instanzen auf diesem Server:"
+    for i in "${INSTANCES[@]}"; do
+        echo " - $i"
+    done
+    echo ""
+    echo "Was möchtest du tun?"
+    echo "[1] Eine NEUE Instanz anlegen"
+    echo "[2] Alle bestehenden Instanzen AKTUALISIEREN (Code-Update)"
+    echo "[3] Eine bestehende Instanz LÖSCHEN (Uninstall)"
+    read -p "Auswahl (1, 2 oder 3): " ACTION
+else
+    echo "Keine bestehenden Instanzen gefunden. Starte Neuinstallation."
+    ACTION="1"
 fi
 
-echo "Soll ein tägliches SQLite-Voll-Backup (04:00 Uhr) eingerichtet werden? (Y/n)"
-read -p "Backup-Cronjob: " BACKUP_CONFIRM
-if [ -z "$BACKUP_CONFIRM" ]; then 
-    BACKUP_CONFIRM="y"
-fi
+# ==========================================
+# FUNKTION: Code in das Zielverzeichnis schreiben
+# ==========================================
+write_app_code() {
+    local TARGET_DIR=$1
+    echo "Schreibe Code-Dateien nach $TARGET_DIR ..."
 
-INSTALL_DIR="/opt/notiz-tool"
-SERVICE_NAME="notizen.service"
-
-echo "--- Stoppe alten Service (falls aktiv) ---"
-systemctl stop $SERVICE_NAME 2>/dev/null
-
-echo "--- Starte Setup in $INSTALL_DIR auf Port $USER_PORT ---"
-
-apt update && apt install -y python3 python3-pip python3-venv cron sqlite3
-
-mkdir -p $INSTALL_DIR/static 
-mkdir -p $INSTALL_DIR/templates 
-mkdir -p $INSTALL_DIR/uploads 
-mkdir -p $INSTALL_DIR/backups
-
-python3 -m venv $INSTALL_DIR/venv
-$INSTALL_DIR/venv/bin/python3 -m pip install flask werkzeug requests
+    mkdir -p "$TARGET_DIR/static"
+    mkdir -p "$TARGET_DIR/templates"
+    mkdir -p "$TARGET_DIR/uploads"
+    mkdir -p "$TARGET_DIR/backups"
 
 # --- app.py ---
-cat << 'EOF' > $INSTALL_DIR/app.py
+cat << 'EOF' > "$TARGET_DIR/app.py"
 from flask import Flask, render_template, request, jsonify, send_from_directory, session, redirect, url_for, send_file
 from werkzeug.security import generate_password_hash, check_password_hash
 import json
@@ -241,16 +249,12 @@ def login():
             error_msg = f"Zu viele Fehlversuche. Login gesperrt für {int(remaining_secs/60)} Minute(n)."
         return render_template('login.html', theme=sets.get('theme', 'dark'), accent=sets.get('accent', '#27ae60'), error=error_msg, v=str(time.time()))
     
-    # Sperre abgelaufen?
     if failed_attempts[client_ip]['lock_until'] != 0 and failed_attempts[client_ip]['lock_until'] <= now:
         if failed_attempts[client_ip]['count'] >= 5:
-            # 5-Minuten-Sperre ist rum -> Alles auf null
             failed_attempts[client_ip] = {'count': 0, 'lock_until': 0, 'first_attempt': now}
         else:
-            # 5-Sekunden-Sperre ist rum -> Nur Sperre lösen, Counter bleibt!
             failed_attempts[client_ip]['lock_until'] = 0
 
-    # Reset, wenn der erste Versuch > 60 Sekunden her ist und wir nicht gesperrt sind
     if now - failed_attempts[client_ip]['first_attempt'] > 60 and failed_attempts[client_ip]['lock_until'] == 0:
         failed_attempts[client_ip] = {'count': 0, 'lock_until': 0, 'first_attempt': now}
 
@@ -261,8 +265,6 @@ def login():
             return redirect(url_for('index'))
         
         failed_attempts[client_ip]['count'] += 1
-        
-        # IP im Webhook übermitteln
         trigger_webhook_async(f"Achtung, fehlgeschlagener login Notes von IP: {client_ip}", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
         
         if failed_attempts[client_ip]['count'] >= 5:
@@ -711,21 +713,26 @@ def restore_backup():
         if file and tar_path and os.path.exists(tar_path): os.remove(tar_path)
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080, debug=False)
+    port = int(os.environ.get('FLASK_PORT', 8080))
+    app.run(host='0.0.0.0', port=port, debug=False)
 EOF
 
 # --- cleanup.py ---
-cat << 'EOF' > $INSTALL_DIR/cleanup.py
+cat << 'EOF' > "$TARGET_DIR/cleanup.py"
 import sqlite3
 import os
 import time
 
-DB = '/opt/notiz-tool/data.db'
-UPL = '/opt/notiz-tool/uploads'
+DB = 'data.db'
+UPL = 'uploads'
 
-if not os.path.exists(DB) or not os.path.exists(UPL): exit()
+abs_db = os.path.join(os.getcwd(), DB)
+abs_upl = os.path.join(os.getcwd(), UPL)
 
-conn = sqlite3.connect(DB)
+if not os.path.exists(abs_db) or not os.path.exists(abs_upl): 
+    exit()
+
+conn = sqlite3.connect(abs_db)
 
 sets = dict(conn.execute("SELECT key, value FROM settings").fetchall())
 hist_enabled = sets.get('history_enabled', 'true') == 'true'
@@ -745,33 +752,38 @@ hist_rows = conn.execute("SELECT text FROM note_history WHERE text IS NOT NULL")
 all_texts = [r[0] for r in rows] + [r[0] for r in hist_rows]
 
 for text in all_texts:
-    for f in os.listdir(UPL):
-        if f in text: used_files.add(f)
+    for f in os.listdir(abs_upl):
+        if f in text: 
+            used_files.add(f)
         if f.startswith('sketch_') and f.endswith('.png'):
             sid = f.replace('sketch_', '').replace('.png', '')
             if f"[sketch:{sid}]" in text:
                 used_files.add(f)
                 used_files.add(f"sketch_{sid}.json")
                 
-for f in os.listdir(UPL):
+for f in os.listdir(abs_upl):
     if f not in used_files:
-        try: os.remove(os.path.join(UPL, f))
-        except: pass
+        try: 
+            os.remove(os.path.join(abs_upl, f))
+        except Exception: 
+            pass
 EOF
 
 # --- backup.sh ---
-cat << 'EOF' > $INSTALL_DIR/backup.sh
+cat << 'EOF' > "$TARGET_DIR/backup.sh"
 #!/bin/bash
-cd /opt/notiz-tool
+cd "$(dirname "$0")"
 if [ -f data.db ]; then
     sqlite3 data.db ".backup 'data.db.backup'"
     tar -czf backups/backup_$(date +%u).tar.gz data.db.backup uploads/
     rm data.db.backup
 fi
 EOF
+chmod +x "$TARGET_DIR/backup.sh"
+
 
 # --- templates/login.html ---
-cat << 'EOF' > $INSTALL_DIR/templates/login.html
+cat << 'EOF' > "$TARGET_DIR/templates/login.html"
 <!DOCTYPE html>
 <html lang="de">
 <head>
@@ -931,7 +943,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/login.html
 EOF
 
 # --- templates/share.html ---
-cat << 'EOF' > $INSTALL_DIR/templates/share.html
+cat << 'EOF' > "$TARGET_DIR/templates/share.html"
 <!DOCTYPE html>
 <html lang="de">
 <head>
@@ -974,7 +986,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/share.html
 EOF
 
 # --- templates/index.html ---
-cat << 'EOF' > $INSTALL_DIR/templates/index.html
+cat << 'EOF' > "$TARGET_DIR/templates/index.html"
 <!DOCTYPE html>
 <html lang="de">
 <head>
@@ -1365,7 +1377,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
 EOF
 
 # --- static/style.css ---
-cat << 'EOF' > $INSTALL_DIR/static/style.css
+cat << 'EOF' > "$TARGET_DIR/static/style.css"
 :root { 
     --bg-color: #1a1a1a; 
     --sidebar-bg: #252525; 
@@ -1928,7 +1940,7 @@ input[type="checkbox"].task-check { width: 16px; height: 16px; margin: 0; cursor
 EOF
 
 # --- static/script.js ---
-cat << 'EOF' > $INSTALL_DIR/static/script.js
+cat << 'EOF' > "$TARGET_DIR/static/script.js"
 var fullTree = { content: [], settings: {} };
 var activeId = null;
 var activeNoteData = null; 
@@ -2499,7 +2511,7 @@ function renderMarkdown(text) {
         } else { 
             res += parts[i].split('\n').map(line => {
                 let t = line.trim(); 
-                if (t.startsWith('<table') || t.startsWith('</table') || t.startsWith('<tr') || t.startsWith('</tr') || t.startsWith('<td') || t.startsWith('</td') || t.startsWith('<th') || t.startsWith('</th')) return line;
+                if (t.startsWith('<table') || t.startsWith('</table') || t.startsWith('<tr') || t.startsWith('</tr') || t.startsWith('<td') || t.startsWith('</th') || t.startsWith('</th')) return line;
                 
                 if (t === '') return '<br>'; 
                 if (t === '---') return '<hr>';
@@ -4177,27 +4189,76 @@ window.onload = () => {
 };
 EOF
 
-if ! id -u notizen > /dev/null 2>&1; then 
-    useradd -r -s /bin/false notizen
-fi
+}
+# ==========================================
+# ENDE FUNKTION
+# ==========================================
 
-chown -R notizen:notizen $INSTALL_DIR
-find $INSTALL_DIR -type d -exec chmod 750 {} \;
-find $INSTALL_DIR -type f -exec chmod 640 {} \;
 
-chmod 750 $INSTALL_DIR/backup.sh
-chmod 750 $INSTALL_DIR/cleanup.py
-chmod +x $INSTALL_DIR/app.py
+if [ "$ACTION" == "1" ]; then
+    # --- NEUE INSTANZ ANLEGEN ---
+    echo ""
+    echo "Wie soll die neue Instanz heißen? (nur Kleinbuchstaben, keine Leerzeichen)"
+    echo "Beispiel: 'firma' erstellt den Ordner /opt/notiz-firma"
+    read -p "Name: " INSTANCE_NAME
+    
+    if [ -z "$INSTANCE_NAME" ]; then 
+        INSTANCE_NAME="main"
+    fi
+    
+    INSTALL_DIR="$BASE_DIR/notiz-$INSTANCE_NAME"
+    SERVICE_NAME="notizen-$INSTANCE_NAME.service"
+    CRON_FILE="/etc/cron.d/notizen-$INSTANCE_NAME"
+    
+    # Intelligenter Port-Check
+    while true; do
+        read -p "Welcher Port soll für diese Instanz genutzt werden? " USER_PORT
+        if [ -z "$USER_PORT" ]; then USER_PORT=8080; fi
+        
+        if grep -q "FLASK_PORT=$USER_PORT" /etc/systemd/system/notizen*.service 2>/dev/null; then
+            echo "❌ FEHLER: Der Port $USER_PORT ist bereits für eine andere Notiz-Instanz reserviert! Bitte wähle einen anderen."
+        elif ss -tuln | grep -q ":$USER_PORT "; then
+            echo "❌ FEHLER: Der Port $USER_PORT wird gerade von einem anderen Programm auf dem Server verwendet! Bitte wähle einen anderen."
+        else
+            break
+        fi
+    done
 
-cat << EOF > /etc/systemd/system/$SERVICE_NAME
+    echo "Soll ein tägliches SQLite-Voll-Backup für diese Instanz eingerichtet werden? (Y/n)"
+    read -p "Backup-Cronjob: " BACKUP_CONFIRM
+    if [ -z "$BACKUP_CONFIRM" ]; then 
+        BACKUP_CONFIRM="y"
+    fi
+
+    echo "--- Starte Setup für $INSTALL_DIR auf Port $USER_PORT ---"
+
+    apt update && apt install -y python3 python3-pip python3-venv cron sqlite3
+
+    mkdir -p "$INSTALL_DIR"
+    python3 -m venv "$INSTALL_DIR/venv"
+    "$INSTALL_DIR/venv/bin/python3" -m pip install flask werkzeug requests
+
+    write_app_code "$INSTALL_DIR"
+
+    if ! id -u notizen > /dev/null 2>&1; then 
+        useradd -r -s /bin/false notizen
+    fi
+
+    chown -R notizen:notizen "$INSTALL_DIR"
+    find "$INSTALL_DIR" -type d -exec chmod 750 {} \;
+    find "$INSTALL_DIR" -type f -exec chmod 640 {} \;
+    chmod +x "$INSTALL_DIR/app.py"
+
+    cat << EOF > /etc/systemd/system/$SERVICE_NAME
 [Unit]
-Description=Notizen
+Description=Notizen ($INSTANCE_NAME)
 After=network.target
 
 [Service]
 User=notizen
 Group=notizen
 WorkingDirectory=$INSTALL_DIR
+Environment="FLASK_PORT=$USER_PORT"
 ExecStart=$INSTALL_DIR/venv/bin/python $INSTALL_DIR/app.py
 Restart=always
 
@@ -4205,16 +4266,96 @@ Restart=always
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable $SERVICE_NAME
+    systemctl daemon-reload
+    systemctl enable "$SERVICE_NAME"
+    systemctl start "$SERVICE_NAME"
 
-echo "--- Richte Cronjobs ein ---"
-rm -f /etc/cron.d/notizen-tool
-echo "0 3 * * * notizen /usr/bin/python3 $INSTALL_DIR/cleanup.py" >> /etc/cron.d/notizen-tool
-if [[ "$BACKUP_CONFIRM" =~ ^[Yy]$ ]]; then 
-    echo "0 4 * * * notizen $INSTALL_DIR/backup.sh" >> /etc/cron.d/notizen-tool
+    # Eigene Cron-Datei für diese Instanz
+    echo "0 3 * * * notizen /usr/bin/python3 $INSTALL_DIR/cleanup.py" > "$CRON_FILE"
+    if [[ "$BACKUP_CONFIRM" =~ ^[Yy]$ ]]; then 
+        echo "0 4 * * * notizen $INSTALL_DIR/backup.sh" >> "$CRON_FILE"
+    fi
+    chmod 644 "$CRON_FILE"
+
+    echo "--- ✅ Instanz '$INSTANCE_NAME' erfolgreich auf Port $USER_PORT installiert! ---"
+
+elif [ "$ACTION" == "2" ]; then
+    # --- BESTEHENDE INSTANZEN AKTUALISIEREN ---
+    echo ""
+    echo "Starte Update aller gefundenen Instanzen..."
+    
+    for DIR in "${INSTANCES[@]}"; do
+        INSTANCE_NAME=$(basename "$DIR" | sed 's/notiz-//')
+        
+        # Abwärtskompatibilität für das allererste Skript
+        if [ "$INSTANCE_NAME" == "tool" ]; then
+            SERVICE_NAME="notizen.service"
+        else
+            SERVICE_NAME="notizen-$INSTANCE_NAME.service"
+        fi
+
+        echo "-----------------------------------"
+        echo "Aktualisiere: $DIR (Service: $SERVICE_NAME)"
+        
+        systemctl stop "$SERVICE_NAME" 2>/dev/null
+        
+        write_app_code "$DIR"
+        
+        chown -R notizen:notizen "$DIR"
+        chmod +x "$DIR/app.py"
+        chmod +x "$DIR/backup.sh"
+        
+        systemctl start "$SERVICE_NAME"
+        echo "Fertig: $INSTANCE_NAME aktualisiert und neugestartet."
+    done
+    
+    echo "-----------------------------------"
+    echo "--- ✅ Alle Instanzen sind auf dem neuesten Stand! ---"
+
+elif [ "$ACTION" == "3" ]; then
+    # --- BESTEHENDE INSTANZ LÖSCHEN ---
+    echo ""
+    echo "Welche Instanz möchtest du restlos löschen?"
+    read -p "Name der Instanz (z.B. 'firma' oder 'tool' für die erste): " DEL_NAME
+
+    TARGET_DIR="$BASE_DIR/notiz-$DEL_NAME"
+
+    if [ ! -d "$TARGET_DIR" ]; then
+        echo "❌ FEHLER: Instanzordner $TARGET_DIR existiert nicht."
+        exit 1
+    fi
+
+    echo "⚠️ ACHTUNG: Du bist dabei, die Instanz '$DEL_NAME' komplett zu löschen!"
+    echo "Das beinhaltet alle Notizen (data.db), Bilder, Skizzen, Backups und Einstellungen."
+    read -p "Bist du absolut sicher? (tippe 'ja' zum Löschen): " CONFIRM_DEL
+
+    if [ "$CONFIRM_DEL" == "ja" ]; then
+        if [ "$DEL_NAME" == "tool" ]; then
+            SERVICE_NAME="notizen.service"
+            CRON_NAME="notizen-tool"
+        else
+            SERVICE_NAME="notizen-$DEL_NAME.service"
+            CRON_NAME="notizen-$DEL_NAME"
+        fi
+
+        echo "Stoppe und entferne Service $SERVICE_NAME..."
+        systemctl stop "$SERVICE_NAME" 2>/dev/null
+        systemctl disable "$SERVICE_NAME" 2>/dev/null
+        rm -f "/etc/systemd/system/$SERVICE_NAME"
+
+        echo "Entferne Cronjobs..."
+        rm -f "/etc/cron.d/$CRON_NAME"
+
+        echo "Lösche Verzeichnis $TARGET_DIR..."
+        rm -rf "$TARGET_DIR"
+
+        systemctl daemon-reload
+        echo "✅ Instanz '$DEL_NAME' wurde restlos und sauber vom Server entfernt."
+    else
+        echo "Abbruch. Es wurde nichts gelöscht."
+    fi
+
+else
+    echo "Ungültige Eingabe. Skript wird beendet."
+    exit 1
 fi
-chmod 644 /etc/cron.d/notizen-tool
-
-systemctl restart $SERVICE_NAME
-echo "--- Setup abgeschlossen! Tool ist unter Port $USER_PORT erreichbar. ---"
