@@ -36,7 +36,7 @@ mkdir -p $INSTALL_DIR/backups
 python3 -m venv $INSTALL_DIR/venv
 $INSTALL_DIR/venv/bin/python3 -m pip install flask werkzeug requests
 
-# app.py 
+# --- app.py ---
 cat << 'EOF' > $INSTALL_DIR/app.py
 from flask import Flask, render_template, request, jsonify, send_from_directory, session, redirect, url_for, send_file
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -231,39 +231,44 @@ def login():
     client_ip = request.headers.get('X-Forwarded-For', request.remote_addr).split(',')[0].strip()
     now = time.time()
     
-    if client_ip in failed_attempts:
-        if failed_attempts[client_ip]['lock_until'] > now:
-            remaining_secs = int(failed_attempts[client_ip]['lock_until'] - now)
-            error_msg = f"Zu viele Fehlversuche. Login gesperrt für {remaining_secs} Sekunde(n)."
-            if remaining_secs > 60:
-                error_msg = f"Zu viele Fehlversuche. Login gesperrt für {int(remaining_secs/60)} Minute(n)."
-            return render_template('login.html', theme=sets.get('theme', 'dark'), accent=sets.get('accent', '#27ae60'), error=error_msg, v=str(time.time()))
-        elif failed_attempts[client_ip]['lock_until'] != 0:
-            failed_attempts[client_ip] = {'count': 0, 'lock_until': 0, 'first_attempt': 0}
+    if client_ip not in failed_attempts:
+        failed_attempts[client_ip] = {'count': 0, 'lock_until': 0, 'first_attempt': now}
+    
+    if failed_attempts[client_ip]['lock_until'] > now:
+        remaining_secs = int(failed_attempts[client_ip]['lock_until'] - now)
+        error_msg = f"Zu viele Fehlversuche. Login gesperrt für {remaining_secs} Sekunde(n)."
+        if remaining_secs > 60:
+            error_msg = f"Zu viele Fehlversuche. Login gesperrt für {int(remaining_secs/60)} Minute(n)."
+        return render_template('login.html', theme=sets.get('theme', 'dark'), accent=sets.get('accent', '#27ae60'), error=error_msg, v=str(time.time()))
+    
+    # Sperre abgelaufen?
+    if failed_attempts[client_ip]['lock_until'] != 0 and failed_attempts[client_ip]['lock_until'] <= now:
+        if failed_attempts[client_ip]['count'] >= 5:
+            # 5-Minuten-Sperre ist rum -> Alles auf null
+            failed_attempts[client_ip] = {'count': 0, 'lock_until': 0, 'first_attempt': now}
+        else:
+            # 5-Sekunden-Sperre ist rum -> Nur Sperre lösen, Counter bleibt!
+            failed_attempts[client_ip]['lock_until'] = 0
+
+    # Reset, wenn der erste Versuch > 60 Sekunden her ist und wir nicht gesperrt sind
+    if now - failed_attempts[client_ip]['first_attempt'] > 60 and failed_attempts[client_ip]['lock_until'] == 0:
+        failed_attempts[client_ip] = {'count': 0, 'lock_until': 0, 'first_attempt': now}
 
     if request.method == 'POST':
-        if client_ip not in failed_attempts:
-            failed_attempts[client_ip] = {'count': 0, 'lock_until': 0, 'first_attempt': now}
-        elif now - failed_attempts[client_ip]['first_attempt'] > 60 and failed_attempts[client_ip]['lock_until'] == 0:
-            failed_attempts[client_ip] = {'count': 0, 'lock_until': 0, 'first_attempt': now}
-
         if check_password_hash(sets.get('password_hash', ''), request.form.get('password')):
             session['logged_in'] = True
             failed_attempts.pop(client_ip, None)
             return redirect(url_for('index'))
         
-        # Falsches Passwort eingegeben
         failed_attempts[client_ip]['count'] += 1
         
-        # Webhook asynchron auslösen (blockiert nicht den Login-Vorgang)
-        trigger_webhook_async("Achtung, fehlgeschlagener login Notes", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        # IP im Webhook übermitteln
+        trigger_webhook_async(f"Achtung, fehlgeschlagener login Notes von IP: {client_ip}", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
         
         if failed_attempts[client_ip]['count'] >= 5:
-            # Nach 5 Versuchen für 5 Minuten (300 Sekunden) sperren
             failed_attempts[client_ip]['lock_until'] = now + 300
             return render_template('login.html', theme=sets.get('theme', 'dark'), accent=sets.get('accent', '#27ae60'), error="5 Fehlversuche! Login für 5 Minuten gesperrt.", v=str(time.time()))
         
-        # JEDER Fehlversuch (unter 5) sperrt für 5 Sekunden
         failed_attempts[client_ip]['lock_until'] = now + 5
         remaining_attempts = 5 - failed_attempts[client_ip]['count']
         return render_template('login.html', theme=sets.get('theme', 'dark'), accent=sets.get('accent', '#27ae60'), error=f"Falsches Passwort. 5 Sekunden Wartezeit aktiv. Noch {remaining_attempts} Versuch(e) bis zur langen Sperre.", v=str(time.time()))
@@ -709,7 +714,7 @@ if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=False)
 EOF
 
-# cleanup.py 
+# --- cleanup.py ---
 cat << 'EOF' > $INSTALL_DIR/cleanup.py
 import sqlite3
 import os
@@ -754,7 +759,7 @@ for f in os.listdir(UPL):
         except: pass
 EOF
 
-# backup.sh 
+# --- backup.sh ---
 cat << 'EOF' > $INSTALL_DIR/backup.sh
 #!/bin/bash
 cd /opt/notiz-tool
@@ -765,7 +770,7 @@ if [ -f data.db ]; then
 fi
 EOF
 
-# templates/login.html
+# --- templates/login.html ---
 cat << 'EOF' > $INSTALL_DIR/templates/login.html
 <!DOCTYPE html>
 <html lang="de">
@@ -813,7 +818,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/login.html
             border-radius: 5px;
             box-sizing: border-box;
             font-size: 16px;
-            transition: border-color 0.2s;
+            transition: border-color 0.2s, opacity 0.2s;
         }
         
         .login-box input[type="password"]:focus {
@@ -834,7 +839,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/login.html
             transition: opacity 0.2s;
         }
         
-        .login-box button:hover {
+        .login-box button:hover:not(:disabled) {
             opacity: 0.9;
         }
         
@@ -859,19 +864,73 @@ cat << 'EOF' > $INSTALL_DIR/templates/login.html
         <h1>🔒 Geschützt</h1>
         
         {% if error %}
-        <div class="error-message">{{ error }}</div>
+        <div class="error-message" id="error-box">{{ error }}</div>
         {% endif %}
         
         <form method="POST" action="/login">
-            <input type="password" name="password" placeholder="Passwort eingeben..." required autofocus>
-            <button type="submit">Entsperren</button>
+            <input type="password" id="pw-input" name="password" placeholder="Passwort eingeben..." required autofocus>
+            <button type="submit" id="submit-btn">Entsperren</button>
         </form>
     </div>
+
+    <script>
+        document.addEventListener("DOMContentLoaded", function() {
+            const errorBox = document.getElementById('error-box');
+            
+            if (errorBox) {
+                const text = errorBox.innerText;
+                let lockTime = 0;
+                
+                if (text.includes("5 Sekunden Wartezeit")) {
+                    lockTime = 5;
+                } else if (text.match(/gesperrt für (\d+) Sekunde/)) {
+                    lockTime = parseInt(text.match(/gesperrt für (\d+) Sekunde/)[1]);
+                } else if (text.match(/gesperrt für (\d+) Minute/)) {
+                    lockTime = parseInt(text.match(/gesperrt für (\d+) Minute/)[1]) * 60;
+                } else if (text.includes("5 Minuten gesperrt")) {
+                    lockTime = 300;
+                }
+
+                if (lockTime > 0) {
+                    const input = document.getElementById('pw-input');
+                    const btn = document.getElementById('submit-btn');
+                    
+                    input.disabled = true;
+                    btn.disabled = true;
+                    input.style.opacity = '0.5';
+                    btn.style.opacity = '0.5';
+                    btn.style.cursor = 'not-allowed';
+                    
+                    const interval = setInterval(() => {
+                        lockTime--;
+                        
+                        if (lockTime > 60) {
+                            btn.innerText = `Gesperrt (${Math.ceil(lockTime / 60)} Min)`;
+                        } else {
+                            btn.innerText = `Gesperrt (${lockTime}s)`;
+                        }
+                        
+                        if (lockTime <= 0) {
+                            clearInterval(interval);
+                            input.disabled = false;
+                            btn.disabled = false;
+                            input.style.opacity = '1';
+                            btn.style.opacity = '1';
+                            btn.style.cursor = 'pointer';
+                            btn.innerText = "Entsperren";
+                            errorBox.style.display = 'none';
+                            input.focus();
+                        }
+                    }, 1000);
+                }
+            }
+        });
+    </script>
 </body>
 </html>
 EOF
 
-# templates/share.html
+# --- templates/share.html ---
 cat << 'EOF' > $INSTALL_DIR/templates/share.html
 <!DOCTYPE html>
 <html lang="de">
@@ -914,7 +973,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/share.html
 </html>
 EOF
 
-# templates/index.html 
+# --- templates/index.html ---
 cat << 'EOF' > $INSTALL_DIR/templates/index.html
 <!DOCTYPE html>
 <html lang="de">
@@ -1305,7 +1364,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
 </html>
 EOF
 
-# static/style.css
+# --- static/style.css ---
 cat << 'EOF' > $INSTALL_DIR/static/style.css
 :root { 
     --bg-color: #1a1a1a; 
@@ -1745,7 +1804,6 @@ body.sidebar-hidden #mobile-toggle-btn { left: 0; }
     }
 }
 
-/* --- MOBILE ANPASSUNGEN FÜR UNTERMENÜS --- */
 @media screen and (max-width: 600px) {
     .submenu-content {
         position: relative;
@@ -1760,11 +1818,11 @@ body.sidebar-hidden #mobile-toggle-btn { left: 0; }
         background: rgba(0,0,0,0.15);
     }
     .submenu-content .menu-row {
-        padding-left: 35px; /* Unterpunkte leicht einrücken */
+        padding-left: 35px;
         height: 45px;
     }
     .dropdown-content {
-        max-height: 80vh; /* Verhindert, dass das ausgeklappte Menü über den Bildschirmrand hinausgeht */
+        max-height: 80vh; 
         overflow-y: auto;
     }
 }
@@ -1851,7 +1909,6 @@ input[type="checkbox"].task-check { width: 16px; height: 16px; margin: 0; cursor
 .history-item summary:hover { background: rgba(var(--accent-rgb), 0.2); }
 .history-item[open] summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; border-bottom: 1px solid var(--border-color); }
 
-/* --- DRUCK-LAYOUT (PDF EXPORT) --- */
 @media print {
     #sidebar, .header-actions, #mobile-toggle-btn, .toolbar, #edit-mode, #breadcrumb, #view-reminder-badge, #view-reminder-ack, .dropdown, #note-menu-content, #no-selection, #add-sub-level-btn { display: none !important; }
     body, html { background: white !important; color: black !important; height: auto !important; width: auto !important; overflow: visible !important; display: block !important; position: static !important; }
@@ -1870,7 +1927,7 @@ input[type="checkbox"].task-check { width: 16px; height: 16px; margin: 0; cursor
 }
 EOF
 
-# static/script.js - UNKOMPRIMIERT
+# --- static/script.js ---
 cat << 'EOF' > $INSTALL_DIR/static/script.js
 var fullTree = { content: [], settings: {} };
 var activeId = null;
