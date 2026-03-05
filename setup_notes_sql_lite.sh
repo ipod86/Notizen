@@ -18,10 +18,6 @@ if [ -z "$BACKUP_CONFIRM" ]; then
     BACKUP_CONFIRM="y"
 fi
 
-# Pflicht-Einstellungen
-AUTOSTART_CONFIRM="y"
-CRON_CONFIRM="y"
-
 INSTALL_DIR="/opt/notiz-tool"
 SERVICE_NAME="notizen.service"
 
@@ -40,7 +36,7 @@ mkdir -p $INSTALL_DIR/backups
 python3 -m venv $INSTALL_DIR/venv
 $INSTALL_DIR/venv/bin/python3 -m pip install flask werkzeug requests
 
-# app.py (SQLite Backend)
+# --- app.py ---
 cat << 'EOF' > $INSTALL_DIR/app.py
 from flask import Flask, render_template, request, jsonify, send_from_directory, session, redirect, url_for, send_file
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -75,6 +71,8 @@ DB_FILE = 'data.db'
 UPLOAD_FOLDER = 'uploads'
 BACKUP_FOLDER = 'backups'
 
+failed_attempts = {}
+
 def get_db():
     conn = sqlite3.connect(DB_FILE, timeout=15.0)
     conn.row_factory = sqlite3.Row
@@ -105,6 +103,11 @@ def init_db():
             )
         ''')
         
+        try: conn.execute('ALTER TABLE notes ADD COLUMN is_trashed INTEGER DEFAULT 0')
+        except sqlite3.OperationalError: pass
+        try: conn.execute('ALTER TABLE notes ADD COLUMN share_id TEXT')
+        except sqlite3.OperationalError: pass
+        
         conn.execute('''
             CREATE TABLE IF NOT EXISTS note_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -114,9 +117,6 @@ def init_db():
                 saved_at REAL
             )
         ''')
-        
-        conn.execute('DROP TRIGGER IF EXISTS save_note_history')
-        conn.execute('DROP TRIGGER IF EXISTS keep_max_5_history')
         
         if not conn.execute("SELECT key FROM settings WHERE key='theme'").fetchone():
             conn.execute("INSERT INTO settings (key, value) VALUES ('theme', 'dark')")
@@ -141,43 +141,55 @@ def init_db():
             UPDATE settings SET value = strftime('%s', 'now') WHERE key = 'tree_last_modified'; 
         END;''')
 
+def send_webhook(title, time_str):
+    try:
+        with get_db() as conn:
+            en = conn.execute("SELECT value FROM settings WHERE key='webhook_enabled'").fetchone()
+            if en and en['value'] == 'true':
+                url_r = conn.execute("SELECT value FROM settings WHERE key='webhook_url'").fetchone()
+                method_r = conn.execute("SELECT value FROM settings WHERE key='webhook_method'").fetchone()
+                payload_r = conn.execute("SELECT value FROM settings WHERE key='webhook_payload'").fetchone()
+                
+                url = url_r['value'] if url_r else ''
+                method = method_r['value'] if method_r else 'GET'
+                payload = payload_r['value'] if payload_r else ''
+                
+                if url:
+                    su = urllib.parse.quote(title)
+                    st = urllib.parse.quote(time_str)
+                    final_url = url.replace('{{TITLE}}', su).replace('{{TIME}}', st)
+                    
+                    if method == 'GET':
+                        requests.get(final_url, timeout=5)
+                    else:
+                        sj = title.replace('"', '\\"').replace('\n', ' ')
+                        pd = payload.replace('{{TITLE}}', sj).replace('{{TIME}}', time_str)
+                        requests.post(final_url, data=pd.encode('utf-8'), headers={'Content-Type': 'application/json'}, timeout=5)
+    except Exception as e:
+        print(f"Webhook error: {e}")
+
+def trigger_webhook_async(title, time_str):
+    threading.Thread(target=send_webhook, args=(title, time_str), daemon=True).start()
+
 def webhook_worker():
     sent_reminders = set()
     while True:
         try:
             with get_db() as conn:
-                en = conn.execute("SELECT value FROM settings WHERE key='webhook_enabled'").fetchone()
-                if en and en['value'] == 'true':
-                    url_r = conn.execute("SELECT value FROM settings WHERE key='webhook_url'").fetchone()
-                    method_r = conn.execute("SELECT value FROM settings WHERE key='webhook_method'").fetchone()
-                    payload_r = conn.execute("SELECT value FROM settings WHERE key='webhook_payload'").fetchone()
-                    
-                    url = url_r['value'] if url_r else ''
-                    method = method_r['value'] if method_r else 'GET'
-                    payload = payload_r['value'] if payload_r else ''
-                    now = datetime.now()
-                    
-                    reminders = conn.execute("SELECT id, title, reminder FROM notes WHERE reminder IS NOT NULL AND reminder != ''").fetchall()
-                    
-                    for r in reminders:
-                        try:
-                            r_str = r['reminder'].replace('Z', '')
-                            if len(r_str) == 10: r_dt = datetime.strptime(r_str, '%Y-%m-%d')
-                            else: r_dt = datetime.fromisoformat(r_str)
-                            key = f"{r['id']}_{r_str}"
-                            
-                            if r_dt <= now and key not in sent_reminders:
-                                if url:
-                                    su = urllib.parse.quote(r['title'])
-                                    st = urllib.parse.quote(r_str)
-                                    final_url = url.replace('{{TITLE}}', su).replace('{{TIME}}', st)
-                                    if method == 'GET': requests.get(final_url, timeout=10)
-                                    else:
-                                        sj = r['title'].replace('"', '\\"').replace('\n', ' ')
-                                        pd = payload.replace('{{TITLE}}', sj).replace('{{TIME}}', r_str)
-                                        requests.post(final_url, data=pd.encode('utf-8'), headers={'Content-Type': 'application/json'}, timeout=10)
-                                sent_reminders.add(key)
-                        except: pass
+                reminders = conn.execute("SELECT id, title, reminder FROM notes WHERE reminder IS NOT NULL AND reminder != '' AND is_trashed=0").fetchall()
+                now = datetime.now()
+                
+                for r in reminders:
+                    try:
+                        r_str = r['reminder'].replace('Z', '')
+                        if len(r_str) == 10: r_dt = datetime.strptime(r_str, '%Y-%m-%d')
+                        else: r_dt = datetime.fromisoformat(r_str)
+                        key = f"{r['id']}_{r_str}"
+                        
+                        if r_dt <= now and key not in sent_reminders:
+                            send_webhook(r['title'], r_str)
+                            sent_reminders.add(key)
+                    except: pass
         except: pass
         time.sleep(30)
 
@@ -205,7 +217,7 @@ def get_settings():
 
 @app.before_request
 def require_login():
-    if request.endpoint in ['login', 'static']: return
+    if request.endpoint in ['login', 'static', 'view_shared_note', 'uploaded_file']: return
     sets = get_settings()
     if sets.get('password_enabled') and not session.get('logged_in'):
         if request.path.startswith('/api/'): return jsonify({"error": "Unauthorized"}), 401
@@ -215,11 +227,52 @@ def require_login():
 def login():
     sets = get_settings()
     if not sets.get('password_enabled'): return redirect(url_for('index'))
+    
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr).split(',')[0].strip()
+    now = time.time()
+    
+    if client_ip not in failed_attempts:
+        failed_attempts[client_ip] = {'count': 0, 'lock_until': 0, 'first_attempt': now}
+    
+    if failed_attempts[client_ip]['lock_until'] > now:
+        remaining_secs = int(failed_attempts[client_ip]['lock_until'] - now)
+        error_msg = f"Zu viele Fehlversuche. Login gesperrt für {remaining_secs} Sekunde(n)."
+        if remaining_secs > 60:
+            error_msg = f"Zu viele Fehlversuche. Login gesperrt für {int(remaining_secs/60)} Minute(n)."
+        return render_template('login.html', theme=sets.get('theme', 'dark'), accent=sets.get('accent', '#27ae60'), error=error_msg, v=str(time.time()))
+    
+    # Sperre abgelaufen?
+    if failed_attempts[client_ip]['lock_until'] != 0 and failed_attempts[client_ip]['lock_until'] <= now:
+        if failed_attempts[client_ip]['count'] >= 5:
+            # 5-Minuten-Sperre ist rum -> Alles auf null
+            failed_attempts[client_ip] = {'count': 0, 'lock_until': 0, 'first_attempt': now}
+        else:
+            # 5-Sekunden-Sperre ist rum -> Nur Sperre lösen, Counter bleibt!
+            failed_attempts[client_ip]['lock_until'] = 0
+
+    # Reset, wenn der erste Versuch > 60 Sekunden her ist und wir nicht gesperrt sind
+    if now - failed_attempts[client_ip]['first_attempt'] > 60 and failed_attempts[client_ip]['lock_until'] == 0:
+        failed_attempts[client_ip] = {'count': 0, 'lock_until': 0, 'first_attempt': now}
+
     if request.method == 'POST':
         if check_password_hash(sets.get('password_hash', ''), request.form.get('password')):
             session['logged_in'] = True
+            failed_attempts.pop(client_ip, None)
             return redirect(url_for('index'))
-        return render_template('login.html', theme=sets.get('theme', 'dark'), accent=sets.get('accent', '#27ae60'), error="Falsches Passwort", v=str(time.time()))
+        
+        failed_attempts[client_ip]['count'] += 1
+        
+        # IP im Webhook übermitteln
+        trigger_webhook_async(f"Achtung, fehlgeschlagener login Notes von IP: {client_ip}", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        
+        if failed_attempts[client_ip]['count'] >= 5:
+            failed_attempts[client_ip]['lock_until'] = now + 300
+            return render_template('login.html', theme=sets.get('theme', 'dark'), accent=sets.get('accent', '#27ae60'), error="5 Fehlversuche! Login für 5 Minuten gesperrt.", v=str(time.time()))
+        
+        failed_attempts[client_ip]['lock_until'] = now + 5
+        remaining_attempts = 5 - failed_attempts[client_ip]['count']
+        return render_template('login.html', theme=sets.get('theme', 'dark'), accent=sets.get('accent', '#27ae60'), error=f"Falsches Passwort. 5 Sekunden Wartezeit aktiv. Noch {remaining_attempts} Versuch(e) bis zur langen Sperre.", v=str(time.time()))
+        
     return render_template('login.html', theme=sets.get('theme', 'dark'), accent=sets.get('accent', '#27ae60'), v=str(time.time()))
 
 @app.route('/logout')
@@ -238,7 +291,7 @@ def index():
 @app.route('/api/tree', methods=['GET'])
 def get_tree():
     with get_db() as conn:
-        rows = conn.execute("SELECT id, parent_id, sort_order, title, reminder FROM notes ORDER BY sort_order").fetchall()
+        rows = conn.execute("SELECT id, parent_id, sort_order, title, reminder FROM notes WHERE is_trashed=0 ORDER BY sort_order").fetchall()
         sets = get_settings()
         all_ids = {r['id'] for r in rows}
         nodes_by_parent = {}
@@ -269,20 +322,20 @@ def search_notes():
     if not q: return jsonify([])
     safe_q = f'%{q}%'
     with get_db() as conn:
-        rows = conn.execute("SELECT id FROM notes WHERE title LIKE ? OR text LIKE ?", (safe_q, safe_q)).fetchall()
+        rows = conn.execute("SELECT id FROM notes WHERE is_trashed=0 AND (title LIKE ? OR text LIKE ?)", (safe_q, safe_q)).fetchall()
         return jsonify([r['id'] for r in rows])
 
 @app.route('/api/notes/<note_id>', methods=['GET'])
 def get_note(note_id):
     with get_db() as conn:
-        row = conn.execute("SELECT id, title, text, reminder FROM notes WHERE id=?", (note_id,)).fetchone()
+        row = conn.execute("SELECT id, title, text, reminder FROM notes WHERE id=? AND is_trashed=0", (note_id,)).fetchone()
         if row: return jsonify(dict(row))
         return jsonify({"error": "Not found"}), 404
 
 @app.route('/api/notes/<note_id>/backlinks', methods=['GET'])
 def get_backlinks(note_id):
     with get_db() as conn:
-        rows = conn.execute("SELECT id, title FROM notes WHERE text LIKE ?", (f'%[note:{note_id}|%',)).fetchall()
+        rows = conn.execute("SELECT id, title FROM notes WHERE is_trashed=0 AND text LIKE ?", (f'%[note:{note_id}|%',)).fetchall()
         return jsonify([dict(r) for r in rows])
 
 @app.route('/api/notes/<note_id>/history', methods=['GET'])
@@ -347,12 +400,131 @@ def update_note(note_id):
 @app.route('/api/notes/<note_id>', methods=['DELETE'])
 def delete_note(note_id):
     with get_db() as conn:
-        def delete_recursive(nid):
+        def trash_recursive(nid):
             children = conn.execute("SELECT id FROM notes WHERE parent_id=?", (nid,)).fetchall()
-            for c in children: delete_recursive(c['id'])
-            conn.execute("DELETE FROM notes WHERE id=?", (nid,))
-            conn.execute("DELETE FROM note_history WHERE note_id=?", (nid,))
-        delete_recursive(note_id)
+            for c in children: trash_recursive(c['id'])
+            conn.execute("UPDATE notes SET is_trashed=1 WHERE id=?", (nid,))
+        trash_recursive(note_id)
+    return jsonify({"status": "success"})
+
+@app.route('/api/trash', methods=['GET'])
+def get_trash():
+    with get_db() as conn:
+        rows = conn.execute("SELECT id, title, parent_id FROM notes WHERE is_trashed=1").fetchall()
+        return jsonify([dict(r) for r in rows])
+
+@app.route('/api/trash/restore/<note_id>', methods=['POST'])
+def restore_trash(note_id):
+    with get_db() as conn:
+        def do_restore(nid, check_parent=True):
+            row = conn.execute("SELECT parent_id FROM notes WHERE id=?", (nid,)).fetchone()
+            pid = row['parent_id'] if row else None
+            
+            if check_parent and pid:
+                p_row = conn.execute("SELECT is_trashed FROM notes WHERE id=?", (pid,)).fetchone()
+                if not p_row or p_row['is_trashed'] == 1:
+                    pid = None 
+                    
+            conn.execute("UPDATE notes SET is_trashed=0, parent_id=? WHERE id=?", (pid, nid))
+            
+            children = conn.execute("SELECT id FROM notes WHERE parent_id=? AND is_trashed=1", (nid,)).fetchall()
+            for c in children:
+                do_restore(c['id'], False) 
+                
+        do_restore(note_id, True)
+    return jsonify({"status": "success"})
+
+@app.route('/api/trash/empty', methods=['DELETE'])
+def empty_trash():
+    with get_db() as conn:
+        rows = conn.execute("SELECT id FROM notes WHERE is_trashed=1").fetchall()
+        for r in rows:
+            conn.execute("DELETE FROM note_history WHERE note_id=?", (r['id'],))
+        conn.execute("DELETE FROM notes WHERE is_trashed=1")
+    return jsonify({"status": "success"})
+
+@app.route('/api/shares', methods=['GET'])
+def get_shares():
+    with get_db() as conn:
+        rows = conn.execute("SELECT id, title, share_id FROM notes WHERE share_id IS NOT NULL AND is_trashed=0").fetchall()
+        return jsonify([dict(r) for r in rows])
+
+@app.route('/api/notes/<note_id>/share', methods=['POST'])
+def share_note(note_id):
+    with get_db() as conn:
+        row = conn.execute("SELECT share_id FROM notes WHERE id=?", (note_id,)).fetchone()
+        if row and row['share_id']:
+            sid = row['share_id']
+        else:
+            sid = uuid.uuid4().hex
+            conn.execute("UPDATE notes SET share_id=? WHERE id=?", (sid, note_id))
+    return jsonify({"url": request.host_url + 'share/' + sid})
+
+@app.route('/api/notes/<note_id>/unshare', methods=['POST'])
+def unshare_note(note_id):
+    with get_db() as conn:
+        conn.execute("UPDATE notes SET share_id=NULL WHERE id=?", (note_id,))
+    return jsonify({"status": "success"})
+
+@app.route('/share/<share_id>')
+def view_shared_note(share_id):
+    sets = get_settings()
+    with get_db() as conn:
+        row = conn.execute("SELECT title, text FROM notes WHERE share_id=? AND is_trashed=0", (share_id,)).fetchone()
+        if not row: return "Notiz nicht gefunden oder Freigabe wurde beendet.", 404
+        
+        text_b64 = base64.b64encode((row['text'] or '').encode('utf-8')).decode('utf-8')
+        return render_template('share.html', 
+                               title=row['title'], 
+                               text_b64=text_b64, 
+                               theme=sets.get('theme', 'dark'), 
+                               accent=sets.get('accent', '#27ae60'),
+                               v=str(time.time()))
+
+@app.route('/api/todos', methods=['GET'])
+def get_todos():
+    with get_db() as conn:
+        rows = conn.execute("SELECT id, title, text FROM notes WHERE is_trashed=0 AND (text LIKE '%- [ ]%' OR text LIKE '%- [x]%' OR text LIKE '%- [X]%')").fetchall()
+        todos = []
+        for r in rows:
+            text = r['text'] or ''
+            lines = text.split('\n')
+            t_idx = 0
+            for line in lines:
+                t = line.strip()
+                if t.startswith('- [ ]') or t.startswith('- [x]') or t.startswith('- [X]'):
+                    is_checked = not t.startswith('- [ ]')
+                    task_text = t[5:].strip()
+                    todos.append({
+                        "note_id": r['id'],
+                        "note_title": r['title'],
+                        "task_index": t_idx,
+                        "text": task_text,
+                        "checked": is_checked
+                    })
+                    t_idx += 1
+        return jsonify(todos)
+
+@app.route('/api/todos/toggle', methods=['POST'])
+def toggle_todo_global():
+    data = request.json
+    nid = data['note_id']
+    t_idx = data['task_index']
+    with get_db() as conn:
+        row = conn.execute("SELECT text FROM notes WHERE id=?", (nid,)).fetchone()
+        if not row: return jsonify({"error": "not found"}), 404
+        lines = row['text'].split('\n')
+        curr_idx = 0
+        for i, line in enumerate(lines):
+            t = line.strip()
+            if t.startswith('- [ ]') or t.startswith('- [x]') or t.startswith('- [X]'):
+                if curr_idx == t_idx:
+                    if t.startswith('- [ ]'): lines[i] = line.replace('- [ ]', '- [x]', 1)
+                    else: lines[i] = line.replace('- [x]', '- [ ]', 1).replace('- [X]', '- [ ]', 1)
+                    break
+                curr_idx += 1
+        new_text = '\n'.join(lines)
+        conn.execute("UPDATE notes SET text=? WHERE id=?", (new_text, nid))
     return jsonify({"status": "success"})
 
 @app.route('/api/settings', methods=['POST'])
@@ -374,8 +546,7 @@ def test_webhook():
     method = data.get('method', 'GET')
     payload = data.get('payload', '')
 
-    if not url:
-        return jsonify({"error": "Keine Ziel-URL angegeben."}), 400
+    if not url: return jsonify({"error": "Keine Ziel-URL angegeben."}), 400
 
     title = "TEST-ERINNERUNG"
     now_str = datetime.now().strftime('%Y-%m-%d %H:%M')
@@ -394,10 +565,7 @@ def test_webhook():
             pd = payload.replace('{{TITLE}}', sj).replace('{{TIME}}', now_str)
             r = requests.post(final_url, data=pd.encode('utf-8'), headers={'Content-Type': 'application/json'}, timeout=10)
             
-        return jsonify({
-            "status_code": r.status_code,
-            "response_text": r.text[:500] 
-        })
+        return jsonify({"status_code": r.status_code, "response_text": r.text[:500]})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -546,9 +714,7 @@ if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=False)
 EOF
 
-echo "app.run(host='0.0.0.0', port=$USER_PORT, debug=False)" >> $INSTALL_DIR/app.py
-
-# cleanup.py 
+# --- cleanup.py ---
 cat << 'EOF' > $INSTALL_DIR/cleanup.py
 import sqlite3
 import os
@@ -593,7 +759,7 @@ for f in os.listdir(UPL):
         except: pass
 EOF
 
-# backup.sh 
+# --- backup.sh ---
 cat << 'EOF' > $INSTALL_DIR/backup.sh
 #!/bin/bash
 cd /opt/notiz-tool
@@ -604,7 +770,210 @@ if [ -f data.db ]; then
 fi
 EOF
 
-# templates/index.html 
+# --- templates/login.html ---
+cat << 'EOF' > $INSTALL_DIR/templates/login.html
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - Notizen</title>
+    <link rel="stylesheet" href="/static/style.css?v={{ v }}">
+    <style>
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background: var(--bg-color);
+            margin: 0;
+            font-family: sans-serif;
+        }
+        
+        .login-box {
+            background: var(--sidebar-bg);
+            padding: 40px;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+            width: 100%;
+            max-width: 400px;
+            text-align: center;
+            box-sizing: border-box;
+        }
+        
+        .login-box h1 {
+            margin-top: 0;
+            margin-bottom: 25px;
+            color: var(--text-color);
+        }
+        
+        .login-box input[type="password"] {
+            width: 100%;
+            padding: 15px;
+            margin-bottom: 20px;
+            border: 1px solid var(--border-color);
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--text-color);
+            border-radius: 5px;
+            box-sizing: border-box;
+            font-size: 16px;
+            transition: border-color 0.2s, opacity 0.2s;
+        }
+        
+        .login-box input[type="password"]:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+        
+        .login-box button {
+            width: 100%;
+            padding: 15px;
+            background: var(--accent);
+            color: white;
+            border: none;
+            border-radius: 5px;
+            font-size: 16px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: opacity 0.2s;
+        }
+        
+        .login-box button:hover:not(:disabled) {
+            opacity: 0.9;
+        }
+        
+        .error-message {
+            color: #e74c3c;
+            background: rgba(231, 76, 60, 0.1);
+            padding: 10px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            font-weight: bold;
+            border: 1px solid rgba(231, 76, 60, 0.3);
+        }
+    </style>
+</head>
+<body data-theme="{{ theme }}">
+    <script>
+        const initialAccent = '{{ accent }}';
+        document.documentElement.style.setProperty('--accent', initialAccent); 
+    </script>
+    
+    <div class="login-box">
+        <h1>🔒 Geschützt</h1>
+        
+        {% if error %}
+        <div class="error-message" id="error-box">{{ error }}</div>
+        {% endif %}
+        
+        <form method="POST" action="/login">
+            <input type="password" id="pw-input" name="password" placeholder="Passwort eingeben..." required autofocus>
+            <button type="submit" id="submit-btn">Entsperren</button>
+        </form>
+    </div>
+
+    <script>
+        document.addEventListener("DOMContentLoaded", function() {
+            const errorBox = document.getElementById('error-box');
+            
+            if (errorBox) {
+                const text = errorBox.innerText;
+                let lockTime = 0;
+                
+                if (text.includes("5 Sekunden Wartezeit")) {
+                    lockTime = 5;
+                } else if (text.match(/gesperrt für (\d+) Sekunde/)) {
+                    lockTime = parseInt(text.match(/gesperrt für (\d+) Sekunde/)[1]);
+                } else if (text.match(/gesperrt für (\d+) Minute/)) {
+                    lockTime = parseInt(text.match(/gesperrt für (\d+) Minute/)[1]) * 60;
+                } else if (text.includes("5 Minuten gesperrt")) {
+                    lockTime = 300;
+                }
+
+                if (lockTime > 0) {
+                    const input = document.getElementById('pw-input');
+                    const btn = document.getElementById('submit-btn');
+                    
+                    input.disabled = true;
+                    btn.disabled = true;
+                    input.style.opacity = '0.5';
+                    btn.style.opacity = '0.5';
+                    btn.style.cursor = 'not-allowed';
+                    
+                    const interval = setInterval(() => {
+                        lockTime--;
+                        
+                        if (lockTime > 60) {
+                            btn.innerText = `Gesperrt (${Math.ceil(lockTime / 60)} Min)`;
+                        } else {
+                            btn.innerText = `Gesperrt (${lockTime}s)`;
+                        }
+                        
+                        if (lockTime <= 0) {
+                            clearInterval(interval);
+                            input.disabled = false;
+                            btn.disabled = false;
+                            input.style.opacity = '1';
+                            btn.style.opacity = '1';
+                            btn.style.cursor = 'pointer';
+                            btn.innerText = "Entsperren";
+                            errorBox.style.display = 'none';
+                            input.focus();
+                        }
+                    }, 1000);
+                }
+            }
+        });
+    </script>
+</body>
+</html>
+EOF
+
+# --- templates/share.html ---
+cat << 'EOF' > $INSTALL_DIR/templates/share.html
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1.0">
+    <title>{{ title }} - Geteilte Notiz</title>
+    <link rel="stylesheet" href="/static/style.css?v={{ v }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/tomorrow-night-blue.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head>
+<body data-theme="{{ theme }}">
+    <script>
+        window.isShareView = true;
+        const initialAccent = '{{ accent }}';
+        document.documentElement.style.setProperty('--accent', initialAccent); 
+        const r = parseInt(initialAccent.slice(1,3), 16), g = parseInt(initialAccent.slice(3,5), 16), b = parseInt(initialAccent.slice(5,7), 16); 
+        document.documentElement.style.setProperty('--accent-rgb', `${r}, ${g}, ${b}`);
+    </script>
+    
+    <div style="max-width: 900px; width: 100%; margin: 40px auto; padding: 30px; background: var(--sidebar-bg); border-radius: 8px; border: 1px solid var(--border-color); box-shadow: 0 10px 30px rgba(0,0,0,0.2); box-sizing: border-box; overflow-y: auto; max-height: 90vh;">
+        <div style="display:flex; justify-content:space-between; align-items:center; border-bottom: 1px dashed var(--border-color); padding-bottom: 15px; margin-bottom: 25px;">
+            <h1 style="margin:0; overflow-wrap:anywhere; word-break:break-word;">{{ title }}</h1>
+            <span style="background: var(--accent); color: white; padding: 4px 10px; border-radius: 4px; font-size: 0.8em; font-weight: bold; flex-shrink: 0;">Lesezugriff</span>
+        </div>
+        <div id="display-area"></div>
+    </div>
+    
+    <div id="lightbox" onclick="closeLightbox()">
+        <img id="lightbox-img" src="">
+    </div>
+    
+    <script src="/static/script.js?v={{ v }}"></script>
+    <script>
+        const rawB64 = "{{ text_b64 }}";
+        const rawText = decodeURIComponent(escape(window.atob(rawB64)));
+        document.getElementById('display-area').innerHTML = renderMarkdown(rawText);
+    </script>
+</body>
+</html>
+EOF
+
+# --- templates/index.html ---
 cat << 'EOF' > $INSTALL_DIR/templates/index.html
 <!DOCTYPE html>
 <html lang="de">
@@ -629,9 +998,13 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
     </script>
     
     <div class="header-actions" style="display: flex; gap: 15px; align-items: center;">
-        <div id="notification-bell" style="position: relative; cursor: pointer; font-size: 1.4em;" onclick="openNotificationsModal()">
+        <div id="todo-dashboard-btn" style="position: relative; cursor: pointer; font-size: 1.4em;" onclick="openTodoModal()" title="Meine Aufgaben">
+            ☑️
+            <span id="todo-badge" class="icon-badge">0</span>
+        </div>
+        <div id="notification-bell" style="position: relative; cursor: pointer; font-size: 1.4em;" onclick="openNotificationsModal()" title="Erinnerungen">
             🔔
-            <span id="notification-badge" style="display: none; position: absolute; top: -5px; right: -8px; background: #e74c3c; color: white; border-radius: 50%; padding: 2px 6px; font-size: 0.5em; font-weight: bold; border: 2px solid var(--bg-color);">0</span>
+            <span id="notification-badge" class="icon-badge">0</span>
         </div>
 
         <div class="dropdown">
@@ -642,11 +1015,45 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
                     <span>🎨 Akzentfarbe</span>
                     <input type="color" id="accent-color-picker" onchange="updateGlobalAccent(this.value)" onclick="event.stopPropagation()">
                 </div>
-                <div class="menu-row" onclick="exportData()"><span>📥 DB-Backup herunterladen</span></div>
-                <div class="menu-row" onclick="openRestoreModal()"><span>🔄 Backup Wiederherstellen</span></div>
-                <div class="menu-row" onclick="togglePassword()"><span id="pwd-toggle-text">🔒 Passwortschutz an</span></div>
-                <div class="menu-row" onclick="toggleWebhookModal()"><span id="webhook-toggle-text">🔔 Webhook (Push)</span></div>
-                <div class="menu-row" onclick="toggleHistorySettings()"><span>🕰️ Historien-Optionen</span></div>
+                
+                <div class="dropdown-submenu" onclick="toggleSubmenu(this, event)">
+                    <div class="menu-row">
+                        <span>📁 Allgemeine Einstellungen</span><span class="submenu-arrow">▶</span>
+                    </div>
+                    <div class="submenu-content">
+                        <div class="menu-row" onclick="handleMenuAction(event, togglePassword)"><span id="pwd-toggle-text">🔒 Passwortschutz an</span></div>
+                        <div class="menu-row" onclick="handleMenuAction(event, toggleHistorySettings)"><span>🕰️ Historien-Optionen</span></div>
+                    </div>
+                </div>
+
+                <div class="dropdown-submenu" onclick="toggleSubmenu(this, event)">
+                    <div class="menu-row">
+                        <span>🔔 Benachrichtigungen</span><span class="submenu-arrow">▶</span>
+                    </div>
+                    <div class="submenu-content">
+                        <div class="menu-row" onclick="toggleHeaderIcon('tasks', event)"><span id="toggle-tasks-text">☑️ Aufgaben-Icon: An</span></div>
+                        <div class="menu-row" onclick="toggleHeaderIcon('reminders', event)"><span id="toggle-reminders-text">⏰ Erinnerungs-Icon: An</span></div>
+                        <div class="menu-row" onclick="handleMenuAction(event, toggleWebhookModal)"><span id="webhook-toggle-text">📡 Webhook (Push)</span></div>
+                    </div>
+                </div>
+
+                <div class="dropdown-submenu" onclick="toggleSubmenu(this, event)">
+                    <div class="menu-row">
+                        <span>💾 Backup & Restore</span><span class="submenu-arrow">▶</span>
+                    </div>
+                    <div class="submenu-content">
+                        <div class="menu-row" onclick="handleMenuAction(event, exportData)"><span>📥 Backup herunterladen</span></div>
+                        <div class="menu-row" onclick="handleMenuAction(event, openRestoreModal)"><span>🔄 Wiederherstellen</span></div>
+                    </div>
+                </div>
+                
+                <div class="menu-row" onclick="openShareOverviewModal()"><span>🌍 Freigaben verwalten</span></div>
+                <div class="menu-row" onclick="openTrashModal()">
+                    <span style="display:flex; align-items:center; width:100%;">
+                        <span style="flex-grow:1;">🗑️ Papierkorb</span>
+                        <span id="trash-badge" class="menu-badge">0</span>
+                    </span>
+                </div>
                 <div class="menu-row" id="logout-btn" style="display:none; color:#e74c3c;" onclick="window.location.href='/logout'"><span>🚪 Abmelden</span></div>
             </div>
         </div>
@@ -688,8 +1095,10 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
                         <div class="dropdown">
                             <button onclick="toggleNoteMenu(event)" style="font-size:1.4em; padding:0 5px; font-weight:bold; letter-spacing: 2px;">⋮</button>
                             <div class="dropdown-content" id="note-menu-content" style="top:35px;">
-                                <div class="menu-row" onclick="enableEdit(); document.getElementById('note-menu-content').style.display='none';"><span>Bearbeiten</span></div>
-                                <div class="menu-row" id="menu-row-history" onclick="openHistoryModal(); document.getElementById('note-menu-content').style.display='none';"><span>Versionsverlauf</span></div>
+                                <div class="menu-row" onclick="handleMenuAction(event, enableEdit)"><span>Bearbeiten</span></div>
+                                <div class="menu-row" onclick="handleMenuAction(event, shareNote)"><span>Freigabe-Link</span></div>
+                                <div class="menu-row" id="menu-row-history" onclick="handleMenuAction(event, openHistoryModal)"><span>Versionsverlauf</span></div>
+                                <div class="menu-row" onclick="handleMenuAction(event, window.print)"><span>Drucken / PDF</span></div>
                             </div>
                         </div>
                     </div>
@@ -709,6 +1118,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
                     <button class="tool-btn" onclick="wrapSelection('### ','', 'Überschrift')"><i style="font-weight:bold;">H</i><span>Titel</span></button>
                     <button class="tool-btn" onclick="handleListAction('- ', 'Punkt')"><i style="font-weight:bold;">•—</i><span>Liste</span></button>
                     <button class="tool-btn" onclick="handleListAction('- [ ] ', 'Aufgabe')"><i>☑</i><span>To-Do</span></button>
+                    <button class="tool-btn" onclick="wrapSelection('\n| Spalte 1 | Spalte 2 |\n|---|---|\n| Wert 1 | Wert 2 |\n| Wert 1 | Wert 2 |\n', '', 'Tabelle')"><i>📊</i><span>Tabelle</span></button>
                     <button class="tool-btn" onclick="wrapSelection('> ','', 'Zitat')"><i style="font-family:serif;">"</i><span>Zitat</span></button>
                     <button class="tool-btn" onclick="wrapSelection('[s=Spoiler-Titel]\n','\n[/s]', 'Text hier...')"><i>👁️‍🗨️</i><span>Spoiler</span></button>
                     <button class="tool-btn" onclick="wrapSelection('\n---\n','', '')"><i>—</i><span>Linie</span></button>
@@ -740,10 +1150,53 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
                 <textarea id="node-text" placeholder="Text oder Bild hier ablegen..." style="height:60vh"></textarea>
             </div>
             
-            <button onclick="addItem(activeId)" style="margin-top:20px;border:1px solid var(--accent) !important;color:var(--accent);padding:5px 10px;border-radius:4px;">+ Unter-Ebene</button>
+            <button id="add-sub-level-btn" onclick="addItem(activeId)" style="margin-top:20px;border:1px solid var(--accent) !important;color:var(--accent);padding:5px 10px;border-radius:4px;">+ Unter-Ebene</button>
         </div>
     </div>
     
+    <div id="todo-modal" class="modal-overlay">
+        <div class="modal" style="width: 650px; max-width: 95vw;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+                <h3 style="margin:0">Meine Aufgaben</h3>
+                <label style="font-size:0.9em; cursor:pointer;">
+                    <input type="checkbox" id="todo-show-all" onchange="renderTodoList()"> Alle anzeigen
+                </label>
+            </div>
+            <div id="todo-list" style="text-align:left; max-height: 60vh; overflow-y: auto; margin-bottom: 20px;">
+                Lade...
+            </div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('todo-modal').style.display='none'">Schließen</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="share-overview-modal" class="modal-overlay">
+        <div class="modal" style="width: 550px; max-width: 95vw;">
+            <h3 style="margin-top:0">Aktive Freigaben</h3>
+            <p style="font-size:0.85em; opacity:0.7; text-align:left; margin-bottom:15px;">Hier siehst du alle Notizen, die aktuell über einen Link für Dritte erreichbar sind.</p>
+            <div id="share-list" style="text-align:left; max-height: 50vh; overflow-y: auto; margin-bottom: 20px;">
+                Lade...
+            </div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('share-overview-modal').style.display='none'">Schließen</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="trash-modal" class="modal-overlay">
+        <div class="modal" style="width: 600px; max-width: 95vw;">
+            <h3 style="margin-top:0">Papierkorb</h3>
+            <div id="trash-list" style="text-align:left; max-height: 50vh; overflow-y: auto; margin-bottom: 20px;">
+                Lade...
+            </div>
+            <div class="modal-btns" style="justify-content: space-between;">
+                <button class="btn-discard" onclick="emptyTrash()">🗑️ Alle endgültig löschen</button>
+                <button class="btn-cancel" onclick="document.getElementById('trash-modal').style.display='none'">Schließen</button>
+            </div>
+        </div>
+    </div>
+
     <div id="history-modal" class="modal-overlay">
         <div class="modal" style="width: 700px; max-width: 95vw;">
             <h3 style="margin-top:0">Versionsverlauf</h3>
@@ -911,7 +1364,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
 </html>
 EOF
 
-# static/style.css
+# --- static/style.css ---
 cat << 'EOF' > $INSTALL_DIR/static/style.css
 :root { 
     --bg-color: #1a1a1a; 
@@ -959,7 +1412,7 @@ body {
     flex-direction: column; 
     transition: margin-left 0.3s ease; 
     flex-shrink: 0; 
-    z-index: 10; 
+    z-index: 1500; 
 }
 
 body.sidebar-hidden #sidebar { 
@@ -1223,6 +1676,35 @@ input, textarea {
     opacity: 0.7; 
 }
 
+.icon-badge {
+    position: absolute;
+    top: -5px;
+    right: -8px;
+    background: #e74c3c;
+    color: white;
+    border-radius: 12px;
+    padding: 2px 5px;
+    font-size: 0.5em;
+    font-weight: bold;
+    border: 2px solid var(--bg-color);
+    display: none;
+    min-width: 12px;
+    text-align: center;
+}
+
+.menu-badge {
+    background: #e74c3c;
+    color: white;
+    border-radius: 12px;
+    padding: 2px 6px;
+    font-size: 0.8em;
+    font-weight: bold;
+    margin-left: 10px;
+    display: none;
+    min-width: 14px;
+    text-align: center;
+}
+
 .modal-overlay { 
     display: none; 
     position: fixed; 
@@ -1246,15 +1728,15 @@ input, textarea {
 }
 
 .modal-btns { display: flex; gap: 10px; justify-content: center; margin-top: 20px; }
-.btn-save { background: var(--accent) !important; color: white; padding: 8px 20px; border-radius: 5px; }
-.btn-discard { background: #e74c3c !important; color: white; padding: 8px 20px; border-radius: 5px; }
-.btn-cancel { border: 1px solid var(--border-color) !important; padding: 8px 20px; border-radius: 5px; }
+.btn-save { background: var(--accent) !important; color: white; padding: 8px 20px; border-radius: 5px; border: none; cursor: pointer; }
+.btn-discard { background: #e74c3c !important; color: white; padding: 8px 20px; border-radius: 5px; border: none; cursor: pointer; }
+.btn-cancel { border: 1px solid var(--border-color) !important; padding: 8px 20px; border-radius: 5px; background: transparent; cursor: pointer; color: inherit; }
 
 #mobile-toggle-btn { 
     position: fixed; 
     left: var(--sidebar-width); 
     top: 20px; 
-    z-index: 1010; 
+    z-index: 1510; 
     background: var(--accent) !important; 
     color: white; 
     padding: 10px !important; 
@@ -1271,17 +1753,79 @@ body.sidebar-hidden #mobile-toggle-btn { left: 0; }
     top: 40px; 
     background: var(--sidebar-bg); 
     border: 1px solid var(--border-color); 
-    min-width: 220px; 
+    min-width: 250px; 
     border-radius: 8px; 
-    overflow: hidden; 
     box-shadow: 0 4px 15px rgba(0,0,0,0.3); 
-    z-index: 1001;
+    z-index: 3000;
+}
+
+.dropdown-content > *:first-child { border-top-left-radius: 7px; border-top-right-radius: 7px; }
+.dropdown-content > *:last-child { border-bottom-left-radius: 7px; border-bottom-right-radius: 7px; }
+
+.dropdown-submenu {
+    position: relative;
+    cursor: pointer;
 }
 
 .menu-row { display: flex; align-items: center; height: 50px; border-bottom: 1px solid var(--border-color); padding: 0 15px; box-sizing: border-box; cursor: pointer; font-size: 14px; transition: background 0.2s; }
 .menu-row:last-child { border-bottom: none; }
 .menu-row:hover { background: rgba(255,255,255,0.05); }
 .menu-row span { flex-grow: 1; text-align: left; }
+
+.dropdown-submenu .menu-row { border-bottom: none; }
+.dropdown-submenu { border-bottom: 1px solid var(--border-color); }
+.dropdown-submenu:last-child { border-bottom: none; }
+
+.submenu-arrow {
+    font-size: 0.8em;
+    opacity: 0.5;
+    flex-grow: 0 !important;
+}
+
+.submenu-content {
+    display: none;
+    position: absolute;
+    right: 100%;
+    top: -1px;
+    background: var(--sidebar-bg);
+    border: 1px solid var(--border-color);
+    min-width: 230px;
+    border-radius: 8px;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+    z-index: 3001;
+}
+
+.submenu-content > *:first-child { border-top-left-radius: 7px; border-top-right-radius: 7px; }
+.submenu-content > *:last-child { border-bottom-left-radius: 7px; border-bottom-right-radius: 7px; }
+
+@media (hover: hover) {
+    .dropdown-submenu:hover > .submenu-content {
+        display: block;
+    }
+}
+
+@media screen and (max-width: 600px) {
+    .submenu-content {
+        position: relative;
+        right: auto;
+        top: auto;
+        width: 100%;
+        min-width: auto;
+        border: none;
+        border-top: 1px dashed var(--border-color);
+        box-shadow: inset 0 5px 10px rgba(0,0,0,0.15);
+        border-radius: 0 !important;
+        background: rgba(0,0,0,0.15);
+    }
+    .submenu-content .menu-row {
+        padding-left: 35px;
+        height: 45px;
+    }
+    .dropdown-content {
+        max-height: 80vh; 
+        overflow-y: auto;
+    }
+}
 
 #accent-color-picker { width: 40px; height: 25px; border: none; background: none; cursor: pointer; padding: 0; }
 
@@ -1348,6 +1892,10 @@ input[type="checkbox"].task-check { width: 16px; height: 16px; margin: 0; cursor
 .reminder-icon { color: #e74c3c; margin-left: 6px; font-size: 0.9em; animation: pulse 2s infinite; }
 @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1; } }
 
+.md-table { width: 100%; border-collapse: collapse; margin: 15px 0; background: rgba(0,0,0,0.1); border-radius: 5px; overflow: hidden; box-shadow: 0 0 0 1px var(--border-color); }
+.md-table th, .md-table td { padding: 8px 12px; border: 1px solid var(--border-color); }
+.md-table th { background: rgba(var(--accent-rgb), 0.2); font-weight: bold; text-align: left; }
+
 #sketch-modal .modal { width: 1000px; max-width: 95vw; max-height: 95vh; display: flex; flex-direction: column; padding: 15px; box-sizing: border-box; }
 #sketch-toolbar { display: flex; gap: 15px; margin-bottom: 10px; align-items: center; flex-wrap: wrap; background: rgba(255,255,255,0.05); padding: 10px; border-radius: 8px; flex-shrink: 0; max-height: 40vh; overflow-y: auto; }
 #canvas-wrapper { display: flex; justify-content: center; align-items: center; width: 100%; }
@@ -1360,9 +1908,26 @@ input[type="checkbox"].task-check { width: 16px; height: 16px; margin: 0; cursor
 .history-item summary { cursor: pointer; font-weight: bold; padding: 10px; background: rgba(255,255,255,0.05); border-radius: 5px; transition: background 0.2s; }
 .history-item summary:hover { background: rgba(var(--accent-rgb), 0.2); }
 .history-item[open] summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; border-bottom: 1px solid var(--border-color); }
+
+@media print {
+    #sidebar, .header-actions, #mobile-toggle-btn, .toolbar, #edit-mode, #breadcrumb, #view-reminder-badge, #view-reminder-ack, .dropdown, #note-menu-content, #no-selection, #add-sub-level-btn { display: none !important; }
+    body, html { background: white !important; color: black !important; height: auto !important; width: auto !important; overflow: visible !important; display: block !important; position: static !important; }
+    #editor { padding: 0 !important; margin: 0 !important; height: auto !important; width: auto !important; overflow: visible !important; display: block !important; position: static !important; }
+    img, pre, blockquote, .code-container, .task-list-item, .spoiler, .md-table { page-break-inside: avoid; break-inside: avoid; }
+    h1, h2, h3, h4, h5, h6 { page-break-after: avoid; break-after: avoid; }
+    p, li, div { orphans: 3; widows: 3; }
+    pre code { white-space: pre-wrap !important; word-wrap: break-word !important; }
+    .code-container { background: #f8f9fa !important; color: #000 !important; border: 1px solid #ccc !important; }
+    .copy-badge { display: none !important; }
+    .note-link { border: none !important; background: none !important; text-decoration: underline !important; color: black !important; }
+    .spoiler-content { display: block !important; }
+    details.spoiler { border: 1px solid #ccc; }
+    .md-table th, .md-table td { border-color: #aaa !important; color: #000 !important; }
+    .md-table th { background: #eee !important; }
+}
 EOF
 
-# static/script.js - UNKOMPRIMIERT
+# --- static/script.js ---
 cat << 'EOF' > $INSTALL_DIR/static/script.js
 var fullTree = { content: [], settings: {} };
 var activeId = null;
@@ -1372,6 +1937,8 @@ var sortables = [];
 var currentTreeLastMod = null;
 var searchTimeout = null;
 
+var currentTodosList = [];
+
 let myClientId = sessionStorage.getItem('clientId');
 if (!myClientId) {
     myClientId = 'client_' + Math.random().toString(36).substring(2, 10);
@@ -1380,6 +1947,59 @@ if (!myClientId) {
 
 let lockInterval = null;
 let currentLockedNote = null;
+
+function fallbackCopyTextToClipboard(text) {
+    var textArea = document.createElement("textarea");
+    textArea.value = text;
+    textArea.style.top = "0";
+    textArea.style.left = "0";
+    textArea.style.position = "fixed";
+    document.body.appendChild(textArea);
+    textArea.focus();
+    textArea.select();
+    try {
+        document.execCommand('copy');
+    } catch (err) {
+        console.error('Fallback: Oops, unable to copy', err);
+    }
+    document.body.removeChild(textArea);
+}
+
+function copyText(text) {
+    if (!navigator.clipboard) {
+        fallbackCopyTextToClipboard(text);
+        return;
+    }
+    navigator.clipboard.writeText(text).catch(function(err) {
+        fallbackCopyTextToClipboard(text);
+    });
+}
+
+function closeAllMenus() {
+    const m = document.getElementById('dropdown-menu');
+    if (m) m.style.display = 'none';
+    const m2 = document.getElementById('note-menu-content');
+    if (m2) m2.style.display = 'none';
+    document.querySelectorAll('.submenu-content').forEach(s => s.style.display = 'none');
+}
+
+function handleMenuAction(e, actionFunc) {
+    if (e) e.stopPropagation();
+    closeAllMenus();
+    actionFunc();
+}
+
+function toggleSubmenu(el, e) {
+    if (e) e.stopPropagation();
+    const sub = el.querySelector('.submenu-content');
+    const isVisible = sub && sub.style.display === 'block';
+
+    document.querySelectorAll('.submenu-content').forEach(s => s.style.display = 'none');
+
+    if (!isVisible && sub) {
+        sub.style.display = 'block';
+    }
+}
 
 async function acquireLock(noteId, override = false) {
     try {
@@ -1457,6 +2077,35 @@ window.addEventListener('beforeunload', () => {
         navigator.sendBeacon(`/api/lock/${currentLockedNote}`, blob);
     }
 });
+
+async function updateBadges() {
+    try {
+        const resT = await fetch('/api/todos');
+        if (resT.ok) {
+            currentTodosList = await resT.json();
+            const openTasks = currentTodosList.filter(t => !t.checked).length;
+            const badge = document.getElementById('todo-badge');
+            if (openTasks > 0) {
+                badge.innerText = openTasks;
+                badge.style.display = 'inline-block';
+            } else {
+                badge.style.display = 'none';
+            }
+        }
+        
+        const resTr = await fetch('/api/trash');
+        if (resTr.ok) {
+            const trashData = await resTr.json();
+            const badge = document.getElementById('trash-badge');
+            if (trashData.length > 0) {
+                badge.innerText = trashData.length;
+                badge.style.display = 'inline-block';
+            } else {
+                badge.style.display = 'none';
+            }
+        }
+    } catch(e) {}
+}
 
 function updateNotificationBadge() {
     let overdueNotes = [];
@@ -1607,6 +2256,8 @@ async function checkAndReloadData() {
                 }
             }
         }
+        
+        await updateBadges();
 
         if (activeId) {
             const editModeEl = document.getElementById('edit-mode');
@@ -1799,7 +2450,7 @@ function renderMarkdown(text) {
     html = html.replace(/\[sketch:([a-zA-Z0-9]+)\]/g, '<img src="/uploads/sketch_$1.png?v='+Date.now()+'" class="note-img sketch-img" title="Skizze bearbeiten" onclick="openSketch(\'$1\')">');
     html = html.replace(/\[file:([a-zA-Z0-9.\-]+)\|([^\]]+)\]/g, '<a href="/uploads/$1" target="_blank" class="note-link">📎 $2</a>');
     
-    html = html.replace(/\[note:([a-zA-Z0-9]+)\|([^\]]+)\]/g, (match, id, title) => '<a href="#" onclick="selectNode(\'' + id + '\'); return false;" class="note-link">@ ' + title + '</a>');
+    html = html.replace(/\[note:([a-zA-Z0-9]+)\|([^\]]+)\]/g, (match, id, title) => `<a href="#" onclick="if(!window.isShareView){selectNode('${id}'); return false;}" class="note-link">@ ${title}</a>`);
     html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" style="color:var(--accent); text-decoration:underline;">$1</a>');
     html = html.replace(/\[s=(.*?)\]\n?([\s\S]*?)\n?\[\/s\]/g, '<details class="spoiler"><summary>$1</summary><div class="spoiler-content">$2</div></details>');
 
@@ -1811,6 +2462,23 @@ function renderMarkdown(text) {
         html = html.replace(/_(.*?)_/g, '<i>$1</i>'); 
         html = html.replace(/~~(.*?)~~/g, '<s>$1</s>'); 
     } 
+    
+    let tableRegex = /((?:\|[^\n]+\|\n?)+)/g;
+    html = html.replace(tableRegex, function(match) {
+        let rows = match.trim().split('\n');
+        let table = '<table class="md-table">';
+        let isHeader = true;
+        for(let r of rows) {
+            r = r.trim();
+            if(r.match(/^\|[-:| ]+\|$/)) { isHeader = false; continue; }
+            let cells = r.split('|').map(c=>c.trim());
+            cells.shift(); cells.pop();
+            if (cells.length === 0) continue;
+            table += '<tr>' + cells.map(c => isHeader ? `<th>${c}</th>` : `<td>${c}</td>`).join('') + '</tr>';
+        }
+        table += '</table>';
+        return table;
+    });
     
     let parts = html.split("'''"); 
     let res = ''; 
@@ -1831,6 +2499,8 @@ function renderMarkdown(text) {
         } else { 
             res += parts[i].split('\n').map(line => {
                 let t = line.trim(); 
+                if (t.startsWith('<table') || t.startsWith('</table') || t.startsWith('<tr') || t.startsWith('</tr') || t.startsWith('<td') || t.startsWith('</td') || t.startsWith('<th') || t.startsWith('</th')) return line;
+                
                 if (t === '') return '<br>'; 
                 if (t === '---') return '<hr>';
                 if (t.startsWith('### ')) return '<h3>' + line.substring(4) + '</h3>'; 
@@ -1841,11 +2511,13 @@ function renderMarkdown(text) {
                 
                 if (t.startsWith('- [ ] ')) { 
                     let idx = window.taskIndexCounter++; 
-                    return '<div class="task-list-item"><input type="checkbox" class="task-check" onclick="toggleTask(' + idx + ', false)"> <span>' + line.substring(line.indexOf('- [ ] ') + 6) + '</span></div>'; 
+                    let dis = window.isShareView ? 'disabled' : `onclick="toggleTask(${idx}, false)"`;
+                    return '<div class="task-list-item"><input type="checkbox" class="task-check" ' + dis + '> <span>' + line.substring(line.indexOf('- [ ] ') + 6) + '</span></div>'; 
                 }
                 if (t.startsWith('- [x] ') || t.startsWith('- [X] ')) { 
                     let idx = window.taskIndexCounter++; 
-                    return '<div class="task-list-item"><input type="checkbox" class="task-check" checked onclick="toggleTask(' + idx + ', true)"> <span><del>' + line.substring(line.indexOf('] ') + 2) + '</del></span></div>'; 
+                    let dis = window.isShareView ? 'disabled' : `onclick="toggleTask(${idx}, true)"`;
+                    return '<div class="task-list-item"><input type="checkbox" class="task-check" checked ' + dis + '> <span><del>' + line.substring(line.indexOf('] ') + 2) + '</del></span></div>'; 
                 }
                 
                 if (t.startsWith('- ')) return '<div style="margin-left: 20px;">• ' + line.substring(line.indexOf('- ')+2) + '</div>'; 
@@ -1989,6 +2661,7 @@ async function rebuildDataFromDOM() {
 }
 
 window.toggleTask = async function(targetIdx, currentlyChecked) {
+    if (window.isShareView) return;
     if (!await acquireLock(activeId)) { 
         showModal("Gesperrt", "Checkbox kann nicht geändert werden.", [{ label: "OK", class: "btn-cancel", action: () => {} }]); 
         renderDisplayArea(); 
@@ -2029,7 +2702,8 @@ window.toggleTask = async function(targetIdx, currentlyChecked) {
     } catch(e) { 
         console.error(e); 
     }
-    await releaseLock(); 
+    await releaseLock();
+    updateBadges(); 
     renderDisplayArea();
 };
 
@@ -2261,6 +2935,228 @@ async function clearReminder() {
     } 
 }
 
+async function shareNote() {
+    if (!activeId) return;
+    try {
+        const res = await fetch(`/api/notes/${activeId}/share`, {method: 'POST'});
+        const data = await res.json();
+        if (data.url) {
+            showModal("Lese-Link generiert", `Dein Link:\n\n${data.url}\n\nJeder mit diesem Link kann die Notiz lesen.`, [
+                { label: "Kopieren", class: "btn-save", action: () => { copyText(data.url); } },
+                { label: "Freigabe aufheben", class: "btn-discard", action: async () => { await fetch(`/api/notes/${activeId}/unshare`, {method: 'POST'}); } },
+                { label: "Schließen", class: "btn-cancel", action: () => {} }
+            ]);
+        }
+    } catch(e) { console.error(e); }
+}
+
+async function openShareOverviewModal() {
+    document.getElementById('share-overview-modal').style.display = 'flex';
+    const list = document.getElementById('share-list');
+    list.innerHTML = 'Lade...';
+    try {
+        const res = await fetch('/api/shares');
+        const data = await res.json();
+        
+        if(data.length === 0) { 
+            list.innerHTML = '<p style="opacity:0.5;text-align:center;">Es gibt aktuell keine aktiven Freigabe-Links.</p>'; 
+            return; 
+        }
+        
+        list.innerHTML = '';
+        data.forEach(s => {
+            const d = document.createElement('div');
+            d.style = "display:flex; justify-content:space-between; align-items:center; padding:10px; border-bottom:1px solid var(--border-color);";
+            
+            const link = document.createElement('a');
+            link.href = '/share/' + s.share_id;
+            link.target = '_blank';
+            link.style.color = 'var(--accent)';
+            link.style.textDecoration = 'none';
+            link.innerText = s.title || 'Unbenannt';
+            
+            const btn = document.createElement('button');
+            btn.innerText = "Freigabe aufheben"; 
+            btn.className = "btn-discard"; 
+            btn.style.padding = "5px 10px";
+            btn.onclick = async () => {
+                await fetch(`/api/notes/${s.id}/unshare`, {method:'POST'});
+                openShareOverviewModal(); 
+            };
+            
+            d.appendChild(link); 
+            d.appendChild(btn); 
+            list.appendChild(d);
+        });
+    } catch(e) {
+        list.innerHTML = 'Fehler beim Laden.';
+    }
+}
+
+async function openTodoModal() {
+    document.getElementById('todo-modal').style.display = 'flex';
+    const list = document.getElementById('todo-list');
+    list.innerHTML = 'Lade Aufgaben...';
+    
+    try {
+        const res = await fetch('/api/todos');
+        currentTodosList = await res.json();
+        renderTodoList();
+    } catch(e) {
+        list.innerHTML = 'Fehler beim Laden.';
+    }
+}
+
+function renderTodoList() {
+    const list = document.getElementById('todo-list');
+    const showAll = document.getElementById('todo-show-all').checked;
+    list.innerHTML = '';
+    
+    const filteredTodos = showAll ? currentTodosList : currentTodosList.filter(t => !t.checked);
+    
+    if(filteredTodos.length === 0) { 
+        list.innerHTML = '<p style="opacity:0.5;text-align:center;">' + (showAll ? 'Keine Aufgaben gefunden.' : 'Glückwunsch! Alle Aufgaben sind erledigt.') + '</p>'; 
+        return; 
+    }
+    
+    filteredTodos.forEach(t => {
+        const d = document.createElement('div');
+        d.style = "display:flex; align-items:flex-start; gap:10px; padding:10px; border-bottom:1px solid var(--border-color);";
+        
+        const cb = document.createElement('input');
+        cb.type = 'checkbox'; 
+        cb.className = 'task-check'; 
+        cb.checked = t.checked;
+        cb.onclick = async (e) => {
+            e.preventDefault();
+            await fetch('/api/todos/toggle', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({note_id: t.note_id, task_index: t.task_index})
+            });
+            updateBadges(); 
+            if (activeId === t.note_id && activeNoteData && document.getElementById('edit-mode').style.display !== 'block') {
+                activeNoteData = await fetchNoteData(activeId);
+                renderDisplayArea();
+            }
+            openTodoModal(); 
+        };
+        
+        const info = document.createElement('div');
+        const txt = document.createElement('div');
+        if(t.checked) {
+            txt.innerHTML = `<s>${t.text}</s>`;
+            txt.style.opacity = '0.5';
+        } else {
+            txt.innerText = t.text;
+        }
+        
+        const link = document.createElement('a');
+        link.href = "#"; 
+        link.style = "font-size:0.8em; color:var(--accent); text-decoration:none;";
+        link.innerText = "Aus Notiz: " + t.note_title;
+        link.onclick = (e) => { 
+            e.preventDefault(); 
+            document.getElementById('todo-modal').style.display = 'none'; 
+            selectNode(t.note_id); 
+        };
+        
+        info.appendChild(txt); 
+        info.appendChild(link);
+        d.appendChild(cb); 
+        d.appendChild(info);
+        list.appendChild(d);
+    });
+}
+
+async function openTrashModal() {
+    document.getElementById('trash-modal').style.display = 'flex';
+    const list = document.getElementById('trash-list');
+    list.innerHTML = 'Lade Papierkorb...';
+    
+    try {
+        const res = await fetch('/api/trash');
+        let data = await res.json();
+        
+        if(data.length === 0) { 
+            list.innerHTML = '<p style="opacity:0.5;text-align:center;">Der Papierkorb ist leer.</p>'; 
+            return; 
+        }
+
+        const trashIds = new Set(data.map(d => d.id));
+        const roots = [];
+        const childrenMap = {};
+
+        data.forEach(n => {
+            if (n.parent_id && trashIds.has(n.parent_id)) {
+                if (!childrenMap[n.parent_id]) childrenMap[n.parent_id] = [];
+                childrenMap[n.parent_id].push(n);
+            } else {
+                roots.push(n);
+            }
+        });
+
+        list.innerHTML = '';
+
+        function renderNode(node, level) {
+            const d = document.createElement('div');
+            d.style = `display:flex; justify-content:space-between; align-items:center; padding:8px 10px; border-bottom:1px solid var(--border-color); margin-left: ${level * 20}px;`;
+            if (level > 0) d.style.borderLeft = '2px solid var(--border-color)';
+
+            const info = document.createElement('div');
+            info.style.display = 'flex';
+            info.style.alignItems = 'center';
+            info.style.gap = '8px';
+
+            const icon = document.createElement('span');
+            icon.innerText = childrenMap[node.id] ? '📁' : '📄';
+
+            const titleSpan = document.createElement('div');
+            titleSpan.innerText = node.title || 'Unbenannt';
+            titleSpan.style.fontWeight = level === 0 ? 'bold' : 'normal';
+
+            info.appendChild(icon);
+            info.appendChild(titleSpan);
+
+            const btn = document.createElement('button');
+            btn.innerText = "Wiederherstellen"; 
+            btn.className = "btn-save"; 
+            btn.style.padding = "4px 8px";
+            btn.style.fontSize = "0.85em";
+            btn.onclick = async () => {
+                await fetch(`/api/trash/restore/${node.id}`, {method:'POST'});
+                updateBadges(); 
+                openTrashModal();
+                checkAndReloadData();
+            };
+            
+            d.appendChild(info); 
+            d.appendChild(btn); 
+            list.appendChild(d);
+
+            if (childrenMap[node.id]) {
+                childrenMap[node.id].forEach(child => renderNode(child, level + 1));
+            }
+        }
+
+        roots.forEach(r => renderNode(r, 0));
+        
+    } catch(e) {
+        list.innerHTML = 'Fehler beim Laden.';
+    }
+}
+
+function emptyTrash() {
+    showModal("Papierkorb leeren", "Alle gelöschten Notizen wirklich endgültig entfernen?\n\nDas kann nicht rückgängig gemacht werden!", [
+        { label: "Ja, endgültig löschen", class: "btn-discard", action: async () => { 
+            await fetch('/api/trash/empty', {method: 'DELETE'});
+            updateBadges(); 
+            openTrashModal();
+            checkAndReloadData();
+        }},
+        { label: "Abbrechen", class: "btn-cancel", action: () => {} }
+    ]);
+}
+
 async function openHistoryModal() {
     if (!activeId) return;
     
@@ -2445,6 +3341,22 @@ async function saveWebhook() {
     fullTree.settings.webhook_enabled = payload.webhook_enabled; 
     document.getElementById('webhook-modal').style.display = 'none'; 
     updateMenuUI();
+}
+
+async function toggleHeaderIcon(type, event) {
+    if (event) event.stopPropagation();
+    const key = type === 'tasks' ? 'icon_tasks_enabled' : 'icon_reminders_enabled';
+    const currentVal = fullTree.settings[key] !== false && fullTree.settings[key] !== 'false';
+    const newVal = !currentVal;
+
+    fullTree.settings[key] = newVal;
+    updateMenuUI();
+
+    await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ [key]: newVal })
+    });
 }
 
 function showModal(title, text, buttons, showInput=false) { 
@@ -2657,26 +3569,23 @@ function copyToClipboard(btn) {
 }
 
 function toggleSettings(e) { 
-    e.stopPropagation(); 
-    const m = document.getElementById('dropdown-menu'); 
-    m.style.display = m.style.display === 'block' ? 'none' : 'block'; 
-    const m2 = document.getElementById('note-menu-content'); 
-    if (m2) m2.style.display = 'none';
+    if (e) e.stopPropagation(); 
+    const m = document.getElementById('dropdown-menu');
+    const isVisible = m.style.display === 'block';
+    closeAllMenus();
+    if (!isVisible) m.style.display = 'block';
 }
 
 function toggleNoteMenu(e) {
-    e.stopPropagation();
+    if (e) e.stopPropagation();
     const m = document.getElementById('note-menu-content');
-    m.style.display = m.style.display === 'block' ? 'none' : 'block';
-    const mSettings = document.getElementById('dropdown-menu');
-    if (mSettings) mSettings.style.display = 'none';
+    const isVisible = m.style.display === 'block';
+    closeAllMenus();
+    if (!isVisible) m.style.display = 'block';
 }
 
 document.addEventListener('click', () => { 
-    const m = document.getElementById('dropdown-menu'); 
-    if (m) m.style.display = 'none'; 
-    const m2 = document.getElementById('note-menu-content');
-    if (m2) m2.style.display = 'none';
+    closeAllMenus();
 });
 
 function exportData() { 
@@ -2974,7 +3883,21 @@ function updateMenuUI() {
     const whToggleText = document.getElementById('webhook-toggle-text'); 
     if(pwdBtn) pwdBtn.innerText = fullTree.settings.password_enabled ? '🔓 Passwortschutz aus' : '🔒 Passwortschutz an'; 
     if(logoutBtn) logoutBtn.style.display = fullTree.settings.password_enabled ? 'flex' : 'none'; 
-    if(whToggleText) whToggleText.innerText = fullTree.settings.webhook_enabled ? '🔔 Webhook (Aktiviert)' : '🔕 Webhook (Deaktiviert)'; 
+    if(whToggleText) whToggleText.innerText = fullTree.settings.webhook_enabled ? '📡 Webhook (Aktiviert)' : '📡 Webhook (Push)'; 
+
+    const taskToggleText = document.getElementById('toggle-tasks-text');
+    const remToggleText = document.getElementById('toggle-reminders-text');
+    
+    const tasksEnabled = fullTree.settings.icon_tasks_enabled !== false && fullTree.settings.icon_tasks_enabled !== 'false';
+    const remEnabled = fullTree.settings.icon_reminders_enabled !== false && fullTree.settings.icon_reminders_enabled !== 'false';
+
+    if(taskToggleText) taskToggleText.innerText = tasksEnabled ? '☑️ Aufgaben-Icon: An' : '☑️ Aufgaben-Icon: Aus';
+    if(remToggleText) remToggleText.innerText = remEnabled ? '⏰ Erinnerungs-Icon: An' : '⏰ Erinnerungs-Icon: Aus';
+
+    const btnTask = document.getElementById('todo-dashboard-btn');
+    const btnRem = document.getElementById('notification-bell');
+    if(btnTask) btnTask.style.display = tasksEnabled ? '' : 'none';
+    if(btnRem) btnRem.style.display = remEnabled ? '' : 'none';
 }
 
 async function addItem(parentId) { 
@@ -2994,6 +3917,7 @@ function deleteItem(id) {
             if (activeId === id) { activeId = null; document.getElementById('edit-area').style.display = 'none'; } 
             const el = document.querySelector(`.tree-item-container[data-id="${id}"]`);
             if (el) el.remove(); 
+            updateBadges(); 
             await checkAndReloadData(); 
         } }, 
         { label: "Abbruch", class: "btn-cancel", action: () => {} } 
@@ -3076,6 +4000,9 @@ document.addEventListener('keydown', function(e) {
         else if (document.getElementById('webhook-modal') && document.getElementById('webhook-modal').style.display === 'flex') document.getElementById('webhook-modal').style.display = 'none';
         else if (document.getElementById('restore-modal') && document.getElementById('restore-modal').style.display === 'flex') document.getElementById('restore-modal').style.display = 'none';
         else if (document.getElementById('notifications-modal') && document.getElementById('notifications-modal').style.display === 'flex') document.getElementById('notifications-modal').style.display = 'none';
+        else if (document.getElementById('todo-modal') && document.getElementById('todo-modal').style.display === 'flex') document.getElementById('todo-modal').style.display = 'none';
+        else if (document.getElementById('trash-modal') && document.getElementById('trash-modal').style.display === 'flex') document.getElementById('trash-modal').style.display = 'none';
+        else if (document.getElementById('share-overview-modal') && document.getElementById('share-overview-modal').style.display === 'flex') document.getElementById('share-overview-modal').style.display = 'none';
         else if (document.getElementById('edit-mode') && document.getElementById('edit-mode').style.display === 'block') cancelEdit();
     }
 });
@@ -3222,7 +4149,27 @@ document.addEventListener('touchend', e => {
     }
 }, {passive: true});
 
+let initiallyClosedSpoilers = [];
+
+window.addEventListener('beforeprint', () => {
+    document.querySelectorAll('details.spoiler').forEach(s => {
+        if (!s.hasAttribute('open')) {
+            initiallyClosedSpoilers.push(s);
+            s.setAttribute('open', '');
+        }
+    });
+});
+
+window.addEventListener('afterprint', () => {
+    initiallyClosedSpoilers.forEach(s => s.removeAttribute('open'));
+    initiallyClosedSpoilers = [];
+});
+
 window.onload = () => { 
+    if (window.isShareView) {
+        if (window.hljs) hljs.highlightAll();
+        return;
+    }
     loadData(); 
     initDragAndDrop(); 
     initMentionSystem(); 
