@@ -71,6 +71,8 @@ DB_FILE = 'data.db'
 UPLOAD_FOLDER = 'uploads'
 BACKUP_FOLDER = 'backups'
 
+failed_attempts = {}
+
 def get_db():
     conn = sqlite3.connect(DB_FILE, timeout=15.0)
     conn.row_factory = sqlite3.Row
@@ -139,43 +141,55 @@ def init_db():
             UPDATE settings SET value = strftime('%s', 'now') WHERE key = 'tree_last_modified'; 
         END;''')
 
+def send_webhook(title, time_str):
+    try:
+        with get_db() as conn:
+            en = conn.execute("SELECT value FROM settings WHERE key='webhook_enabled'").fetchone()
+            if en and en['value'] == 'true':
+                url_r = conn.execute("SELECT value FROM settings WHERE key='webhook_url'").fetchone()
+                method_r = conn.execute("SELECT value FROM settings WHERE key='webhook_method'").fetchone()
+                payload_r = conn.execute("SELECT value FROM settings WHERE key='webhook_payload'").fetchone()
+                
+                url = url_r['value'] if url_r else ''
+                method = method_r['value'] if method_r else 'GET'
+                payload = payload_r['value'] if payload_r else ''
+                
+                if url:
+                    su = urllib.parse.quote(title)
+                    st = urllib.parse.quote(time_str)
+                    final_url = url.replace('{{TITLE}}', su).replace('{{TIME}}', st)
+                    
+                    if method == 'GET':
+                        requests.get(final_url, timeout=5)
+                    else:
+                        sj = title.replace('"', '\\"').replace('\n', ' ')
+                        pd = payload.replace('{{TITLE}}', sj).replace('{{TIME}}', time_str)
+                        requests.post(final_url, data=pd.encode('utf-8'), headers={'Content-Type': 'application/json'}, timeout=5)
+    except Exception as e:
+        print(f"Webhook error: {e}")
+
+def trigger_webhook_async(title, time_str):
+    threading.Thread(target=send_webhook, args=(title, time_str), daemon=True).start()
+
 def webhook_worker():
     sent_reminders = set()
     while True:
         try:
             with get_db() as conn:
-                en = conn.execute("SELECT value FROM settings WHERE key='webhook_enabled'").fetchone()
-                if en and en['value'] == 'true':
-                    url_r = conn.execute("SELECT value FROM settings WHERE key='webhook_url'").fetchone()
-                    method_r = conn.execute("SELECT value FROM settings WHERE key='webhook_method'").fetchone()
-                    payload_r = conn.execute("SELECT value FROM settings WHERE key='webhook_payload'").fetchone()
-                    
-                    url = url_r['value'] if url_r else ''
-                    method = method_r['value'] if method_r else 'GET'
-                    payload = payload_r['value'] if payload_r else ''
-                    now = datetime.now()
-                    
-                    reminders = conn.execute("SELECT id, title, reminder FROM notes WHERE reminder IS NOT NULL AND reminder != '' AND is_trashed=0").fetchall()
-                    
-                    for r in reminders:
-                        try:
-                            r_str = r['reminder'].replace('Z', '')
-                            if len(r_str) == 10: r_dt = datetime.strptime(r_str, '%Y-%m-%d')
-                            else: r_dt = datetime.fromisoformat(r_str)
-                            key = f"{r['id']}_{r_str}"
-                            
-                            if r_dt <= now and key not in sent_reminders:
-                                if url:
-                                    su = urllib.parse.quote(r['title'])
-                                    st = urllib.parse.quote(r_str)
-                                    final_url = url.replace('{{TITLE}}', su).replace('{{TIME}}', st)
-                                    if method == 'GET': requests.get(final_url, timeout=10)
-                                    else:
-                                        sj = r['title'].replace('"', '\\"').replace('\n', ' ')
-                                        pd = payload.replace('{{TITLE}}', sj).replace('{{TIME}}', r_str)
-                                        requests.post(final_url, data=pd.encode('utf-8'), headers={'Content-Type': 'application/json'}, timeout=10)
-                                sent_reminders.add(key)
-                        except: pass
+                reminders = conn.execute("SELECT id, title, reminder FROM notes WHERE reminder IS NOT NULL AND reminder != '' AND is_trashed=0").fetchall()
+                now = datetime.now()
+                
+                for r in reminders:
+                    try:
+                        r_str = r['reminder'].replace('Z', '')
+                        if len(r_str) == 10: r_dt = datetime.strptime(r_str, '%Y-%m-%d')
+                        else: r_dt = datetime.fromisoformat(r_str)
+                        key = f"{r['id']}_{r_str}"
+                        
+                        if r_dt <= now and key not in sent_reminders:
+                            send_webhook(r['title'], r_str)
+                            sent_reminders.add(key)
+                    except: pass
         except: pass
         time.sleep(30)
 
@@ -213,11 +227,47 @@ def require_login():
 def login():
     sets = get_settings()
     if not sets.get('password_enabled'): return redirect(url_for('index'))
+    
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr).split(',')[0].strip()
+    now = time.time()
+    
+    if client_ip in failed_attempts:
+        if failed_attempts[client_ip]['lock_until'] > now:
+            remaining_secs = int(failed_attempts[client_ip]['lock_until'] - now)
+            error_msg = f"Zu viele Fehlversuche. Login gesperrt für {remaining_secs} Sekunde(n)."
+            if remaining_secs > 60:
+                error_msg = f"Zu viele Fehlversuche. Login gesperrt für {int(remaining_secs/60)} Minute(n)."
+            return render_template('login.html', theme=sets.get('theme', 'dark'), accent=sets.get('accent', '#27ae60'), error=error_msg, v=str(time.time()))
+        elif failed_attempts[client_ip]['lock_until'] != 0:
+            failed_attempts[client_ip] = {'count': 0, 'lock_until': 0, 'first_attempt': 0}
+
     if request.method == 'POST':
+        if client_ip not in failed_attempts:
+            failed_attempts[client_ip] = {'count': 0, 'lock_until': 0, 'first_attempt': now}
+        elif now - failed_attempts[client_ip]['first_attempt'] > 60 and failed_attempts[client_ip]['lock_until'] == 0:
+            failed_attempts[client_ip] = {'count': 0, 'lock_until': 0, 'first_attempt': now}
+
         if check_password_hash(sets.get('password_hash', ''), request.form.get('password')):
             session['logged_in'] = True
+            failed_attempts.pop(client_ip, None)
             return redirect(url_for('index'))
-        return render_template('login.html', theme=sets.get('theme', 'dark'), accent=sets.get('accent', '#27ae60'), error="Falsches Passwort", v=str(time.time()))
+        
+        # Falsches Passwort eingegeben
+        failed_attempts[client_ip]['count'] += 1
+        
+        # Webhook asynchron auslösen (blockiert nicht den Login-Vorgang)
+        trigger_webhook_async("Achtung, fehlgeschlagener login Notes", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        
+        if failed_attempts[client_ip]['count'] >= 5:
+            # Nach 5 Versuchen für 5 Minuten (300 Sekunden) sperren
+            failed_attempts[client_ip]['lock_until'] = now + 300
+            return render_template('login.html', theme=sets.get('theme', 'dark'), accent=sets.get('accent', '#27ae60'), error="5 Fehlversuche! Login für 5 Minuten gesperrt.", v=str(time.time()))
+        
+        # JEDER Fehlversuch (unter 5) sperrt für 5 Sekunden
+        failed_attempts[client_ip]['lock_until'] = now + 5
+        remaining_attempts = 5 - failed_attempts[client_ip]['count']
+        return render_template('login.html', theme=sets.get('theme', 'dark'), accent=sets.get('accent', '#27ae60'), error=f"Falsches Passwort. 5 Sekunden Wartezeit aktiv. Noch {remaining_attempts} Versuch(e) bis zur langen Sperre.", v=str(time.time()))
+        
     return render_template('login.html', theme=sets.get('theme', 'dark'), accent=sets.get('accent', '#27ae60'), v=str(time.time()))
 
 @app.route('/logout')
@@ -713,6 +763,112 @@ if [ -f data.db ]; then
     tar -czf backups/backup_$(date +%u).tar.gz data.db.backup uploads/
     rm data.db.backup
 fi
+EOF
+
+# templates/login.html
+cat << 'EOF' > $INSTALL_DIR/templates/login.html
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - Notizen</title>
+    <link rel="stylesheet" href="/static/style.css?v={{ v }}">
+    <style>
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background: var(--bg-color);
+            margin: 0;
+            font-family: sans-serif;
+        }
+        
+        .login-box {
+            background: var(--sidebar-bg);
+            padding: 40px;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+            width: 100%;
+            max-width: 400px;
+            text-align: center;
+            box-sizing: border-box;
+        }
+        
+        .login-box h1 {
+            margin-top: 0;
+            margin-bottom: 25px;
+            color: var(--text-color);
+        }
+        
+        .login-box input[type="password"] {
+            width: 100%;
+            padding: 15px;
+            margin-bottom: 20px;
+            border: 1px solid var(--border-color);
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--text-color);
+            border-radius: 5px;
+            box-sizing: border-box;
+            font-size: 16px;
+            transition: border-color 0.2s;
+        }
+        
+        .login-box input[type="password"]:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+        
+        .login-box button {
+            width: 100%;
+            padding: 15px;
+            background: var(--accent);
+            color: white;
+            border: none;
+            border-radius: 5px;
+            font-size: 16px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: opacity 0.2s;
+        }
+        
+        .login-box button:hover {
+            opacity: 0.9;
+        }
+        
+        .error-message {
+            color: #e74c3c;
+            background: rgba(231, 76, 60, 0.1);
+            padding: 10px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            font-weight: bold;
+            border: 1px solid rgba(231, 76, 60, 0.3);
+        }
+    </style>
+</head>
+<body data-theme="{{ theme }}">
+    <script>
+        const initialAccent = '{{ accent }}';
+        document.documentElement.style.setProperty('--accent', initialAccent); 
+    </script>
+    
+    <div class="login-box">
+        <h1>🔒 Geschützt</h1>
+        
+        {% if error %}
+        <div class="error-message">{{ error }}</div>
+        {% endif %}
+        
+        <form method="POST" action="/login">
+            <input type="password" name="password" placeholder="Passwort eingeben..." required autofocus>
+            <button type="submit">Entsperren</button>
+        </form>
+    </div>
+</body>
+</html>
 EOF
 
 # templates/share.html
