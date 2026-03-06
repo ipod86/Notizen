@@ -1629,7 +1629,7 @@ body {
 .icon-file { -webkit-mask-image: url('/static/icons/file.svg'); mask-image: url('/static/icons/file.svg'); opacity: 0.6; }
 .icon-search { -webkit-mask-image: url('/static/icons/search.svg'); mask-image: url('/static/icons/search.svg'); }
 .icon-clear { -webkit-mask-image: url('/static/icons/clear.svg'); mask-image: url('/static/icons/clear.svg'); }
-.icon-save { -webkit-mask-image: url('/static/icons/save.svg'); mask-image: url('/static/icons/save.svg'); }
+.icon-save { -webkit-mask-image: url('/static/icons/backup-restore.svg'); mask-image: url('/static/icons/backup-restore.svg'); }
 .icon-save-disk { -webkit-mask-image: url('/static/icons/save-disk.svg'); mask-image: url('/static/icons/save-disk.svg'); }
 .icon-cancel { -webkit-mask-image: url('/static/icons/cancel.svg'); mask-image: url('/static/icons/cancel.svg'); }
 .icon-sketch { -webkit-mask-image: url('/static/icons/sketch.svg'); mask-image: url('/static/icons/sketch.svg'); }
