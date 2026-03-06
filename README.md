@@ -43,3 +43,14 @@ Lade das Installationsskript direkt von GitHub herunter:
 
 ```bash
 wget -O setup_notes_sql_lite.sh [https://raw.githubusercontent.com/ipod86/Notizen/main/setup_notes_sql_lite.sh](https://raw.githubusercontent.com/ipod86/Notizen/main/setup_notes_sql_lite.sh) && chmod +x setup_notes_sql_lite.sh && sudo ./setup_notes_sql_lite.sh
+
+---
+
+## Verwendete Open-Source-Bibliotheken & Ressourcen
+
+Dieses Projekt nutzt folgende Open-Source-Bibliotheken und freie Ressourcen:
+
+* **[Flask](https://flask.palletsprojects.com/) & [SQLite](https://www.sqlite.org/):** Web-Framework für das Python-Backend und lokale relationale Datenbank.
+* **[SortableJS](https://sortablejs.github.io/Sortable/):** Drag-and-Drop-Funktionalität für die Strukturierung des Notizbaums.
+* **[Highlight.js](https://highlightjs.org/):** Syntax-Highlighting für Code-Blöcke innerhalb der Notizen.
+* **[Material Design Icons](https://pictogrammers.com/library/mdi/):** Die in der Benutzeroberfläche verwendeten SVG-Icons entstammen der Pictogrammers-Bibliothek.
