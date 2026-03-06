@@ -125,7 +125,6 @@ def init_db():
             )
         ''')
         
-        # Sicherstellen, dass die neuen Spalten existieren
         try:
             conn.execute('ALTER TABLE notes ADD COLUMN is_trashed INTEGER DEFAULT 0')
         except sqlite3.OperationalError:
@@ -164,7 +163,6 @@ def init_db():
             conn.execute("INSERT INTO settings (key, value) VALUES ('history_days', '30')")
             conn.execute("INSERT INTO settings (key, value) VALUES ('tree_last_modified', '0')")
             
-        # Trigger für Synchronisation
         conn.execute('DROP TRIGGER IF EXISTS update_tree_mod')
         conn.execute('''
             CREATE TRIGGER update_tree_mod AFTER UPDATE ON notes 
@@ -189,7 +187,6 @@ def init_db():
             END;
         ''')
 
-# --- Webhook & Timer Logik ---
 def send_webhook(title, time_str):
     try:
         with get_db() as conn:
@@ -252,7 +249,7 @@ threading.Thread(target=webhook_worker, daemon=True).start()
 
 @app.after_request
 def add_header(response):
-    if request.path.startswith('/uploads/'):
+    if request.path.startswith('/uploads/') or request.path.startswith('/api/download/'):
         response.headers['Cache-Control'] = 'public, max-age=31536000'
         return response
     response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
@@ -271,7 +268,7 @@ def get_settings():
 
 @app.before_request
 def require_login():
-    if request.endpoint in ['login', 'static', 'view_shared_note', 'uploaded_file']: 
+    if request.endpoint in ['login', 'static', 'view_shared_note', 'uploaded_file', 'download_file']: 
         return
         
     sets = get_settings()
@@ -657,6 +654,13 @@ def handle_lock(note_id):
 def uploaded_file(filename): 
     return send_from_directory(UPLOAD_FOLDER, filename)
 
+@app.route('/api/download/<filename>')
+def download_file(filename):
+    with get_db() as conn:
+        row = conn.execute("SELECT original_name FROM media WHERE filename=?", (filename,)).fetchone()
+        orig_name = row['original_name'] if row and row['original_name'] else filename
+    return send_from_directory(UPLOAD_FOLDER, filename, as_attachment=True, download_name=orig_name)
+
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
     file = request.files.get('file') or request.files.get('image')
@@ -704,7 +708,6 @@ def load_sketch(sid):
             return jsonify(json.load(f))
     return jsonify({"error": "404"}), 404
 
-# --- Medien-Manager Routes ---
 @app.route('/api/media', methods=['GET'])
 def get_media_list():
     with get_db() as conn:
@@ -723,31 +726,30 @@ def delete_media_item(filename):
     with get_db() as conn:
         conn.execute("DELETE FROM media WHERE filename=?", (filename,))
         
-        # Säubere alle Notizen (Regex Ersetzung)
-        rows = conn.execute("SELECT id, text FROM notes WHERE text LIKE ?", (f'%{filename}%',)).fetchall()
+        search_term = filename
+        sid = None
+        if filename.startswith('sketch_') and filename.endswith('.png'):
+            sid = filename.replace('sketch_', '').replace('.png', '')
+            search_term = sid
+            
+        rows = conn.execute("SELECT id, text FROM notes WHERE text LIKE ?", (f'%{search_term}%',)).fetchall()
         for r in rows:
             new_text = r['text']
-            # Entferne z.B. [img:filename.png], [file:filename.pdf|Original], [audio:filename.webm], [sketch:id]
-            # Extrahiere die Basis-ID für Skizzen (ohne sketch_ prefix und ohne .png)
-            if filename.startswith('sketch_') and filename.endswith('.png'):
-                sid = filename.replace('sketch_', '').replace('.png', '')
+            if sid:
                 new_text = re.sub(r'\[sketch:' + re.escape(sid) + r'\]\n?', '', new_text)
             else:
                 new_text = re.sub(r'\[(img|file|audio):' + re.escape(filename) + r'(\|[^\]]+)?\]\n?', '', new_text)
             conn.execute("UPDATE notes SET text=? WHERE id=?", (new_text, r['id']))
             
-        # Säubere auch die Historie
-        hist_rows = conn.execute("SELECT id, text FROM note_history WHERE text LIKE ?", (f'%{filename}%',)).fetchall()
+        hist_rows = conn.execute("SELECT id, text FROM note_history WHERE text LIKE ?", (f'%{search_term}%',)).fetchall()
         for r in hist_rows:
             new_text = r['text']
-            if filename.startswith('sketch_') and filename.endswith('.png'):
-                sid = filename.replace('sketch_', '').replace('.png', '')
+            if sid:
                 new_text = re.sub(r'\[sketch:' + re.escape(sid) + r'\]\n?', '', new_text)
             else:
                 new_text = re.sub(r'\[(img|file|audio):' + re.escape(filename) + r'(\|[^\]]+)?\]\n?', '', new_text)
             conn.execute("UPDATE note_history SET text=? WHERE id=?", (new_text, r['id']))
             
-    # Physische Datei löschen
     try:
         os.remove(os.path.join(UPLOAD_FOLDER, filename))
         if filename.startswith('sketch_'):
@@ -911,7 +913,6 @@ for f in os.listdir(UPL):
     if f not in used_files:
         try: 
             os.remove(os.path.join(UPL, f))
-            # Auch aus der neuen Medien-Tabelle entfernen
             conn.execute("DELETE FROM media WHERE filename=?", (f,))
         except Exception: 
             pass
@@ -1625,7 +1626,7 @@ body {
 .icon-add { -webkit-mask-image: url('/static/icons/add.svg'); mask-image: url('/static/icons/add.svg'); }
 .icon-folder { -webkit-mask-image: url('/static/icons/folder.svg'); mask-image: url('/static/icons/folder.svg'); }
 .icon-folder_open { -webkit-mask-image: url('/static/icons/folder_open.svg'); mask-image: url('/static/icons/folder_open.svg'); }
-.icon-file { -webkit-mask-image: url('/static/icons/file.svg'); mask-image: url('/static/icons/file.svg'); }
+.icon-file { -webkit-mask-image: url('/static/icons/file.svg'); mask-image: url('/static/icons/file.svg'); opacity: 0.6; }
 .icon-search { -webkit-mask-image: url('/static/icons/search.svg'); mask-image: url('/static/icons/search.svg'); }
 .icon-clear { -webkit-mask-image: url('/static/icons/clear.svg'); mask-image: url('/static/icons/clear.svg'); }
 .icon-save { -webkit-mask-image: url('/static/icons/save.svg'); mask-image: url('/static/icons/save.svg'); }
@@ -2732,7 +2733,7 @@ function renderMarkdown(text) {
     
     html = html.replace(/\[img:(.*?)\]/g, '<img src="/uploads/$1" class="note-img" onclick="openLightbox(this.src)">');
     html = html.replace(/\[sketch:([a-zA-Z0-9]+)\]/g, '<img src="/uploads/sketch_$1.png?v='+Date.now()+'" class="note-img sketch-img" title="Skizze bearbeiten" onclick="openSketch(\'$1\')">');
-    html = html.replace(/\[file:([a-zA-Z0-9.\-]+)\|([^\]]+)\]/g, '<a href="/uploads/$1" target="_blank" class="note-link"><i class="icon icon-file-plus"></i> $2</a>');
+    html = html.replace(/\[file:([a-zA-Z0-9.\-]+)\|([^\]]+)\]/g, '<a href="/api/download/$1" class="note-link"><i class="icon icon-file"></i> $2</a>');
     html = html.replace(/\[audio:(.*?)\]/g, '<audio controls src="/uploads/$1" style="max-width: 100%; margin: 10px 0; outline: none; border-radius: 5px;"></audio>');
     
     html = html.replace(/\[note:([a-zA-Z0-9]+)\|([^\]]+)\]/g, (match, id, title) => `<a href="#" onclick="if(!window.isShareView){selectNode('${id}'); return false;}" class="note-link"><i class="icon icon-mention"></i> ${title}</a>`);
@@ -3053,7 +3054,7 @@ function renderItems(items, parent) {
         if (isFolder) {
             icon.innerHTML = isCollapsed ? '<i class="icon icon-folder" style="color: #f39c12;"></i>' : '<i class="icon icon-folder_open" style="color: #f39c12;"></i>';
         } else {
-            icon.innerHTML = '<i class="icon icon-file" style="opacity: 0.6;"></i>';
+            icon.innerHTML = '<i class="icon icon-file"></i>';
         }
         
         icon.onclick = (e) => { 
@@ -3393,7 +3394,7 @@ async function renderMediaList() {
             } else if (m.file_type === 'audio') {
                 preview.innerHTML = `<i class="icon icon-mic" style="font-size: 3em; opacity: 0.5;"></i>`;
             } else {
-                preview.innerHTML = `<i class="icon icon-file" style="font-size: 3em; opacity: 0.5;"></i>`;
+                preview.innerHTML = `<i class="icon icon-file" style="font-size: 3em;"></i>`;
             }
             
             const nameDiv = document.createElement('div');
@@ -3412,10 +3413,7 @@ async function renderMediaList() {
             btnDownload.title = "Herunterladen";
             btnDownload.innerHTML = `<i class="icon icon-export"></i>`;
             btnDownload.onclick = () => {
-                const a = document.createElement('a');
-                a.href = `/uploads/${m.filename}`;
-                a.download = m.original_name || m.filename;
-                a.click();
+                window.location.href = `/api/download/${m.filename}`;
             };
             
             const btnInfo = document.createElement('button');
@@ -3542,7 +3540,7 @@ async function openTrashModal() {
             info.style.gap = '8px';
 
             const icon = document.createElement('span');
-            icon.innerHTML = childrenMap[node.id] ? '<i class="icon icon-folder" style="color: #f1c40f;"></i>' : '<i class="icon icon-file" style="opacity: 0.6;"></i>';
+            icon.innerHTML = childrenMap[node.id] ? '<i class="icon icon-folder" style="color: #f1c40f;"></i>' : '<i class="icon icon-file"></i>';
 
             const titleSpan = document.createElement('div');
             titleSpan.innerText = node.title || 'Unbenannt';
