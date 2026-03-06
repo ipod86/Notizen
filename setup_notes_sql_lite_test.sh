@@ -46,6 +46,17 @@ write_app_code() {
     mkdir -p "$TARGET_DIR/uploads"
     mkdir -p "$TARGET_DIR/backups"
 
+    echo "Lade statische Bibliotheken und Icons von GitHub herunter..."
+    apt-get install -y unzip wget > /dev/null 2>&1
+    wget -qO /tmp/notizen-static.zip https://github.com/ipod86/Notizen/archive/refs/heads/main.zip
+    unzip -qo /tmp/notizen-static.zip -d /tmp/notizen-extract
+    
+    # Kopiere nur die Ordner icons und lib in unser static Verzeichnis
+    cp -r /tmp/notizen-extract/Notizen-main/static/icons "$TARGET_DIR/static/" 2>/dev/null || true
+    cp -r /tmp/notizen-extract/Notizen-main/static/lib "$TARGET_DIR/static/" 2>/dev/null || true
+    
+    rm -rf /tmp/notizen-static.zip /tmp/notizen-extract
+
 # --- app.py ---
 cat << 'EOF' > "$TARGET_DIR/app.py"
 from flask import Flask, render_template, request, jsonify, send_from_directory, session, redirect, url_for, send_file
@@ -775,16 +786,15 @@ import sqlite3
 import os
 import time
 
-DB = 'data.db'
-UPL = 'uploads'
+# Pfade absolut über das Skript-Verzeichnis auflösen, damit es auch im Cronjob klappt!
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB = os.path.join(BASE_DIR, 'data.db')
+UPL = os.path.join(BASE_DIR, 'uploads')
 
-abs_db = os.path.join(os.getcwd(), DB)
-abs_upl = os.path.join(os.getcwd(), UPL)
-
-if not os.path.exists(abs_db) or not os.path.exists(abs_upl): 
+if not os.path.exists(DB) or not os.path.exists(UPL): 
     exit()
 
-conn = sqlite3.connect(abs_db)
+conn = sqlite3.connect(DB)
 
 sets = dict(conn.execute("SELECT key, value FROM settings").fetchall())
 hist_enabled = sets.get('history_enabled', 'true') == 'true'
@@ -804,7 +814,7 @@ hist_rows = conn.execute("SELECT text FROM note_history WHERE text IS NOT NULL")
 all_texts = [r[0] for r in rows] + [r[0] for r in hist_rows]
 
 for text in all_texts:
-    for f in os.listdir(abs_upl):
+    for f in os.listdir(UPL):
         if f in text: 
             used_files.add(f)
         if f.startswith('sketch_') and f.endswith('.png'):
@@ -813,10 +823,10 @@ for text in all_texts:
                 used_files.add(f)
                 used_files.add(f"sketch_{sid}.json")
                 
-for f in os.listdir(abs_upl):
+for f in os.listdir(UPL):
     if f not in used_files:
         try: 
-            os.remove(os.path.join(abs_upl, f))
+            os.remove(os.path.join(UPL, f))
         except Exception: 
             pass
 EOF
@@ -824,10 +834,10 @@ EOF
 # --- backup.sh ---
 cat << 'EOF' > "$TARGET_DIR/backup.sh"
 #!/bin/bash
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit
 if [ -f data.db ]; then
-    sqlite3 data.db ".backup 'data.db.backup'"
-    tar -czf backups/backup_$(date +%u).tar.gz data.db.backup uploads/
+    /usr/bin/sqlite3 data.db ".backup 'data.db.backup'"
+    /bin/tar -czf backups/backup_$(date +%u).tar.gz data.db.backup uploads/
     rm data.db.backup
 fi
 EOF
@@ -924,7 +934,7 @@ cat << 'EOF' > "$TARGET_DIR/templates/login.html"
     </script>
     
     <div class="login-box">
-        <h1>🔒 Geschützt</h1>
+        <h1><i class="icon icon-password"></i> Geschützt</h1>
         
         {% if error %}
         <div class="error-message" id="error-box">{{ error }}</div>
@@ -1002,8 +1012,8 @@ cat << 'EOF' > "$TARGET_DIR/templates/share.html"
     <meta name="viewport" content="width=device-width,initial-scale=1.0">
     <title>{{ title }} - Geteilte Notiz</title>
     <link rel="stylesheet" href="/static/style.css?v={{ v }}">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/tomorrow-night-blue.min.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <link rel="stylesheet" href="/static/lib/highlight/tomorrow-night-blue.min.css">
+    <script src="/static/lib/highlight/highlight.min.js"></script>
 </head>
 <body data-theme="{{ theme }}">
     <script>
@@ -1045,9 +1055,9 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
     <meta name="viewport" content="width=device-width,initial-scale=1.0">
     <title>Notizen</title>
     <link rel="stylesheet" href="/static/style.css?v={{ v }}">
-    <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/tomorrow-night-blue.min.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="/static/lib/sortable/Sortable.min.js"></script>
+    <link rel="stylesheet" href="/static/lib/highlight/tomorrow-night-blue.min.css">
+    <script src="/static/lib/highlight/highlight.min.js"></script>
 </head>
 <body data-theme="{{ theme }}">
     <script>
@@ -1062,62 +1072,62 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
     
     <div class="header-actions" style="display: flex; gap: 15px; align-items: center;">
         <div id="todo-dashboard-btn" style="position: relative; cursor: pointer; font-size: 1.4em;" onclick="openTodoModal()" title="Meine Aufgaben">
-            ☑️
+            <i class="icon icon-tasks"></i>
             <span id="todo-badge" class="icon-badge">0</span>
         </div>
         <div id="notification-bell" style="position: relative; cursor: pointer; font-size: 1.4em;" onclick="openNotificationsModal()" title="Erinnerungen">
-            🔔
+            <i class="icon icon-reminders"></i>
             <span id="notification-badge" class="icon-badge">0</span>
         </div>
 
         <div class="dropdown">
-            <button onclick="toggleSettings(event)" style="font-size:1.4em">⚙️</button>
+            <button onclick="toggleSettings(event)" style="font-size:1.4em"><i class="icon icon-settings"></i></button>
             <div class="dropdown-content" id="dropdown-menu">
-                <div class="menu-row" onclick="toggleTheme()"><span>🌓 Theme wechseln</span></div>
+                <div class="menu-row" onclick="toggleTheme()"><span><i class="icon icon-theme" style="margin-right:8px;"></i> Theme wechseln</span></div>
                 <div class="menu-row">
-                    <span>🎨 Akzentfarbe</span>
+                    <span><i class="icon icon-color" style="margin-right:8px;"></i> Akzentfarbe</span>
                     <input type="color" id="accent-color-picker" onchange="updateGlobalAccent(this.value)" onclick="event.stopPropagation()">
                 </div>
                 
                 <div class="dropdown-submenu" onclick="toggleSubmenu(this, event)">
                     <div class="menu-row">
-                        <span>📁 Allgemeine Einstellungen</span><span class="submenu-arrow">▶</span>
+                        <span><i class="icon icon-folder" style="margin-right:8px;"></i> Allgemeine Einstellungen</span><span class="submenu-arrow">▶</span>
                     </div>
                     <div class="submenu-content">
-                        <div class="menu-row" onclick="handleMenuAction(event, togglePassword)"><span id="pwd-toggle-text">🔒 Passwortschutz an</span></div>
-                        <div class="menu-row" onclick="handleMenuAction(event, toggleHistorySettings)"><span>🕰️ Historien-Optionen</span></div>
+                        <div class="menu-row" onclick="handleMenuAction(event, togglePassword)"><span id="pwd-toggle-text"><i class="icon icon-password" style="margin-right:8px;"></i> Passwortschutz an</span></div>
+                        <div class="menu-row" onclick="handleMenuAction(event, toggleHistorySettings)"><span><i class="icon icon-history" style="margin-right:8px;"></i> Historien-Optionen</span></div>
                     </div>
                 </div>
 
                 <div class="dropdown-submenu" onclick="toggleSubmenu(this, event)">
                     <div class="menu-row">
-                        <span>🔔 Benachrichtigungen</span><span class="submenu-arrow">▶</span>
+                        <span><i class="icon icon-reminders" style="margin-right:8px;"></i> Benachrichtigungen</span><span class="submenu-arrow">▶</span>
                     </div>
                     <div class="submenu-content">
-                        <div class="menu-row" onclick="toggleHeaderIcon('tasks', event)"><span id="toggle-tasks-text">☑️ Aufgaben-Icon: An</span></div>
-                        <div class="menu-row" onclick="toggleHeaderIcon('reminders', event)"><span id="toggle-reminders-text">⏰ Erinnerungs-Icon: An</span></div>
-                        <div class="menu-row" onclick="handleMenuAction(event, toggleWebhookModal)"><span id="webhook-toggle-text">📡 Webhook (Push)</span></div>
+                        <div class="menu-row" onclick="toggleHeaderIcon('tasks', event)"><span id="toggle-tasks-text"><i class="icon icon-tasks" style="margin-right:8px;"></i> Aufgaben-Icon: An</span></div>
+                        <div class="menu-row" onclick="toggleHeaderIcon('reminders', event)"><span id="toggle-reminders-text"><i class="icon icon-reminder_active" style="margin-right:8px;"></i> Erinnerungs-Icon: An</span></div>
+                        <div class="menu-row" onclick="handleMenuAction(event, toggleWebhookModal)"><span id="webhook-toggle-text"><i class="icon icon-webhook" style="margin-right:8px;"></i> Webhook (Push)</span></div>
                     </div>
                 </div>
 
                 <div class="dropdown-submenu" onclick="toggleSubmenu(this, event)">
                     <div class="menu-row">
-                        <span>💾 Backup & Restore</span><span class="submenu-arrow">▶</span>
+                        <span><i class="icon icon-save" style="margin-right:8px;"></i> Backup & Restore</span><span class="submenu-arrow">▶</span>
                     </div>
                     <div class="submenu-content">
-                        <div class="menu-row" onclick="handleMenuAction(event, exportData)"><span>📥 Backup herunterladen</span></div>
-                        <div class="menu-row" onclick="handleMenuAction(event, openRestoreModal)"><span>🔄 Wiederherstellen</span></div>
+                        <div class="menu-row" onclick="handleMenuAction(event, exportData)"><span><i class="icon icon-export" style="margin-right:8px;"></i> Backup herunterladen</span></div>
+                        <div class="menu-row" onclick="handleMenuAction(event, openRestoreModal)"><span><i class="icon icon-restore" style="margin-right:8px;"></i> Wiederherstellen</span></div>
                     </div>
                 </div>
                 
-                <div class="menu-row" onclick="openShareOverviewModal()"><span>🌍 Freigaben verwalten</span></div>
+                <div class="menu-row" onclick="openShareOverviewModal()"><span><i class="icon icon-share" style="margin-right:8px;"></i> Freigaben verwalten</span></div>
                 <div class="menu-row" onclick="openTrashModal()">
                     <span style="display:flex; align-items:center; width:100%;">
-                        <span style="flex-grow:1;">🗑️ Papierkorb</span>
+                        <span style="flex-grow:1;"><i class="icon icon-trash" style="margin-right:8px;"></i> Papierkorb</span>
                         <span id="trash-badge" class="menu-badge">0</span>
                     </span>
                 </div>
-                <div class="menu-row" id="logout-btn" style="display:none; color:#e74c3c;" onclick="window.location.href='/logout'"><span>🚪 Abmelden</span></div>
+                <div class="menu-row" id="logout-btn" style="display:none; color:#e74c3c;" onclick="window.location.href='/logout'"><span><i class="icon icon-logout" style="margin-right:8px;"></i> Abmelden</span></div>
             </div>
         </div>
     </div>
@@ -1128,17 +1138,17 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
         <div class="sidebar-header">
             <h3 style="margin:0">Notizen</h3>
             <div style="display:flex; gap:8px;">
-                <button id="toggle-all-btn" onclick="toggleAllFolders()" title="Alle auf/zu">↔️</button>
-                <button id="sort-btn" onclick="confirmAutoSort()" title="Automatisch sortieren">⇅</button>
-                <button onclick="toggleEditMode()" title="Struktur Bearbeiten">✏️</button>
+                <button id="toggle-all-btn" onclick="toggleAllFolders()" title="Alle auf/zu"><i class="icon icon-folder_open"></i></button>
+                <button id="sort-btn" onclick="confirmAutoSort()" title="Automatisch sortieren"><i class="icon icon-folder"></i></button>
+                <button onclick="toggleEditMode()" title="Struktur Bearbeiten"><i class="icon icon-sketch"></i></button>
             </div>
         </div>
         <div style="padding:15px; flex-shrink: 0;">
             <div class="search-wrapper">
                 <input type="text" id="search-input" placeholder="Titel oder Text suchen..." oninput="filterTree()">
-                <span id="clear-search" onclick="clearSearch()">✕</span>
+                <span id="clear-search" onclick="clearSearch()"><i class="icon icon-clear"></i></span>
             </div>
-            <button onclick="addItem(null)" style="width:100%;background:var(--accent) !important;color:white;padding:8px;border-radius:4px;font-weight:bold;">+ Hauptkategorie</button>
+            <button onclick="addItem(null)" style="width:100%;background:var(--accent) !important;color:white;padding:8px;border-radius:4px;font-weight:bold;"><i class="icon icon-add"></i> Hauptkategorie</button>
         </div>
         <div id="tree"></div>
     </div>
@@ -1151,7 +1161,7 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
             <div id="view-mode">
                 <div style="display:flex; align-items:center; gap:12px; margin-bottom:20px; flex-wrap:wrap;">
                     <h1 id="view-title" style="margin:0; overflow-wrap:anywhere; word-break:break-word; max-width:85%;"></h1>
-                    <span id="view-reminder-badge" style="display:none; color:#e74c3c; font-size:1.2em; animation: pulse 2s infinite;" title="Erinnerung aktiv!">⏰</span>
+                    <span id="view-reminder-badge" style="display:none; color:#e74c3c; font-size:1.2em; animation: pulse 2s infinite;" title="Erinnerung aktiv!"><i class="icon icon-reminder_active"></i></span>
                     <button id="view-reminder-ack" onclick="clearReminder()" style="display:none; background:#e74c3c !important; color:white; padding:4px 8px; border-radius:4px; font-size:0.8em; font-weight:bold;">Bestätigen</button>
                     
                     <div style="margin-left:auto; display:flex; align-items:center; position:relative;">
@@ -1173,27 +1183,27 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
                 <div id="mention-dropdown"></div>
 
                 <div class="toolbar">
-                    <button class="tool-btn" onclick="saveChanges();" style="background:var(--accent) !important; color:white;"><i>💾</i><span>OK</span></button>
-                    <button class="tool-btn" onclick="cancelEdit()" style="color:#e74c3c;"><i>❌</i><span>Abbruch</span></button>
-                    <button class="tool-btn" onclick="wrapSelection('**','**', 'Fett')"><i><b>B</b></i><span>Fett</span></button>
-                    <button class="tool-btn" onclick="wrapSelection('_','_', 'Kursiv')"><i style="font-style:italic; font-family:serif;">I</i><span>Kursiv</span></button>
-                    <button class="tool-btn" onclick="wrapSelection('~~','~~', 'Text')"><i style="text-decoration:line-through;">S</i><span>Streich</span></button>
-                    <button class="tool-btn" onclick="wrapSelection('### ','', 'Überschrift')"><i style="font-weight:bold;">H</i><span>Titel</span></button>
-                    <button class="tool-btn" onclick="handleListAction('- ', 'Punkt')"><i style="font-weight:bold;">•—</i><span>Liste</span></button>
-                    <button class="tool-btn" onclick="handleListAction('- [ ] ', 'Aufgabe')"><i>☑</i><span>To-Do</span></button>
-                    <button class="tool-btn" onclick="wrapSelection('\n| Spalte 1 | Spalte 2 |\n|---|---|\n| Wert 1 | Wert 2 |\n| Wert 1 | Wert 2 |\n', '', 'Tabelle')"><i>📊</i><span>Tabelle</span></button>
-                    <button class="tool-btn" onclick="wrapSelection('> ','', 'Zitat')"><i style="font-family:serif;">"</i><span>Zitat</span></button>
-                    <button class="tool-btn" onclick="wrapSelection('[s=Spoiler-Titel]\n','\n[/s]', 'Text hier...')"><i>👁️‍🗨️</i><span>Spoiler</span></button>
-                    <button class="tool-btn" onclick="wrapSelection('\n---\n','', '')"><i>—</i><span>Linie</span></button>
-                    <button class="tool-btn" onclick="insertCodeTag()"><i>💻</i><span>Code</span></button>
-                    <button class="tool-btn" onclick="uploadImage()"><i>🖼️</i><span>Bild</span></button>
-                    <button class="tool-btn" onclick="uploadGenericFile()"><i>📎</i><span>Datei</span></button>
-                    <button class="tool-btn" onclick="openSketch()"><i>🖌️</i><span>Skizze</span></button>
-                    <button class="tool-btn" onclick="triggerMentionButton()"><i>@</i><span>Verweis</span></button>
-                    <button class="tool-btn" onclick="wrapSelection('[','](https://)', 'Link-Text')"><i>🔗</i><span>Web-Link</span></button>
+                    <button class="tool-btn" onclick="saveChanges();" style="background:var(--accent) !important; color:white;"><i class="icon icon-save-disk"></i><span>OK</span></button>
+                    <button class="tool-btn" onclick="cancelEdit()" style="color:#e74c3c;"><i class="icon icon-cancel"></i><span>Abbruch</span></button>
+                    <button class="tool-btn" onclick="wrapSelection('**','**', 'Fett')"><i class="icon icon-bold"></i><span>Fett</span></button>
+                    <button class="tool-btn" onclick="wrapSelection('_','_', 'Kursiv')"><i class="icon icon-italic"></i><span>Kursiv</span></button>
+                    <button class="tool-btn" onclick="wrapSelection('~~','~~', 'Text')"><i class="icon icon-strikethrough"></i><span>Streich</span></button>
+                    <button class="tool-btn" onclick="wrapSelection('### ','', 'Überschrift')"><i class="icon icon-header"></i><span>Titel</span></button>
+                    <button class="tool-btn" onclick="handleListAction('- ', 'Punkt')"><i class="icon icon-list"></i><span>Liste</span></button>
+                    <button class="tool-btn" onclick="handleListAction('- [ ] ', 'Aufgabe')"><i class="icon icon-todo"></i><span>To-Do</span></button>
+                    <button class="tool-btn" onclick="wrapSelection('\n| Spalte 1 | Spalte 2 |\n|---|---|\n| Wert 1 | Wert 2 |\n| Wert 1 | Wert 2 |\n', '', 'Tabelle')"><i class="icon icon-table"></i><span>Tabelle</span></button>
+                    <button class="tool-btn" onclick="wrapSelection('> ','', 'Zitat')"><i class="icon icon-quote"></i><span>Zitat</span></button>
+                    <button class="tool-btn" onclick="wrapSelection('[s=Spoiler-Titel]\n','\n[/s]', 'Text hier...')"><i class="icon icon-spoiler"></i><span>Spoiler</span></button>
+                    <button class="tool-btn" onclick="wrapSelection('\n---\n','', '')"><i class="icon icon-hr"></i><span>Linie</span></button>
+                    <button class="tool-btn" onclick="insertCodeTag()"><i class="icon icon-code"></i><span>Code</span></button>
+                    <button class="tool-btn" onclick="uploadImage()"><i class="icon icon-image"></i><span>Bild</span></button>
+                    <button class="tool-btn" onclick="uploadGenericFile()"><i class="icon icon-file-plus"></i><span>Datei</span></button>
+                    <button class="tool-btn" onclick="openSketch()"><i class="icon icon-sketch"></i><span>Skizze</span></button>
+                    <button class="tool-btn" onclick="triggerMentionButton()"><i class="icon icon-mention"></i><span>Verweis</span></button>
+                    <button class="tool-btn" onclick="wrapSelection('[','](https://)', 'Link-Text')"><i class="icon icon-link"></i><span>Web-Link</span></button>
                     <div class="tool-btn color-tool">
                         <div class="color-row">
-                            <span onclick="applyColor()">🎨</span>
+                            <span onclick="applyColor()"><i class="icon icon-color"></i></span>
                             <input type="color" id="text-color-input" value="#27ae60">
                         </div>
                         <span>Farbe</span>
@@ -1203,17 +1213,17 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
                 <div style="display:flex; gap:10px; margin-bottom:10px; align-items:stretch;">
                     <input type="text" id="node-title" placeholder="Titel der Notiz..." style="margin-bottom:0; flex-grow:1;">
                     <button class="tool-btn" onclick="openReminderModal()" style="margin:0; min-height:100%; flex-direction:row; gap:5px; padding:0 10px; width:auto;">
-                        <i>⏰</i><span id="edit-reminder-text">Erinnerung</span>
+                        <i class="icon icon-reminders"></i><span id="edit-reminder-text">Erinnerung</span>
                     </button>
                     <button class="tool-btn" id="edit-reminder-clear" onclick="clearReminder()" style="display:none; margin:0; min-height:100%; flex-direction:row; gap:5px; padding:0 10px; width:auto; color:#e74c3c; border-color:#e74c3c;">
-                        <i>✖</i><span>Löschen</span>
+                        <i class="icon icon-clear"></i><span>Löschen</span>
                     </button>
                 </div>
 
                 <textarea id="node-text" placeholder="Text, Notizen, Code oder Bilder hier einfügen..." style="height:60vh"></textarea>
             </div>
             
-            <button id="add-sub-level-btn" onclick="addItem(activeId)" style="margin-top:20px;border:1px solid var(--accent) !important;color:var(--accent);padding:5px 10px;border-radius:4px;">+ Unter-Ebene erstellen</button>
+            <button id="add-sub-level-btn" onclick="addItem(activeId)" style="margin-top:20px;border:1px solid var(--accent) !important;color:var(--accent);padding:5px 10px;border-radius:4px;"><i class="icon icon-add"></i> Unter-Ebene erstellen</button>
         </div>
     </div>
     
@@ -1254,7 +1264,7 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
                 Lade...
             </div>
             <div class="modal-btns" style="justify-content: space-between;">
-                <button class="btn-discard" onclick="emptyTrash()">🗑️ Alle endgültig löschen</button>
+                <button class="btn-discard" onclick="emptyTrash()"><i class="icon icon-trash"></i> Alle endgültig löschen</button>
                 <button class="btn-cancel" onclick="document.getElementById('trash-modal').style.display='none'">Schließen</button>
             </div>
         </div>
@@ -1349,11 +1359,11 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
                     <span>Dicke:</span>
                     <input type="range" min="1" max="50" value="8" onchange="sketchWidth=this.value" style="width: 80px;">
                 </div>
-                <button id="btn-pen" class="sketch-btn active" onclick="setSketchMode('pen')">✏️ Stift</button>
-                <button id="btn-highlighter" class="sketch-btn" onclick="setSketchMode('highlighter')">🖍️ Marker</button>
-                <button id="btn-eraser" class="sketch-btn" onclick="setSketchMode('eraser')">🧽 Radierer</button>
-                <button class="sketch-btn" onclick="undoSketch()" style="color:#f39c12;">↩️ Zurück</button>
-                <button class="sketch-btn" onclick="sketchStrokes=[]; redrawSketch();" style="color:#e74c3c;">🗑️ Leeren</button>
+                <button id="btn-pen" class="sketch-btn active" onclick="setSketchMode('pen')"><i class="icon icon-sketch"></i> Stift</button>
+                <button id="btn-highlighter" class="sketch-btn" onclick="setSketchMode('highlighter')"><i class="icon icon-color"></i> Marker</button>
+                <button id="btn-eraser" class="sketch-btn" onclick="setSketchMode('eraser')"><i class="icon icon-clear"></i> Radierer</button>
+                <button class="sketch-btn" onclick="undoSketch()" style="color:#f39c12;"><i class="icon icon-undo"></i> Zurück</button>
+                <button class="sketch-btn" onclick="sketchStrokes=[]; redrawSketch();" style="color:#e74c3c;"><i class="icon icon-trash"></i> Leeren</button>
                 <div style="flex-grow:1; text-align:right;">
                     <button class="btn-cancel" onclick="closeSketch()">Abbruch</button>
                     <button class="btn-save" onclick="saveSketch()">Speichern</button>
@@ -1467,6 +1477,63 @@ body {
     top: 0; 
     left: 0; 
 }
+
+/* Neue CSS-Klassen für MDI Icons */
+.icon {
+    display: inline-block;
+    width: 1.2em;
+    height: 1.2em;
+    background-color: currentColor;
+    mask-size: contain;
+    mask-repeat: no-repeat;
+    mask-position: center;
+    -webkit-mask-size: contain;
+    -webkit-mask-repeat: no-repeat;
+    -webkit-mask-position: center;
+    vertical-align: middle;
+}
+
+.icon-settings { -webkit-mask-image: url('/static/icons/settings.svg'); mask-image: url('/static/icons/settings.svg'); }
+.icon-theme { -webkit-mask-image: url('/static/icons/theme.svg'); mask-image: url('/static/icons/theme.svg'); }
+.icon-password { -webkit-mask-image: url('/static/icons/password.svg'); mask-image: url('/static/icons/password.svg'); }
+.icon-history { -webkit-mask-image: url('/static/icons/history.svg'); mask-image: url('/static/icons/history.svg'); }
+.icon-webhook { -webkit-mask-image: url('/static/icons/webhook.svg'); mask-image: url('/static/icons/webhook.svg'); }
+.icon-tasks { -webkit-mask-image: url('/static/icons/tasks.svg'); mask-image: url('/static/icons/tasks.svg'); }
+.icon-reminders { -webkit-mask-image: url('/static/icons/reminders.svg'); mask-image: url('/static/icons/reminders.svg'); }
+.icon-export { -webkit-mask-image: url('/static/icons/export.svg'); mask-image: url('/static/icons/export.svg'); }
+.icon-restore { -webkit-mask-image: url('/static/icons/restore.svg'); mask-image: url('/static/icons/restore.svg'); }
+.icon-share { -webkit-mask-image: url('/static/icons/share.svg'); mask-image: url('/static/icons/share.svg'); }
+.icon-trash { -webkit-mask-image: url('/static/icons/trash.svg'); mask-image: url('/static/icons/trash.svg'); }
+.icon-logout { -webkit-mask-image: url('/static/icons/logout.svg'); mask-image: url('/static/icons/logout.svg'); }
+.icon-add { -webkit-mask-image: url('/static/icons/add.svg'); mask-image: url('/static/icons/add.svg'); }
+.icon-folder { -webkit-mask-image: url('/static/icons/folder.svg'); mask-image: url('/static/icons/folder.svg'); }
+.icon-folder_open { -webkit-mask-image: url('/static/icons/folder_open.svg'); mask-image: url('/static/icons/folder_open.svg'); }
+.icon-file { -webkit-mask-image: url('/static/icons/file.svg'); mask-image: url('/static/icons/file.svg'); }
+.icon-search { -webkit-mask-image: url('/static/icons/search.svg'); mask-image: url('/static/icons/search.svg'); }
+.icon-clear { -webkit-mask-image: url('/static/icons/clear.svg'); mask-image: url('/static/icons/clear.svg'); }
+.icon-save { -webkit-mask-image: url('/static/icons/save.svg'); mask-image: url('/static/icons/save.svg'); }
+.icon-save-disk { -webkit-mask-image: url('/static/icons/save-disk.svg'); mask-image: url('/static/icons/save-disk.svg'); }
+.icon-cancel { -webkit-mask-image: url('/static/icons/cancel.svg'); mask-image: url('/static/icons/cancel.svg'); }
+.icon-sketch { -webkit-mask-image: url('/static/icons/sketch.svg'); mask-image: url('/static/icons/sketch.svg'); }
+.icon-reminder_active { -webkit-mask-image: url('/static/icons/reminder_active.svg'); mask-image: url('/static/icons/reminder_active.svg'); }
+.icon-mention { -webkit-mask-image: url('/static/icons/mention.svg'); mask-image: url('/static/icons/mention.svg'); }
+.icon-link { -webkit-mask-image: url('/static/icons/link.svg'); mask-image: url('/static/icons/link.svg'); }
+.icon-bold { -webkit-mask-image: url('/static/icons/bold.svg'); mask-image: url('/static/icons/bold.svg'); }
+.icon-italic { -webkit-mask-image: url('/static/icons/italic.svg'); mask-image: url('/static/icons/italic.svg'); }
+.icon-strikethrough { -webkit-mask-image: url('/static/icons/strikethrough.svg'); mask-image: url('/static/icons/strikethrough.svg'); }
+.icon-header { -webkit-mask-image: url('/static/icons/header.svg'); mask-image: url('/static/icons/header.svg'); }
+.icon-list { -webkit-mask-image: url('/static/icons/list.svg'); mask-image: url('/static/icons/list.svg'); }
+.icon-todo { -webkit-mask-image: url('/static/icons/todo.svg'); mask-image: url('/static/icons/todo.svg'); }
+.icon-table { -webkit-mask-image: url('/static/icons/table.svg'); mask-image: url('/static/icons/table.svg'); }
+.icon-quote { -webkit-mask-image: url('/static/icons/quote.svg'); mask-image: url('/static/icons/quote.svg'); }
+.icon-spoiler { -webkit-mask-image: url('/static/icons/spoiler.svg'); mask-image: url('/static/icons/spoiler.svg'); }
+.icon-hr { -webkit-mask-image: url('/static/icons/hr.svg'); mask-image: url('/static/icons/hr.svg'); }
+.icon-code { -webkit-mask-image: url('/static/icons/code.svg'); mask-image: url('/static/icons/code.svg'); }
+.icon-image { -webkit-mask-image: url('/static/icons/image.svg'); mask-image: url('/static/icons/image.svg'); }
+.icon-file-plus { -webkit-mask-image: url('/static/icons/file-plus.svg'); mask-image: url('/static/icons/file-plus.svg'); }
+.icon-color { -webkit-mask-image: url('/static/icons/color.svg'); mask-image: url('/static/icons/color.svg'); }
+.icon-undo { -webkit-mask-image: url('/static/icons/undo.svg'); mask-image: url('/static/icons/undo.svg'); }
+
 
 #sidebar { 
     width: var(--sidebar-width); 
@@ -1669,11 +1736,10 @@ body.edit-mode-active .delete-btn {
 
 .tool-btn:hover { background: rgba(255,255,255,0.08); }
 .tool-btn span { font-size: 0.6em; margin-top: 2px; opacity: 0.8; white-space: nowrap; }
-.tool-btn i { font-style: normal; font-size: 1em; }
 
 .color-tool { min-width: 46px; }
 .color-row { display: flex; align-items: center; justify-content: center; gap: 3px; width: 100%; height: 20px; margin-top: 0; }
-.color-row span { font-size: 1em !important; cursor: pointer; margin: 0 !important; line-height: 20px; display: flex; align-items: center; }
+.color-row span { cursor: pointer; display: flex; align-items: center; }
 
 #text-color-input { 
     width: 16px; 
@@ -2513,9 +2579,9 @@ function renderMarkdown(text) {
     
     html = html.replace(/\[img:(.*?)\]/g, '<img src="/uploads/$1" class="note-img" onclick="openLightbox(this.src)">');
     html = html.replace(/\[sketch:([a-zA-Z0-9]+)\]/g, '<img src="/uploads/sketch_$1.png?v='+Date.now()+'" class="note-img sketch-img" title="Skizze bearbeiten" onclick="openSketch(\'$1\')">');
-    html = html.replace(/\[file:([a-zA-Z0-9.\-]+)\|([^\]]+)\]/g, '<a href="/uploads/$1" target="_blank" class="note-link">📎 $2</a>');
+    html = html.replace(/\[file:([a-zA-Z0-9.\-]+)\|([^\]]+)\]/g, '<a href="/uploads/$1" target="_blank" class="note-link"><i class="icon icon-file-plus"></i> $2</a>');
     
-    html = html.replace(/\[note:([a-zA-Z0-9]+)\|([^\]]+)\]/g, (match, id, title) => `<a href="#" onclick="if(!window.isShareView){selectNode('${id}'); return false;}" class="note-link">@ ${title}</a>`);
+    html = html.replace(/\[note:([a-zA-Z0-9]+)\|([^\]]+)\]/g, (match, id, title) => `<a href="#" onclick="if(!window.isShareView){selectNode('${id}'); return false;}" class="note-link"><i class="icon icon-mention"></i> ${title}</a>`);
     html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" style="color:var(--accent); text-decoration:underline;">$1</a>');
     html = html.replace(/\[s=(.*?)\]\n?([\s\S]*?)\n?\[\/s\]/g, '<details class="spoiler"><summary>$1</summary><div class="spoiler-content">$2</div></details>');
 
@@ -2625,9 +2691,9 @@ function renderDisplayArea() {
     
     fetch(`/api/notes/${activeId}/backlinks`).then(r => r.json()).then(bl => {
         if (bl && bl.length > 0 && activeId === activeNoteData.id) {
-            let blHtml = '<div style="margin-top:40px; padding-top:15px; border-top:1px dashed var(--border-color); color:#888;"><strong>🔗 Wird erwähnt in:</strong><br><div style="margin-top:8px;">';
+            let blHtml = '<div style="margin-top:40px; padding-top:15px; border-top:1px dashed var(--border-color); color:#888;"><strong><i class="icon icon-link"></i> Wird erwähnt in:</strong><br><div style="margin-top:8px;">';
             bl.forEach(b => {
-                blHtml += `<a href="#" onclick="selectNode('${b.id}'); return false;" class="note-link">@ ${b.title}</a> `;
+                blHtml += `<a href="#" onclick="selectNode('${b.id}'); return false;" class="note-link"><i class="icon icon-mention"></i> ${b.title}</a> `;
             });
             blHtml += '</div></div>';
             document.getElementById('display-area').innerHTML += blHtml;
@@ -2830,7 +2896,11 @@ function renderItems(items, parent) {
         
         const icon = document.createElement('span'); 
         icon.className = 'tree-icon'; 
-        icon.innerText = isFolder ? (isCollapsed ? '📁' : '📂') : '📄';
+        if (isFolder) {
+            icon.innerHTML = isCollapsed ? '<i class="icon icon-folder" style="color: #f1c40f;"></i>' : '<i class="icon icon-folder_open" style="color: #f39c12;"></i>';
+        } else {
+            icon.innerHTML = '<i class="icon icon-file" style="color: #bdc3c7;"></i>';
+        }
         
         icon.onclick = (e) => { 
             e.stopPropagation(); 
@@ -2857,7 +2927,7 @@ function renderItems(items, parent) {
         if (hasActiveReminder(item)) { 
             const rSpan = document.createElement('span'); 
             rSpan.className = 'reminder-icon'; 
-            rSpan.innerText = '⏰'; 
+            rSpan.innerHTML = '<i class="icon icon-reminder_active"></i>'; 
             text.appendChild(rSpan); 
         }
         
@@ -2868,7 +2938,7 @@ function renderItems(items, parent) {
         
         const addBtn = document.createElement('button'); 
         addBtn.className = 'add-sub-btn'; 
-        addBtn.innerText = '+'; 
+        addBtn.innerHTML = '<i class="icon icon-add"></i>'; 
         addBtn.onclick = (e) => { 
             e.stopPropagation(); 
             addItem(item.id); 
@@ -2876,7 +2946,7 @@ function renderItems(items, parent) {
         
         const delBtn = document.createElement('button'); 
         delBtn.className = 'delete-btn'; 
-        delBtn.innerText = '×'; 
+        delBtn.innerHTML = '<i class="icon icon-clear"></i>'; 
         delBtn.onclick = (e) => { 
             e.stopPropagation(); 
             deleteItem(item.id); 
@@ -3173,7 +3243,7 @@ async function openTrashModal() {
             info.style.gap = '8px';
 
             const icon = document.createElement('span');
-            icon.innerText = childrenMap[node.id] ? '📁' : '📄';
+            icon.innerHTML = childrenMap[node.id] ? '<i class="icon icon-folder" style="color: #f1c40f;"></i>' : '<i class="icon icon-file" style="color: #bdc3c7;"></i>';
 
             const titleSpan = document.createElement('div');
             titleSpan.innerText = node.title || 'Unbenannt';
@@ -3946,9 +4016,9 @@ function updateMenuUI() {
     const pwdBtn = document.getElementById('pwd-toggle-text'); 
     const logoutBtn = document.getElementById('logout-btn'); 
     const whToggleText = document.getElementById('webhook-toggle-text'); 
-    if(pwdBtn) pwdBtn.innerText = fullTree.settings.password_enabled ? '🔓 Passwortschutz aus' : '🔒 Passwortschutz an'; 
+    if(pwdBtn) pwdBtn.innerHTML = fullTree.settings.password_enabled ? '<i class="icon icon-password" style="margin-right:8px;"></i> Passwortschutz aus' : '<i class="icon icon-password" style="margin-right:8px;"></i> Passwortschutz an'; 
     if(logoutBtn) logoutBtn.style.display = fullTree.settings.password_enabled ? 'flex' : 'none'; 
-    if(whToggleText) whToggleText.innerText = fullTree.settings.webhook_enabled ? '📡 Webhook (Aktiviert)' : '📡 Webhook (Push)'; 
+    if(whToggleText) whToggleText.innerHTML = fullTree.settings.webhook_enabled ? '<i class="icon icon-webhook" style="margin-right:8px;"></i> Webhook (Aktiviert)' : '<i class="icon icon-webhook" style="margin-right:8px;"></i> Webhook (Push)'; 
 
     const taskToggleText = document.getElementById('toggle-tasks-text');
     const remToggleText = document.getElementById('toggle-reminders-text');
@@ -3956,8 +4026,8 @@ function updateMenuUI() {
     const tasksEnabled = fullTree.settings.icon_tasks_enabled !== false && fullTree.settings.icon_tasks_enabled !== 'false';
     const remEnabled = fullTree.settings.icon_reminders_enabled !== false && fullTree.settings.icon_reminders_enabled !== 'false';
 
-    if(taskToggleText) taskToggleText.innerText = tasksEnabled ? '☑️ Aufgaben-Icon: An' : '☑️ Aufgaben-Icon: Aus';
-    if(remToggleText) remToggleText.innerText = remEnabled ? '⏰ Erinnerungs-Icon: An' : '⏰ Erinnerungs-Icon: Aus';
+    if(taskToggleText) taskToggleText.innerHTML = tasksEnabled ? '<i class="icon icon-tasks" style="margin-right:8px;"></i> Aufgaben-Icon: An' : '<i class="icon icon-tasks" style="margin-right:8px;"></i> Aufgaben-Icon: Aus';
+    if(remToggleText) remToggleText.innerHTML = remEnabled ? '<i class="icon icon-reminder_active" style="margin-right:8px;"></i> Erinnerungs-Icon: An' : '<i class="icon icon-reminder_active" style="margin-right:8px;"></i> Erinnerungs-Icon: Aus';
 
     const btnTask = document.getElementById('todo-dashboard-btn');
     const btnRem = document.getElementById('notification-bell');
@@ -4303,10 +4373,8 @@ if [ "$ACTION" == "1" ]; then
     echo "================================================================="
     echo "Möchtest du, dass das System jede Nacht automatisch ein komprimiertes"
     echo "Backup (.tar.gz) deiner Datenbank und Bilder anlegt?"
-    read -p "Backup aktivieren? (Y/n): " BACKUP_CONFIRM
-    if [ -z "$BACKUP_CONFIRM" ]; then 
-        BACKUP_CONFIRM="y"
-    fi
+    read -p "Backup aktivieren? [Y/n]: " BACKUP_CONFIRM
+    BACKUP_CONFIRM=${BACKUP_CONFIRM:-Y}
 
     echo ""
     echo "--- Starte Setup für $INSTALL_DIR auf Port $USER_PORT ---"
