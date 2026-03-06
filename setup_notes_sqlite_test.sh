@@ -2731,6 +2731,17 @@ function renderMarkdown(text) {
     if (!text) return ''; 
     let html = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); 
     
+    // 1. Zuerst die reine Text-Formatierung (Fett, Kursiv, Farbe etc.)
+    let last = ""; 
+    while (last !== html) { 
+        last = html; 
+        html = html.replace(/\[(#[0-9a-fA-F]{6})\]([\s\S]*?)\[\/#\]/g, '<span style="color:$1">$2</span>'); 
+        html = html.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>'); 
+        html = html.replace(/_(.*?)_/g, '<i>$1</i>'); 
+        html = html.replace(/~~(.*?)~~/g, '<s>$1</s>'); 
+    } 
+
+    // 2. DANACH erst die Medien und Links generieren (verhindert URL-Zerstörung durch Unterstriche)
     html = html.replace(/\[img:(.*?)\]/g, '<img src="/uploads/$1" class="note-img" onclick="openLightbox(this.src)">');
     html = html.replace(/\[sketch:([a-zA-Z0-9]+)\]/g, '<img src="/uploads/sketch_$1.png?v='+Date.now()+'" class="note-img sketch-img" title="Skizze bearbeiten" onclick="openSketch(\'$1\')">');
     html = html.replace(/\[file:([a-zA-Z0-9.\-]+)\|([^\]]+)\]/g, '<a href="/api/download/$1" class="note-link"><i class="icon icon-file"></i> $2</a>');
@@ -2740,15 +2751,7 @@ function renderMarkdown(text) {
     html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" style="color:var(--accent); text-decoration:underline;">$1</a>');
     html = html.replace(/\[s=(.*?)\]\n?([\s\S]*?)\n?\[\/s\]/g, '<details class="spoiler"><summary>$1</summary><div class="spoiler-content">$2</div></details>');
 
-    let last = ""; 
-    while (last !== html) { 
-        last = html; 
-        html = html.replace(/\[(#[0-9a-fA-F]{6})\]([\s\S]*?)\[\/#\]/g, '<span style="color:$1">$2</span>'); 
-        html = html.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>'); 
-        html = html.replace(/_(.*?)_/g, '<i>$1</i>'); 
-        html = html.replace(/~~(.*?)~~/g, '<s>$1</s>'); 
-    } 
-    
+    // 3. Tabellen
     let tableRegex = /((?:\|[^\n]+\|\n?)+)/g;
     html = html.replace(tableRegex, function(match) {
         let rows = match.trim().split('\n');
@@ -2766,6 +2769,7 @@ function renderMarkdown(text) {
         return table;
     });
     
+    // 4. Blöcke (Code, Listen, Zitate etc.)
     let parts = html.split("'''"); 
     let res = ''; 
     window.taskIndexCounter = 0; 
