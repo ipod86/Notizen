@@ -27,7 +27,8 @@ if [ ${#INSTANCES[@]} -gt 0 ]; then
     echo "[1] Eine NEUE Instanz anlegen"
     echo "[2] Alle bestehenden Instanzen AKTUALISIEREN (Code-Update einspielen)"
     echo "[3] Eine bestehende Instanz LÖSCHEN (Restlos deinstallieren)"
-    read -p "Deine Auswahl (1, 2 oder 3): " ACTION
+    read -p "Deine Auswahl (1, 2 oder 3) [Standard: 1]: " ACTION
+    ACTION=${ACTION:-1}
 else
     echo "Willkommen! Es wurden keine bestehenden Instanzen gefunden."
     echo "Wir starten nun mit der Neuinstallation der ersten Instanz."
@@ -124,11 +125,15 @@ def init_db():
             )
         ''')
         
-        try: conn.execute('ALTER TABLE notes ADD COLUMN is_trashed INTEGER DEFAULT 0')
-        except sqlite3.OperationalError: pass
+        try:
+            conn.execute('ALTER TABLE notes ADD COLUMN is_trashed INTEGER DEFAULT 0')
+        except sqlite3.OperationalError:
+            pass
         
-        try: conn.execute('ALTER TABLE notes ADD COLUMN share_id TEXT')
-        except sqlite3.OperationalError: pass
+        try:
+            conn.execute('ALTER TABLE notes ADD COLUMN share_id TEXT')
+        except sqlite3.OperationalError:
+            pass
         
         conn.execute('''
             CREATE TABLE IF NOT EXISTS note_history (
@@ -786,7 +791,6 @@ import sqlite3
 import os
 import time
 
-# Pfade absolut über das Skript-Verzeichnis auflösen, damit es auch im Cronjob klappt!
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB = os.path.join(BASE_DIR, 'data.db')
 UPL = os.path.join(BASE_DIR, 'uploads')
@@ -1139,7 +1143,7 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
             <h3 style="margin:0">Notizen</h3>
             <div style="display:flex; gap:8px;">
                 <button id="toggle-all-btn" onclick="toggleAllFolders()" title="Alle auf/zu"><i class="icon icon-folder_open"></i></button>
-                <button id="sort-btn" onclick="confirmAutoSort()" title="Automatisch sortieren"><i class="icon icon-folder"></i></button>
+                <button id="sort-btn" onclick="confirmAutoSort()" title="Automatisch sortieren"><i class="icon icon-sort-abc"></i></button>
                 <button onclick="toggleEditMode()" title="Struktur Bearbeiten"><i class="icon icon-sketch"></i></button>
             </div>
         </div>
@@ -1478,7 +1482,6 @@ body {
     left: 0; 
 }
 
-/* Neue CSS-Klassen für MDI Icons */
 .icon {
     display: inline-block;
     width: 1.2em;
@@ -1533,6 +1536,7 @@ body {
 .icon-file-plus { -webkit-mask-image: url('/static/icons/file-plus.svg'); mask-image: url('/static/icons/file-plus.svg'); }
 .icon-color { -webkit-mask-image: url('/static/icons/color.svg'); mask-image: url('/static/icons/color.svg'); }
 .icon-undo { -webkit-mask-image: url('/static/icons/undo.svg'); mask-image: url('/static/icons/undo.svg'); }
+.icon-sort-abc { -webkit-mask-image: url('/static/icons/sort-alphabetical-variant.svg'); mask-image: url('/static/icons/sort-alphabetical-variant.svg'); }
 
 
 #sidebar { 
@@ -2355,6 +2359,39 @@ async function clearReminderById(id) {
     }
 }
 
+function updateToggleAllIcon() {
+    const btn = document.getElementById('toggle-all-btn');
+    if (!btn) return;
+    
+    let totalFolders = 0;
+    function countFolders(items) { 
+        if (!Array.isArray(items)) return;
+        items.forEach(i => { 
+            if (i.children && i.children.length > 0) { 
+                totalFolders++; 
+                countFolders(i.children); 
+            } 
+        }); 
+    }
+    countFolders(fullTree.content);
+    
+    if (totalFolders === 0) {
+        btn.innerHTML = '<i class="icon icon-folder_open"></i>';
+        btn.title = "Alle aufklappen";
+        return;
+    }
+
+    if (collapsedIds.size >= totalFolders / 2) { 
+        // Viele sind zu -> Klick wird aufklappen -> Icon zeigt offenen Ordner (Ziel-Status)
+        btn.innerHTML = '<i class="icon icon-folder_open"></i>';
+        btn.title = "Alle aufklappen";
+    } else { 
+        // Viele sind offen -> Klick wird zuklappen -> Icon zeigt geschlossenen Ordner (Ziel-Status)
+        btn.innerHTML = '<i class="icon icon-folder"></i>';
+        btn.title = "Alle zuklappen";
+    }
+}
+
 async function checkAndReloadData() {
     try {
         const res = await fetch('/api/tree?_t=' + Date.now());
@@ -2389,6 +2426,7 @@ async function checkAndReloadData() {
         }
         
         await updateBadges();
+        updateToggleAllIcon();
 
         if (activeId) {
             const editModeEl = document.getElementById('edit-mode');
@@ -2441,6 +2479,8 @@ async function loadData() {
     }
     
     renderTree(); 
+    updateToggleAllIcon();
+    
     const lastId = localStorage.getItem('lastActiveId'); 
     if (lastId && findNode(fullTree.content, lastId)) {
         selectNode(lastId); 
@@ -2897,7 +2937,8 @@ function renderItems(items, parent) {
         const icon = document.createElement('span'); 
         icon.className = 'tree-icon'; 
         if (isFolder) {
-            icon.innerHTML = isCollapsed ? '<i class="icon icon-folder" style="color: #f1c40f;"></i>' : '<i class="icon icon-folder_open" style="color: #f39c12;"></i>';
+            // Hier beide Icons auf das gleiche warme Orange (#f39c12) gesetzt
+            icon.innerHTML = isCollapsed ? '<i class="icon icon-folder" style="color: #f39c12;"></i>' : '<i class="icon icon-folder_open" style="color: #f39c12;"></i>';
         } else {
             icon.innerHTML = '<i class="icon icon-file" style="color: #bdc3c7;"></i>';
         }
@@ -2916,6 +2957,7 @@ function renderItems(items, parent) {
                     filterTree();
                 } else {
                     renderTree(); 
+                    updateToggleAllIcon(); // Icon direkt aktualisieren
                 }
             } 
         }; 
@@ -3521,6 +3563,7 @@ function clearSearch() {
     document.getElementById('search-input').value = ''; 
     document.getElementById('clear-search').style.display = 'none'; 
     renderTree(); 
+    updateToggleAllIcon();
 }
 
 async function filterTree() {
@@ -3530,6 +3573,7 @@ async function filterTree() {
     if (!term) { 
         clearBtn.style.display = 'none'; 
         renderTree(); 
+        updateToggleAllIcon();
         return; 
     }
     
@@ -3575,6 +3619,7 @@ async function filterTree() {
         }
         
         renderItems(getFilteredItems(fullTree.content), rootGroup);
+        updateToggleAllIcon();
     }, 300); 
 }
 
@@ -3597,8 +3642,12 @@ function toggleAllFolders() {
     let totalFolders = 0;
     
     function countFolders(items) { 
+        if (!Array.isArray(items)) return;
         items.forEach(i => { 
-            if (i.children && i.children.length > 0) { totalFolders++; countFolders(i.children); } 
+            if (i.children && i.children.length > 0) { 
+                totalFolders++; 
+                countFolders(i.children); 
+            } 
         }); 
     }
     
@@ -3609,7 +3658,10 @@ function toggleAllFolders() {
     } else { 
         function collect(items) { 
             items.forEach(i => { 
-                if(i.children && i.children.length > 0) { collapsedIds.add(i.id); collect(i.children); } 
+                if(i.children && i.children.length > 0) { 
+                    collapsedIds.add(i.id); 
+                    collect(i.children); 
+                } 
             }); 
         } 
         collect(fullTree.content); 
@@ -3617,6 +3669,7 @@ function toggleAllFolders() {
     
     saveCollapsedToLocal(); 
     if (searchTerm) filterTree(); else renderTree();
+    updateToggleAllIcon();
 }
 
 function confirmAutoSort() { 
@@ -3643,6 +3696,7 @@ async function applyAutoSort() {
     await rebuildDataFromDOM(); 
     document.body.classList.remove('edit-mode-active'); 
     renderTree();
+    updateToggleAllIcon();
 }
 
 function wrapSelection(b, a, p = "") { 
@@ -4328,7 +4382,7 @@ if [ "$ACTION" == "1" ]; then
     echo "Dieser Name wird für den Ordner (z.B. /opt/notiz-firma) und den"
     echo "Systemd-Service (notizen-firma.service) verwendet."
     echo "Bitte verwende nur Kleinbuchstaben und keine Leerzeichen."
-    read -p "Name der Instanz (Standard: 'main'): " INSTANCE_NAME
+    read -p "Name der Instanz [Standard: main]: " INSTANCE_NAME
     
     if [ -z "$INSTANCE_NAME" ]; then 
         INSTANCE_NAME="main"
@@ -4355,7 +4409,7 @@ if [ "$ACTION" == "1" ]; then
     
     # Intelligenter Port-Check
     while true; do
-        read -p "Gewünschter Port (Standard: 8080): " USER_PORT
+        read -p "Gewünschter Port [Standard: 8080]: " USER_PORT
         if [ -z "$USER_PORT" ]; then USER_PORT=8080; fi
         
         if grep -q "FLASK_PORT=$USER_PORT" /etc/systemd/system/notizen*.service 2>/dev/null; then
@@ -4373,7 +4427,7 @@ if [ "$ACTION" == "1" ]; then
     echo "================================================================="
     echo "Möchtest du, dass das System jede Nacht automatisch ein komprimiertes"
     echo "Backup (.tar.gz) deiner Datenbank und Bilder anlegt?"
-    read -p "Backup aktivieren? [Y/n]: " BACKUP_CONFIRM
+    read -p "Backup aktivieren? [Y/n] [Standard: Y]: " BACKUP_CONFIRM
     BACKUP_CONFIRM=${BACKUP_CONFIRM:-Y}
 
     echo ""
