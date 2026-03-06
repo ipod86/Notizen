@@ -2940,7 +2940,7 @@ function renderItems(items, parent) {
             // Hier beide Icons auf das gleiche warme Orange (#f39c12) gesetzt
             icon.innerHTML = isCollapsed ? '<i class="icon icon-folder" style="color: #f39c12;"></i>' : '<i class="icon icon-folder_open" style="color: #f39c12;"></i>';
         } else {
-            icon.innerHTML = '<i class="icon icon-file" style="color: #bdc3c7;"></i>';
+            icon.innerHTML = '<i class="icon icon-file" style="opacity: 0.6;"></i>';
         }
         
         icon.onclick = (e) => { 
