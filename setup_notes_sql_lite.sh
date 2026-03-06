@@ -6,38 +6,48 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-echo "Welcher Port soll für das Notiz-Tool genutzt werden? (Standard: 8080)"
-read -p "Port: " USER_PORT
-if [ -z "$USER_PORT" ]; then 
-    USER_PORT=8080
+BASE_DIR="/opt"
+
+# Suche nach bestehenden Instanzen
+mapfile -t INSTANCES < <(find $BASE_DIR -maxdepth 1 -type d -name "notiz-*" 2>/dev/null)
+
+echo "================================================================="
+echo " 📝 Notiz-Tool Setup & Instanz-Manager"
+echo "================================================================="
+echo ""
+
+if [ ${#INSTANCES[@]} -gt 0 ]; then
+    echo "Gefundene Instanzen auf diesem Server:"
+    for i in "${!INSTANCES[@]}"; do
+        DISP_NAME=$(basename "${INSTANCES[$i]}" | sed 's/notiz-//')
+        echo " - $DISP_NAME (Port wird automatisch verwaltet)"
+    done
+    echo ""
+    echo "Was möchtest du tun?"
+    echo "[1] Eine NEUE Instanz anlegen"
+    echo "[2] Alle bestehenden Instanzen AKTUALISIEREN (Code-Update einspielen)"
+    echo "[3] Eine bestehende Instanz LÖSCHEN (Restlos deinstallieren)"
+    read -p "Deine Auswahl (1, 2 oder 3): " ACTION
+else
+    echo "Willkommen! Es wurden keine bestehenden Instanzen gefunden."
+    echo "Wir starten nun mit der Neuinstallation der ersten Instanz."
+    ACTION="1"
 fi
 
-echo "Soll ein tägliches SQLite-Voll-Backup (04:00 Uhr) eingerichtet werden? (Y/n)"
-read -p "Backup-Cronjob: " BACKUP_CONFIRM
-if [ -z "$BACKUP_CONFIRM" ]; then 
-    BACKUP_CONFIRM="y"
-fi
+# ==========================================
+# FUNKTION: Code in das Zielverzeichnis schreiben
+# ==========================================
+write_app_code() {
+    local TARGET_DIR=$1
+    echo "Schreibe strukturierte Code-Dateien nach $TARGET_DIR ..."
 
-INSTALL_DIR="/opt/notiz-tool"
-SERVICE_NAME="notizen.service"
-
-echo "--- Stoppe alten Service (falls aktiv) ---"
-systemctl stop $SERVICE_NAME 2>/dev/null
-
-echo "--- Starte Setup in $INSTALL_DIR auf Port $USER_PORT ---"
-
-apt update && apt install -y python3 python3-pip python3-venv cron sqlite3
-
-mkdir -p $INSTALL_DIR/static 
-mkdir -p $INSTALL_DIR/templates 
-mkdir -p $INSTALL_DIR/uploads 
-mkdir -p $INSTALL_DIR/backups
-
-python3 -m venv $INSTALL_DIR/venv
-$INSTALL_DIR/venv/bin/python3 -m pip install flask werkzeug requests
+    mkdir -p "$TARGET_DIR/static"
+    mkdir -p "$TARGET_DIR/templates"
+    mkdir -p "$TARGET_DIR/uploads"
+    mkdir -p "$TARGET_DIR/backups"
 
 # --- app.py ---
-cat << 'EOF' > $INSTALL_DIR/app.py
+cat << 'EOF' > "$TARGET_DIR/app.py"
 from flask import Flask, render_template, request, jsonify, send_from_directory, session, redirect, url_for, send_file
 from werkzeug.security import generate_password_hash, check_password_hash
 import json
@@ -105,6 +115,7 @@ def init_db():
         
         try: conn.execute('ALTER TABLE notes ADD COLUMN is_trashed INTEGER DEFAULT 0')
         except sqlite3.OperationalError: pass
+        
         try: conn.execute('ALTER TABLE notes ADD COLUMN share_id TEXT')
         except sqlite3.OperationalError: pass
         
@@ -127,19 +138,28 @@ def init_db():
             conn.execute("INSERT INTO settings (key, value) VALUES ('tree_last_modified', '0')")
             
         conn.execute('DROP TRIGGER IF EXISTS update_tree_mod')
-        conn.execute('''CREATE TRIGGER update_tree_mod AFTER UPDATE ON notes BEGIN 
-            UPDATE settings SET value = strftime('%s', 'now') WHERE key = 'tree_last_modified'; 
-        END;''')
+        conn.execute('''
+            CREATE TRIGGER update_tree_mod AFTER UPDATE ON notes 
+            BEGIN 
+                UPDATE settings SET value = strftime('%s', 'now') WHERE key = 'tree_last_modified'; 
+            END;
+        ''')
         
         conn.execute('DROP TRIGGER IF EXISTS insert_tree_mod')
-        conn.execute('''CREATE TRIGGER insert_tree_mod AFTER INSERT ON notes BEGIN 
-            UPDATE settings SET value = strftime('%s', 'now') WHERE key = 'tree_last_modified'; 
-        END;''')
+        conn.execute('''
+            CREATE TRIGGER insert_tree_mod AFTER INSERT ON notes 
+            BEGIN 
+                UPDATE settings SET value = strftime('%s', 'now') WHERE key = 'tree_last_modified'; 
+            END;
+        ''')
         
         conn.execute('DROP TRIGGER IF EXISTS delete_tree_mod')
-        conn.execute('''CREATE TRIGGER delete_tree_mod AFTER DELETE ON notes BEGIN 
-            UPDATE settings SET value = strftime('%s', 'now') WHERE key = 'tree_last_modified'; 
-        END;''')
+        conn.execute('''
+            CREATE TRIGGER delete_tree_mod AFTER DELETE ON notes 
+            BEGIN 
+                UPDATE settings SET value = strftime('%s', 'now') WHERE key = 'tree_last_modified'; 
+            END;
+        ''')
 
 def send_webhook(title, time_str):
     try:
@@ -182,15 +202,20 @@ def webhook_worker():
                 for r in reminders:
                     try:
                         r_str = r['reminder'].replace('Z', '')
-                        if len(r_str) == 10: r_dt = datetime.strptime(r_str, '%Y-%m-%d')
-                        else: r_dt = datetime.fromisoformat(r_str)
+                        if len(r_str) == 10: 
+                            r_dt = datetime.strptime(r_str, '%Y-%m-%d')
+                        else: 
+                            r_dt = datetime.fromisoformat(r_str)
+                            
                         key = f"{r['id']}_{r_str}"
                         
                         if r_dt <= now and key not in sent_reminders:
                             send_webhook(r['title'], r_str)
                             sent_reminders.add(key)
-                    except: pass
-        except: pass
+                    except Exception: 
+                        pass
+        except Exception: 
+            pass
         time.sleep(30)
 
 init_db()
@@ -217,16 +242,20 @@ def get_settings():
 
 @app.before_request
 def require_login():
-    if request.endpoint in ['login', 'static', 'view_shared_note', 'uploaded_file']: return
+    if request.endpoint in ['login', 'static', 'view_shared_note', 'uploaded_file']: 
+        return
+        
     sets = get_settings()
     if sets.get('password_enabled') and not session.get('logged_in'):
-        if request.path.startswith('/api/'): return jsonify({"error": "Unauthorized"}), 401
+        if request.path.startswith('/api/'): 
+            return jsonify({"error": "Unauthorized"}), 401
         return redirect(url_for('login'))
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     sets = get_settings()
-    if not sets.get('password_enabled'): return redirect(url_for('index'))
+    if not sets.get('password_enabled'): 
+        return redirect(url_for('index'))
     
     client_ip = request.headers.get('X-Forwarded-For', request.remote_addr).split(',')[0].strip()
     now = time.time()
@@ -241,16 +270,12 @@ def login():
             error_msg = f"Zu viele Fehlversuche. Login gesperrt für {int(remaining_secs/60)} Minute(n)."
         return render_template('login.html', theme=sets.get('theme', 'dark'), accent=sets.get('accent', '#27ae60'), error=error_msg, v=str(time.time()))
     
-    # Sperre abgelaufen?
     if failed_attempts[client_ip]['lock_until'] != 0 and failed_attempts[client_ip]['lock_until'] <= now:
         if failed_attempts[client_ip]['count'] >= 5:
-            # 5-Minuten-Sperre ist rum -> Alles auf null
             failed_attempts[client_ip] = {'count': 0, 'lock_until': 0, 'first_attempt': now}
         else:
-            # 5-Sekunden-Sperre ist rum -> Nur Sperre lösen, Counter bleibt!
             failed_attempts[client_ip]['lock_until'] = 0
 
-    # Reset, wenn der erste Versuch > 60 Sekunden her ist und wir nicht gesperrt sind
     if now - failed_attempts[client_ip]['first_attempt'] > 60 and failed_attempts[client_ip]['lock_until'] == 0:
         failed_attempts[client_ip] = {'count': 0, 'lock_until': 0, 'first_attempt': now}
 
@@ -261,9 +286,7 @@ def login():
             return redirect(url_for('index'))
         
         failed_attempts[client_ip]['count'] += 1
-        
-        # IP im Webhook übermitteln
-        trigger_webhook_async(f"Achtung, fehlgeschlagener login Notes von IP: {client_ip}", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        trigger_webhook_async(f"Achtung, fehlgeschlagener Login bei Notizen von IP: {client_ip}", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
         
         if failed_attempts[client_ip]['count'] >= 5:
             failed_attempts[client_ip]['lock_until'] = now + 300
@@ -297,13 +320,16 @@ def get_tree():
         nodes_by_parent = {}
         for r in rows:
             pid = r['parent_id']
-            if pid is not None and pid not in all_ids: pid = None
-            if pid not in nodes_by_parent: nodes_by_parent[pid] = []
+            if pid is not None and pid not in all_ids: 
+                pid = None
+            if pid not in nodes_by_parent: 
+                nodes_by_parent[pid] = []
             nodes_by_parent[pid].append(dict(r))
             
         def build_tree(pid=None):
             children = nodes_by_parent.get(pid, [])
-            for c in children: c['children'] = build_tree(c['id'])
+            for c in children: 
+                c['children'] = build_tree(c['id'])
             return children
             
         return jsonify({"content": build_tree(None), "settings": sets, "last_modified": sets.get('tree_last_modified', 0)})
@@ -402,7 +428,8 @@ def delete_note(note_id):
     with get_db() as conn:
         def trash_recursive(nid):
             children = conn.execute("SELECT id FROM notes WHERE parent_id=?", (nid,)).fetchall()
-            for c in children: trash_recursive(c['id'])
+            for c in children: 
+                trash_recursive(c['id'])
             conn.execute("UPDATE notes SET is_trashed=1 WHERE id=?", (nid,))
         trash_recursive(note_id)
     return jsonify({"status": "success"})
@@ -471,7 +498,8 @@ def view_shared_note(share_id):
     sets = get_settings()
     with get_db() as conn:
         row = conn.execute("SELECT title, text FROM notes WHERE share_id=? AND is_trashed=0", (share_id,)).fetchone()
-        if not row: return "Notiz nicht gefunden oder Freigabe wurde beendet.", 404
+        if not row: 
+            return "Notiz nicht gefunden oder Freigabe wurde vom Inhaber beendet.", 404
         
         text_b64 = base64.b64encode((row['text'] or '').encode('utf-8')).decode('utf-8')
         return render_template('share.html', 
@@ -512,15 +540,18 @@ def toggle_todo_global():
     t_idx = data['task_index']
     with get_db() as conn:
         row = conn.execute("SELECT text FROM notes WHERE id=?", (nid,)).fetchone()
-        if not row: return jsonify({"error": "not found"}), 404
+        if not row: 
+            return jsonify({"error": "not found"}), 404
         lines = row['text'].split('\n')
         curr_idx = 0
         for i, line in enumerate(lines):
             t = line.strip()
             if t.startswith('- [ ]') or t.startswith('- [x]') or t.startswith('- [X]'):
                 if curr_idx == t_idx:
-                    if t.startswith('- [ ]'): lines[i] = line.replace('- [ ]', '- [x]', 1)
-                    else: lines[i] = line.replace('- [x]', '- [ ]', 1).replace('- [X]', '- [ ]', 1)
+                    if t.startswith('- [ ]'): 
+                        lines[i] = line.replace('- [ ]', '- [x]', 1)
+                    else: 
+                        lines[i] = line.replace('- [x]', '- [ ]', 1).replace('- [X]', '- [ ]', 1)
                     break
                 curr_idx += 1
         new_text = '\n'.join(lines)
@@ -583,18 +614,21 @@ def handle_lock(note_id):
         is_locked = c_owner and (now - lock_time) < 30
         
         if action == 'release':
-            if c_owner == cid or not is_locked: conn.execute("UPDATE notes SET locked_by=NULL, locked_at=NULL WHERE id=?", (note_id,))
+            if c_owner == cid or not is_locked: 
+                conn.execute("UPDATE notes SET locked_by=NULL, locked_at=NULL WHERE id=?", (note_id,))
             return jsonify({"status": "released"})
         elif action == 'heartbeat':
             if c_owner == cid:
                 conn.execute("UPDATE notes SET locked_at=? WHERE id=?", (now, note_id))
                 return jsonify({"status": "acquired"})
-            else: return jsonify({"status": "lost"})
+            else: 
+                return jsonify({"status": "lost"})
         elif action in ['acquire', 'override']:
             if action == 'override' or not is_locked or c_owner == cid:
                 conn.execute("UPDATE notes SET locked_by=?, locked_at=? WHERE id=?", (cid, now, note_id))
                 return jsonify({"status": "acquired"})
-            else: return jsonify({"status": "locked"})
+            else: 
+                return jsonify({"status": "locked"})
     return jsonify({"error": "invalid action"}), 400
 
 @app.route('/uploads/<filename>')
@@ -615,15 +649,18 @@ def upload_file():
 def save_sketch():
     data = request.json
     sid = data.get('id') or uuid.uuid4().hex
-    with open(os.path.join(UPLOAD_FOLDER, f"sketch_{sid}.png"), "wb") as f: f.write(base64.b64decode(data['image'].split(',')[1]))
-    with open(os.path.join(UPLOAD_FOLDER, f"sketch_{sid}.json"), "w") as f: json.dump({"bg": data['bg'], "strokes": data['strokes']}, f)
+    with open(os.path.join(UPLOAD_FOLDER, f"sketch_{sid}.png"), "wb") as f: 
+        f.write(base64.b64decode(data['image'].split(',')[1]))
+    with open(os.path.join(UPLOAD_FOLDER, f"sketch_{sid}.json"), "w") as f: 
+        json.dump({"bg": data['bg'], "strokes": data['strokes']}, f)
     return jsonify({"id": sid})
 
 @app.route('/api/sketch/<sid>', methods=['GET'])
 def load_sketch(sid):
     p = os.path.join(UPLOAD_FOLDER, f"sketch_{sid}.json")
     if os.path.exists(p):
-        with open(p, 'r') as f: return jsonify(json.load(f))
+        with open(p, 'r') as f: 
+            return jsonify(json.load(f))
     return jsonify({"error": "404"}), 404
 
 @app.route('/api/export', methods=['GET'])
@@ -631,12 +668,15 @@ def export_backup():
     mem = io.BytesIO()
     b_path = DB_FILE + '.backup'
     try:
-        with sqlite3.connect(DB_FILE) as src, sqlite3.connect(b_path) as dst: src.backup(dst)
+        with sqlite3.connect(DB_FILE) as src, sqlite3.connect(b_path) as dst: 
+            src.backup(dst)
         with tarfile.open(fileobj=mem, mode='w:gz') as tar:
             tar.add(b_path, arcname='data.db')
-            if os.path.exists(UPLOAD_FOLDER): tar.add(UPLOAD_FOLDER, arcname='uploads')
+            if os.path.exists(UPLOAD_FOLDER): 
+                tar.add(UPLOAD_FOLDER, arcname='uploads')
     finally:
-        if os.path.exists(b_path): os.remove(b_path)
+        if os.path.exists(b_path): 
+            os.remove(b_path)
     mem.seek(0)
     filename = f'notes_backup_{datetime.now().strftime("%Y%m%d_%H%M")}.tar.gz'
     return send_file(mem, download_name=filename, as_attachment=True, mimetype='application/gzip')
@@ -666,17 +706,22 @@ def restore_backup():
         file.save(tar_path)
     elif server_file:
         tar_path = os.path.join(BACKUP_FOLDER, server_file)
-        if not os.path.exists(tar_path): return jsonify({"error": "Serverseitiges Backup nicht gefunden"}), 404
-    else: return jsonify({"error": "Keine Backup-Datei angegeben"}), 400
+        if not os.path.exists(tar_path): 
+            return jsonify({"error": "Serverseitiges Backup nicht gefunden"}), 404
+    else: 
+        return jsonify({"error": "Keine Backup-Datei angegeben"}), 400
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             try:
-                with tarfile.open(tar_path, 'r:gz') as tar: tar.extractall(path=tmpdir)
-            except: return jsonify({"error": "Datei ist kein gültiges tar.gz Archiv"}), 400
+                with tarfile.open(tar_path, 'r:gz') as tar: 
+                    tar.extractall(path=tmpdir)
+            except: 
+                return jsonify({"error": "Datei ist kein gültiges tar.gz Archiv"}), 400
             
             db_path = os.path.join(tmpdir, 'data.db')
-            if not os.path.exists(db_path): return jsonify({"error": "Das Archiv enthält keine data.db"}), 400
+            if not os.path.exists(db_path): 
+                return jsonify({"error": "Das Archiv enthält keine data.db"}), 400
             
             try:
                 conn = sqlite3.connect(db_path)
@@ -684,21 +729,28 @@ def restore_backup():
                 cursor.execute("PRAGMA integrity_check;")
                 res = cursor.fetchone()
                 conn.close()
-                if res[0] != "ok": return jsonify({"error": "Die Datenbank im Backup ist korrupt"}), 400
-            except Exception as e: return jsonify({"error": f"Datenbank-Prüfung fehlgeschlagen: {str(e)}"}), 400
+                if res[0] != "ok": 
+                    return jsonify({"error": "Die Datenbank im Backup ist korrupt"}), 400
+            except Exception as e: 
+                return jsonify({"error": f"Datenbank-Prüfung fehlgeschlagen: {str(e)}"}), 400
             
-            if os.path.exists(DB_FILE): shutil.copy2(DB_FILE, DB_FILE + '.pre-restore')
+            if os.path.exists(DB_FILE): 
+                shutil.copy2(DB_FILE, DB_FILE + '.pre-restore')
             for ext in ['-wal', '-shm']:
                 if os.path.exists(DB_FILE + ext):
-                    try: os.remove(DB_FILE + ext)
-                    except: pass
+                    try: 
+                        os.remove(DB_FILE + ext)
+                    except: 
+                        pass
             
             shutil.copy2(db_path, DB_FILE)
             uploads_ext = os.path.join(tmpdir, 'uploads')
             if os.path.exists(uploads_ext):
-                if os.path.exists(UPLOAD_FOLDER): shutil.rmtree(UPLOAD_FOLDER)
+                if os.path.exists(UPLOAD_FOLDER): 
+                    shutil.rmtree(UPLOAD_FOLDER)
                 shutil.copytree(uploads_ext, UPLOAD_FOLDER)
-            elif not os.path.exists(UPLOAD_FOLDER): os.makedirs(UPLOAD_FOLDER)
+            elif not os.path.exists(UPLOAD_FOLDER): 
+                os.makedirs(UPLOAD_FOLDER)
 
         def restart_app():
             time.sleep(1.5)
@@ -706,26 +758,33 @@ def restore_backup():
         threading.Thread(target=restart_app, daemon=True).start()
         return jsonify({"status": "success"})
         
-    except Exception as e: return jsonify({"error": str(e)}), 500
+    except Exception as e: 
+        return jsonify({"error": str(e)}), 500
     finally:
-        if file and tar_path and os.path.exists(tar_path): os.remove(tar_path)
+        if file and tar_path and os.path.exists(tar_path): 
+            os.remove(tar_path)
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080, debug=False)
+    port = int(os.environ.get('FLASK_PORT', 8080))
+    app.run(host='0.0.0.0', port=port, debug=False)
 EOF
 
 # --- cleanup.py ---
-cat << 'EOF' > $INSTALL_DIR/cleanup.py
+cat << 'EOF' > "$TARGET_DIR/cleanup.py"
 import sqlite3
 import os
 import time
 
-DB = '/opt/notiz-tool/data.db'
-UPL = '/opt/notiz-tool/uploads'
+DB = 'data.db'
+UPL = 'uploads'
 
-if not os.path.exists(DB) or not os.path.exists(UPL): exit()
+abs_db = os.path.join(os.getcwd(), DB)
+abs_upl = os.path.join(os.getcwd(), UPL)
 
-conn = sqlite3.connect(DB)
+if not os.path.exists(abs_db) or not os.path.exists(abs_upl): 
+    exit()
+
+conn = sqlite3.connect(abs_db)
 
 sets = dict(conn.execute("SELECT key, value FROM settings").fetchall())
 hist_enabled = sets.get('history_enabled', 'true') == 'true'
@@ -745,33 +804,37 @@ hist_rows = conn.execute("SELECT text FROM note_history WHERE text IS NOT NULL")
 all_texts = [r[0] for r in rows] + [r[0] for r in hist_rows]
 
 for text in all_texts:
-    for f in os.listdir(UPL):
-        if f in text: used_files.add(f)
+    for f in os.listdir(abs_upl):
+        if f in text: 
+            used_files.add(f)
         if f.startswith('sketch_') and f.endswith('.png'):
             sid = f.replace('sketch_', '').replace('.png', '')
             if f"[sketch:{sid}]" in text:
                 used_files.add(f)
                 used_files.add(f"sketch_{sid}.json")
                 
-for f in os.listdir(UPL):
+for f in os.listdir(abs_upl):
     if f not in used_files:
-        try: os.remove(os.path.join(UPL, f))
-        except: pass
+        try: 
+            os.remove(os.path.join(abs_upl, f))
+        except Exception: 
+            pass
 EOF
 
 # --- backup.sh ---
-cat << 'EOF' > $INSTALL_DIR/backup.sh
+cat << 'EOF' > "$TARGET_DIR/backup.sh"
 #!/bin/bash
-cd /opt/notiz-tool
+cd "$(dirname "$0")"
 if [ -f data.db ]; then
     sqlite3 data.db ".backup 'data.db.backup'"
     tar -czf backups/backup_$(date +%u).tar.gz data.db.backup uploads/
     rm data.db.backup
 fi
 EOF
+chmod +x "$TARGET_DIR/backup.sh"
 
 # --- templates/login.html ---
-cat << 'EOF' > $INSTALL_DIR/templates/login.html
+cat << 'EOF' > "$TARGET_DIR/templates/login.html"
 <!DOCTYPE html>
 <html lang="de">
 <head>
@@ -931,7 +994,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/login.html
 EOF
 
 # --- templates/share.html ---
-cat << 'EOF' > $INSTALL_DIR/templates/share.html
+cat << 'EOF' > "$TARGET_DIR/templates/share.html"
 <!DOCTYPE html>
 <html lang="de">
 <head>
@@ -974,7 +1037,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/share.html
 EOF
 
 # --- templates/index.html ---
-cat << 'EOF' > $INSTALL_DIR/templates/index.html
+cat << 'EOF' > "$TARGET_DIR/templates/index.html"
 <!DOCTYPE html>
 <html lang="de">
 <head>
@@ -1081,7 +1144,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
     </div>
     
     <div id="editor">
-        <div id="no-selection" style="margin-top:50px;text-align:center;opacity:0.5">Wähle eine Notiz aus.</div>
+        <div id="no-selection" style="margin-top:50px;text-align:center;opacity:0.5">Bitte wähle eine Notiz aus der Navigation.</div>
         <div id="edit-area" style="display:none">
             <div id="breadcrumb" style="font-size:0.8em;color:var(--accent);margin-bottom:15px;overflow-wrap:anywhere;word-break:break-word;"></div>
             
@@ -1138,7 +1201,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
                 </div>
 
                 <div style="display:flex; gap:10px; margin-bottom:10px; align-items:stretch;">
-                    <input type="text" id="node-title" placeholder="Titel" style="margin-bottom:0; flex-grow:1;">
+                    <input type="text" id="node-title" placeholder="Titel der Notiz..." style="margin-bottom:0; flex-grow:1;">
                     <button class="tool-btn" onclick="openReminderModal()" style="margin:0; min-height:100%; flex-direction:row; gap:5px; padding:0 10px; width:auto;">
                         <i>⏰</i><span id="edit-reminder-text">Erinnerung</span>
                     </button>
@@ -1147,10 +1210,10 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
                     </button>
                 </div>
 
-                <textarea id="node-text" placeholder="Text oder Bild hier ablegen..." style="height:60vh"></textarea>
+                <textarea id="node-text" placeholder="Text, Notizen, Code oder Bilder hier einfügen..." style="height:60vh"></textarea>
             </div>
             
-            <button id="add-sub-level-btn" onclick="addItem(activeId)" style="margin-top:20px;border:1px solid var(--accent) !important;color:var(--accent);padding:5px 10px;border-radius:4px;">+ Unter-Ebene</button>
+            <button id="add-sub-level-btn" onclick="addItem(activeId)" style="margin-top:20px;border:1px solid var(--accent) !important;color:var(--accent);padding:5px 10px;border-radius:4px;">+ Unter-Ebene erstellen</button>
         </div>
     </div>
     
@@ -1174,7 +1237,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
     <div id="share-overview-modal" class="modal-overlay">
         <div class="modal" style="width: 550px; max-width: 95vw;">
             <h3 style="margin-top:0">Aktive Freigaben</h3>
-            <p style="font-size:0.85em; opacity:0.7; text-align:left; margin-bottom:15px;">Hier siehst du alle Notizen, die aktuell über einen Link für Dritte erreichbar sind.</p>
+            <p style="font-size:0.85em; opacity:0.7; text-align:left; margin-bottom:15px;">Hier siehst du alle Notizen, die aktuell über einen öffentlichen Link erreichbar sind.</p>
             <div id="share-list" style="text-align:left; max-height: 50vh; overflow-y: auto; margin-bottom: 20px;">
                 Lade...
             </div>
@@ -1252,11 +1315,11 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
         <div class="modal" style="width: 500px; max-width: 95vw;">
             <h3 style="margin-top:0">Backup Wiederherstellen</h3>
             <div style="text-align: left; margin-bottom: 15px;">
-                <p style="font-size: 0.9em; color: #ccc;">Wähle ein automatisches Server-Backup:</p>
+                <p style="font-size: 0.9em; color: #ccc;">Wähle ein automatisches Server-Backup aus der Liste:</p>
                 <select id="server-backups" style="width: 100%; padding: 10px; margin-bottom: 15px; background: rgba(255,255,255,0.05); color: inherit; border: 1px solid var(--border-color); border-radius: 4px;">
                     <option value="">-- Lade Backups... --</option>
                 </select>
-                <p style="font-size: 0.9em; color: #ccc;">Oder lade eine Backup-Datei (.tar.gz) hoch:</p>
+                <p style="font-size: 0.9em; color: #ccc;">Oder lade eine lokale Backup-Datei (.tar.gz) hoch:</p>
                 <input type="file" id="restore-file-upload" accept=".tar.gz,.gz" style="width: 100%; padding: 10px; background: rgba(255,255,255,0.05); border: 1px dashed var(--accent); border-radius: 4px; box-sizing: border-box;">
             </div>
             <div id="restore-status" style="font-size: 0.9em; margin-bottom: 15px; display: none; padding: 10px; border-radius: 4px; background: rgba(0,0,0,0.2);"></div>
@@ -1305,6 +1368,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
     <div id="reminder-modal" class="modal-overlay">
         <div class="modal">
             <h3 style="margin-top:0">Erinnerung setzen</h3>
+            <p style="font-size:0.85em; opacity:0.7; margin-bottom:15px;">Wann möchtest du an diese Notiz erinnert werden?</p>
             <div style="margin-bottom:15px; text-align:left;">
                 <label style="display:block; margin-bottom:10px; cursor:pointer;">
                     <input type="checkbox" id="reminder-has-time" onchange="toggleReminderInput()"> Mit fester Uhrzeit
@@ -1322,6 +1386,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
     <div id="webhook-modal" class="modal-overlay">
         <div class="modal" style="max-width: 500px;">
             <h3 style="margin-top:0">Webhook Push-Benachrichtigungen</h3>
+            <p style="font-size:0.85em; opacity:0.7; margin-bottom:15px;">Sende Erinnerungen direkt an dein Smartphone oder Discord.</p>
             <div style="text-align:left; margin-bottom: 15px;">
                 <label style="display:block; margin-bottom:10px; cursor:pointer;">
                     <input type="checkbox" id="webhook-enabled"> Webhooks aktivieren
@@ -1349,8 +1414,8 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
     <div id="custom-modal" class="modal-overlay">
         <div class="modal">
             <h3 id="modal-title"></h3>
-            <p id="modal-text" style="white-space: pre-wrap; word-break: break-word;"></p>
-            <input type="password" id="modal-input" style="display:none; margin-top: 15px; width: 100%; box-sizing: border-box;" placeholder="Passwort...">
+            <p id="modal-text" style="white-space: pre-wrap; word-break: break-word; font-size: 0.9em; opacity: 0.9; margin-bottom: 20px;"></p>
+            <input type="password" id="modal-input" style="display:none; margin-top: 15px; width: 100%; box-sizing: border-box;" placeholder="Sicheres Passwort...">
             <div class="modal-btns" id="modal-btns-container"></div>
         </div>
     </div>
@@ -1365,7 +1430,7 @@ cat << 'EOF' > $INSTALL_DIR/templates/index.html
 EOF
 
 # --- static/style.css ---
-cat << 'EOF' > $INSTALL_DIR/static/style.css
+cat << 'EOF' > "$TARGET_DIR/static/style.css"
 :root { 
     --bg-color: #1a1a1a; 
     --sidebar-bg: #252525; 
@@ -1928,7 +1993,7 @@ input[type="checkbox"].task-check { width: 16px; height: 16px; margin: 0; cursor
 EOF
 
 # --- static/script.js ---
-cat << 'EOF' > $INSTALL_DIR/static/script.js
+cat << 'EOF' > "$TARGET_DIR/static/script.js"
 var fullTree = { content: [], settings: {} };
 var activeId = null;
 var activeNoteData = null; 
@@ -2057,7 +2122,7 @@ function startHeartbeat(noteId) {
                 lockInterval = null;
                 currentLockedNote = null;
                 
-                showModal("Sperre verloren!", "Ein anderes Gerät hat die Bearbeitung erzwungen.", [
+                showModal("Sperre verloren!", "Ein anderes Gerät hat die Bearbeitung erzwungen und diese Notiz übernommen.", [
                     { label: "Verstanden", class: "btn-cancel", action: () => { 
                         cancelEdit(); 
                         if (document.getElementById('sketch-modal').style.display === 'flex') closeSketch();
@@ -2333,7 +2398,7 @@ function saveCollapsedToLocal() {
 
 function uploadWithProgress(file, onSuccess) {
     if (file.size > 50 * 1024 * 1024) { 
-        showModal("Zu groß", "Die Datei darf maximal 50 MB groß sein.", [{ label: "OK", class: "btn-cancel", action: () => {} }]); 
+        showModal("Upload fehlgeschlagen", "Die ausgewählte Datei ist zu groß. Bitte wähle eine Datei mit maximal 50 MB aus.", [{ label: "Verstanden", class: "btn-cancel", action: () => {} }]); 
         return; 
     }
     
@@ -2365,13 +2430,13 @@ function uploadWithProgress(file, onSuccess) {
             const data = JSON.parse(xhr.responseText);
             onSuccess(data);
         } else {
-            showModal("Fehler", "Der Upload ist fehlgeschlagen.", [{ label: "OK", class: "btn-cancel", action: () => {} }]); 
+            showModal("Fehler", "Der Upload ist leider fehlgeschlagen. Bitte versuche es noch einmal.", [{ label: "OK", class: "btn-cancel", action: () => {} }]); 
         }
     };
     
     xhr.onerror = function() {
         modal.style.display = 'none';
-        showModal("Netzwerkfehler", "Upload abgebrochen.", [{ label: "OK", class: "btn-cancel", action: () => {} }]);
+        showModal("Netzwerkfehler", "Upload wurde durch ein Netzwerkproblem abgebrochen.", [{ label: "OK", class: "btn-cancel", action: () => {} }]);
     };
     
     xhr.send(fd);
@@ -2384,8 +2449,8 @@ async function enableEdit() {
     
     const locked = await acquireLock(activeId);
     if (!locked) {
-        showModal("System gesperrt", "Die Notiz wird gerade bearbeitet.\n\nErzwingen?", [
-            { label: "Ja", class: "btn-discard", action: async () => { await acquireLock(activeId, true); showEditArea(); } },
+        showModal("System gesperrt", "Diese Notiz wird aktuell von einem anderen Gerät oder Tab bearbeitet.\n\nMöchtest du die Sperre wirklich erzwingen? Achtung: Dabei könnten ungespeicherte Änderungen des anderen Nutzers überschrieben werden!", [
+            { label: "Ja, Bearbeitung erzwingen", class: "btn-discard", action: async () => { await acquireLock(activeId, true); showEditArea(); } },
             { label: "Abbrechen", class: "btn-cancel", action: () => {} }
         ]);
         return;
@@ -2425,7 +2490,7 @@ async function saveChanges() {
             body: JSON.stringify(activeNoteData) 
         });
         if (res.status === 403) {
-            showModal("Speichern blockiert", "Gerät hat keine Sperre mehr. NICHT gespeichert.", [{ label: "OK", class: "btn-cancel", action: () => {} }]);
+            showModal("Speichern blockiert", "Dein Gerät hat die Sperre für diese Notiz verloren. Deine letzten Änderungen wurden NICHT gespeichert.", [{ label: "Verstanden", class: "btn-cancel", action: () => {} }]);
             return;
         }
     } catch(e) { 
@@ -2499,7 +2564,7 @@ function renderMarkdown(text) {
         } else { 
             res += parts[i].split('\n').map(line => {
                 let t = line.trim(); 
-                if (t.startsWith('<table') || t.startsWith('</table') || t.startsWith('<tr') || t.startsWith('</tr') || t.startsWith('<td') || t.startsWith('</td') || t.startsWith('<th') || t.startsWith('</th')) return line;
+                if (t.startsWith('<table') || t.startsWith('</table') || t.startsWith('<tr') || t.startsWith('</tr') || t.startsWith('<td') || t.startsWith('</th') || t.startsWith('</th')) return line;
                 
                 if (t === '') return '<br>'; 
                 if (t === '---') return '<hr>';
@@ -2573,9 +2638,9 @@ function renderDisplayArea() {
 async function selectNode(id) { 
     if (document.getElementById('edit-mode').style.display === 'block') {
         if (activeNoteData && (document.getElementById('node-title').value !== activeNoteData.title || document.getElementById('node-text').value !== activeNoteData.text)) { 
-            showModal("Ungespeichert", "Speichern?", [ 
-                { label: "Ja", class: "btn-save", action: async () => { await saveChanges(); doSelectNode(id); } }, 
-                { label: "Nein", class: "btn-discard", action: () => { cancelEdit(); doSelectNode(id); } }, 
+            showModal("Ungespeicherte Änderungen", "Du hast diese Notiz bearbeitet, aber noch nicht gespeichert. Möchtest du deine Änderungen jetzt speichern?", [ 
+                { label: "Ja, speichern", class: "btn-save", action: async () => { await saveChanges(); doSelectNode(id); } }, 
+                { label: "Nein, verwerfen", class: "btn-discard", action: () => { cancelEdit(); doSelectNode(id); } }, 
                 { label: "Abbruch", class: "btn-cancel", action: () => {} } 
             ]); 
             return; 
@@ -2663,7 +2728,7 @@ async function rebuildDataFromDOM() {
 window.toggleTask = async function(targetIdx, currentlyChecked) {
     if (window.isShareView) return;
     if (!await acquireLock(activeId)) { 
-        showModal("Gesperrt", "Checkbox kann nicht geändert werden.", [{ label: "OK", class: "btn-cancel", action: () => {} }]); 
+        showModal("Gesperrt", "Diese Aufgabe kann momentan nicht abgehakt werden, da die Notiz von einem anderen Gerät bearbeitet wird.", [{ label: "Verstanden", class: "btn-cancel", action: () => {} }]); 
         renderDisplayArea(); 
         return; 
     }
@@ -2941,9 +3006,9 @@ async function shareNote() {
         const res = await fetch(`/api/notes/${activeId}/share`, {method: 'POST'});
         const data = await res.json();
         if (data.url) {
-            showModal("Lese-Link generiert", `Dein Link:\n\n${data.url}\n\nJeder mit diesem Link kann die Notiz lesen.`, [
-                { label: "Kopieren", class: "btn-save", action: () => { copyText(data.url); } },
-                { label: "Freigabe aufheben", class: "btn-discard", action: async () => { await fetch(`/api/notes/${activeId}/unshare`, {method: 'POST'}); } },
+            showModal("Lese-Link erfolgreich generiert", `Hier ist dein öffentlicher Link:\n\n${data.url}\n\nJeder, der diesen Link besitzt, kann den aktuellen Stand dieser Notiz im reinen Lesemodus betrachten. Der Link bleibt so lange aktiv, bis du die Freigabe manuell wieder aufhebst.`, [
+                { label: "Link kopieren", class: "btn-save", action: () => { copyText(data.url); } },
+                { label: "Freigabe sofort aufheben", class: "btn-discard", action: async () => { await fetch(`/api/notes/${activeId}/unshare`, {method: 'POST'}); } },
                 { label: "Schließen", class: "btn-cancel", action: () => {} }
             ]);
         }
@@ -2953,13 +3018,13 @@ async function shareNote() {
 async function openShareOverviewModal() {
     document.getElementById('share-overview-modal').style.display = 'flex';
     const list = document.getElementById('share-list');
-    list.innerHTML = 'Lade...';
+    list.innerHTML = 'Lade Freigaben...';
     try {
         const res = await fetch('/api/shares');
         const data = await res.json();
         
         if(data.length === 0) { 
-            list.innerHTML = '<p style="opacity:0.5;text-align:center;">Es gibt aktuell keine aktiven Freigabe-Links.</p>'; 
+            list.innerHTML = '<p style="opacity:0.5;text-align:center;">Es gibt aktuell keine aktiven Freigabe-Links in deinem System.</p>'; 
             return; 
         }
         
@@ -2989,7 +3054,7 @@ async function openShareOverviewModal() {
             list.appendChild(d);
         });
     } catch(e) {
-        list.innerHTML = 'Fehler beim Laden.';
+        list.innerHTML = 'Fehler beim Laden der Übersicht.';
     }
 }
 
@@ -3003,7 +3068,7 @@ async function openTodoModal() {
         currentTodosList = await res.json();
         renderTodoList();
     } catch(e) {
-        list.innerHTML = 'Fehler beim Laden.';
+        list.innerHTML = 'Fehler beim Laden der Aufgaben.';
     }
 }
 
@@ -3015,7 +3080,7 @@ function renderTodoList() {
     const filteredTodos = showAll ? currentTodosList : currentTodosList.filter(t => !t.checked);
     
     if(filteredTodos.length === 0) { 
-        list.innerHTML = '<p style="opacity:0.5;text-align:center;">' + (showAll ? 'Keine Aufgaben gefunden.' : 'Glückwunsch! Alle Aufgaben sind erledigt.') + '</p>'; 
+        list.innerHTML = '<p style="opacity:0.5;text-align:center;">' + (showAll ? 'Es wurden keine Aufgaben in deinen Notizen gefunden.' : 'Glückwunsch! Alle aktuellen Aufgaben sind erledigt.') + '</p>'; 
         return; 
     }
     
@@ -3078,7 +3143,7 @@ async function openTrashModal() {
         let data = await res.json();
         
         if(data.length === 0) { 
-            list.innerHTML = '<p style="opacity:0.5;text-align:center;">Der Papierkorb ist leer.</p>'; 
+            list.innerHTML = '<p style="opacity:0.5;text-align:center;">Dein Papierkorb ist komplett leer.</p>'; 
             return; 
         }
 
@@ -3141,12 +3206,12 @@ async function openTrashModal() {
         roots.forEach(r => renderNode(r, 0));
         
     } catch(e) {
-        list.innerHTML = 'Fehler beim Laden.';
+        list.innerHTML = 'Fehler beim Laden des Papierkorbs.';
     }
 }
 
 function emptyTrash() {
-    showModal("Papierkorb leeren", "Alle gelöschten Notizen wirklich endgültig entfernen?\n\nDas kann nicht rückgängig gemacht werden!", [
+    showModal("Papierkorb endgültig leeren", "Möchtest du den Papierkorb jetzt leeren?\n\nAlle darin enthaltenen Notizen und Unterordner werden unwiderruflich von deinem Server gelöscht. Dieser Vorgang kann nicht rückgängig gemacht werden!", [
         { label: "Ja, endgültig löschen", class: "btn-discard", action: async () => { 
             await fetch('/api/trash/empty', {method: 'DELETE'});
             updateBadges(); 
@@ -3161,12 +3226,12 @@ async function openHistoryModal() {
     if (!activeId) return;
     
     if (!fullTree.settings.history_enabled) {
-        alert("Der Versionsverlauf ist in den Einstellungen deaktiviert.");
+        showModal("Hinweis", "Der Versionsverlauf ist in den allgemeinen Einstellungen derzeit deaktiviert.", [{ label: "Verstanden", class: "btn-cancel", action: () => {} }]);
         return;
     }
     
     if (!await acquireLock(activeId)) {
-        showModal("Gesperrt", "Der Verlauf kann nicht geöffnet werden, da die Notiz gerade auf einem anderen Gerät bearbeitet wird.", [
+        showModal("Gesperrt", "Der Verlauf kann momentan nicht geöffnet werden, da diese Notiz gerade auf einem anderen Gerät aktiv bearbeitet wird.", [
             { label: "Verstanden", class: "btn-cancel", action: () => {} }
         ]);
         return;
@@ -3174,14 +3239,14 @@ async function openHistoryModal() {
     
     document.getElementById('history-modal').style.display = 'flex';
     const listEl = document.getElementById('history-list');
-    listEl.innerHTML = 'Lade Versionen...';
+    listEl.innerHTML = 'Lade Versionen vom Server...';
     
     try {
         const res = await fetch(`/api/notes/${activeId}/history`);
         const data = await res.json();
         
         if (data.length === 0) {
-            listEl.innerHTML = '<p style="text-align:center; opacity:0.5;">Keine älteren Versionen dieser Notiz gefunden.</p>';
+            listEl.innerHTML = '<p style="text-align:center; opacity:0.5;">Es wurden noch keine älteren Versionen für diese Notiz gespeichert.</p>';
             return;
         }
         
@@ -3211,7 +3276,7 @@ async function openHistoryModal() {
             btn.className = 'btn-save';
             btn.style.marginTop = '15px';
             btn.style.width = '100%';
-            btn.innerText = 'Diese Version wiederherstellen';
+            btn.innerText = 'Diese alte Version wiederherstellen';
             btn.onclick = () => restoreHistory(h.id);
             
             content.appendChild(btn);
@@ -3220,7 +3285,7 @@ async function openHistoryModal() {
             listEl.appendChild(details);
         });
     } catch(e) {
-        listEl.innerHTML = 'Fehler beim Laden der Historie.';
+        listEl.innerHTML = 'Ein Fehler ist aufgetreten beim Laden der Historie.';
         console.error(e);
     }
 }
@@ -3241,7 +3306,7 @@ async function restoreHistory(historyId) {
         });
         
         if (res.status === 403) {
-            alert("Wiederherstellung blockiert: Gerät hat keine Sperre mehr.");
+            showModal("Fehler", "Wiederherstellung blockiert: Dein Gerät hat die Sperre verloren.", [{ label: "Verstanden", class: "btn-cancel", action: () => {} }]);
         } else {
             closeHistoryModal();
             await checkAndReloadData();
@@ -3299,7 +3364,7 @@ async function testWebhook() {
     };
     
     if (!payload.url) {
-        alert("Bitte zuerst eine Ziel-URL eintragen!");
+        showModal("Hinweis", "Bitte trage zuerst eine gültige Ziel-URL ein, bevor du den Test startest.", [{ label: "Okay", class: "btn-cancel", action: () => {} }]);
         return;
     }
     
@@ -3315,17 +3380,17 @@ async function testWebhook() {
         const data = await res.json();
         
         if (res.ok) {
-            showModal("Test-Ergebnis", `Status-Code: ${data.status_code}\n\nAntwort des Servers:\n${data.response_text || '(Keine Text-Antwort)'}`, [
-                { label: "Zurück zu Einstellungen", class: "btn-cancel", action: () => { document.getElementById('webhook-modal').style.display = 'flex'; } }
+            showModal("Test erfolgreich gesendet", `Der Server meldet den Status-Code: ${data.status_code}\n\nAntwort des Zielservers:\n${data.response_text || '(Keine Text-Antwort erhalten)'}`, [
+                { label: "Zurück zu den Einstellungen", class: "btn-cancel", action: () => { document.getElementById('webhook-modal').style.display = 'flex'; } }
             ]);
         } else {
-            showModal("Fehler beim Senden", `Der Test konnte nicht ausgeführt werden:\n\n${data.error}`, [
-                { label: "Zurück zu Einstellungen", class: "btn-cancel", action: () => { document.getElementById('webhook-modal').style.display = 'flex'; } }
+            showModal("Fehler beim Senden", `Der Test konnte nicht erfolgreich ausgeführt werden. Der Server meldet:\n\n${data.error}`, [
+                { label: "Zurück zu den Einstellungen", class: "btn-cancel", action: () => { document.getElementById('webhook-modal').style.display = 'flex'; } }
             ]);
         }
     } catch(e) {
-        showModal("Netzwerkfehler", `Es gab ein Problem beim Verbinden zum Server:\n\n${e}`, [
-            { label: "Zurück zu Einstellungen", class: "btn-cancel", action: () => { document.getElementById('webhook-modal').style.display = 'flex'; } }
+        showModal("Netzwerkfehler", `Es gab ein technisches Problem beim Verbinden zum Server:\n\n${e}`, [
+            { label: "Zurück zu den Einstellungen", class: "btn-cancel", action: () => { document.getElementById('webhook-modal').style.display = 'flex'; } }
         ]);
     }
 }
@@ -3445,13 +3510,13 @@ async function filterTree() {
 
 function togglePassword() {
     if (fullTree.settings.password_enabled) { 
-        showModal("Passwortschutz", "Deaktivieren?", [
-            { label: "Ja", class: "btn-discard", action: async () => { await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password_enabled: false }) }); fullTree.settings.password_enabled = false; updateMenuUI(); } }, 
+        showModal("Passwortschutz deaktivieren", "Möchtest du den Passwortschutz für diese Instanz wirklich deaktivieren? \n\nJeder, der die Server-URL kennt, hat dann sofort wieder vollen Lese- und Schreibzugriff auf alle deine Notizen.", [
+            { label: "Ja, Schutz aufheben", class: "btn-discard", action: async () => { await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password_enabled: false }) }); fullTree.settings.password_enabled = false; updateMenuUI(); } }, 
             { label: "Abbruch", class: "btn-cancel", action: () => {} }
         ]); 
     } else { 
-        showModal("Passwortschutz", "Neues Passwort:", [
-            { label: "Speichern", class: "btn-save", action: async () => { const pwd = document.getElementById('modal-input').value; if(pwd) { await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password_enabled: true, password: pwd }) }); fullTree.settings.password_enabled = true; updateMenuUI(); } } }, 
+        showModal("Passwortschutz aktivieren", "Bitte gib ein starkes, sicheres Passwort ein, um deine Notizen vor unbefugtem Zugriff zu schützen.", [
+            { label: "Passwort speichern", class: "btn-save", action: async () => { const pwd = document.getElementById('modal-input').value; if(pwd) { await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password_enabled: true, password: pwd }) }); fullTree.settings.password_enabled = true; updateMenuUI(); } } }, 
             { label: "Abbruch", class: "btn-cancel", action: () => {} }
         ], true); 
     }
@@ -3485,8 +3550,8 @@ function toggleAllFolders() {
 }
 
 function confirmAutoSort() { 
-    showModal("Sortieren?", "Automatisch alphabetisch sortieren?", [
-        { label: "Ja, Sortieren", class: "btn-discard", action: async () => { await applyAutoSort(); } }, 
+    showModal("Notizen sortieren?", "Möchtest du den gesamten Notizbaum automatisch alphabetisch sortieren lassen?\n\nHinweis: Ordner werden dabei immer oben angezeigt.", [
+        { label: "Ja, jetzt sortieren", class: "btn-discard", action: async () => { await applyAutoSort(); } }, 
         { label: "Abbrechen", class: "btn-cancel", action: () => {} }
     ]); 
 }
@@ -3564,7 +3629,7 @@ function copyToClipboard(btn) {
     el.select(); 
     document.execCommand('copy'); 
     document.body.removeChild(el); 
-    btn.innerText = 'Copied!'; 
+    btn.innerText = 'Kopiert!'; 
     setTimeout(() => { btn.innerText = 'Copy'; }, 2000); 
 }
 
@@ -3911,8 +3976,8 @@ async function addItem(parentId) {
 }
 
 function deleteItem(id) { 
-    showModal("Löschen", "Sicher?", [ 
-        { label: "Löschen", class: "btn-discard", action: async () => { 
+    showModal("Notiz löschen", "Möchtest du diese Notiz wirklich in den Papierkorb verschieben?\n\nAchtung: Alle Unterkategorien und deren Inhalte werden dabei ebenfalls in den Papierkorb verschoben.", [ 
+        { label: "Ja, in den Papierkorb", class: "btn-discard", action: async () => { 
             await fetch(`/api/notes/${id}`, { method: 'DELETE' }); 
             if (activeId === id) { activeId = null; document.getElementById('edit-area').style.display = 'none'; } 
             const el = document.querySelector(`.tree-item-container[data-id="${id}"]`);
@@ -4044,7 +4109,7 @@ async function executeRestore() {
     const serverFile = select.value;
     
     if (!file && !serverFile) { 
-        statusDiv.innerText = "Bitte wähle ein Backup aus der Liste oder lade eine Datei hoch!"; 
+        statusDiv.innerText = "Bitte wähle ein Backup aus der Liste oder lade eine lokale Datei hoch!"; 
         statusDiv.style.color = '#e74c3c'; 
         statusDiv.style.background = 'rgba(231, 76, 60, 0.1)'; 
         statusDiv.style.display = 'block'; 
@@ -4089,7 +4154,7 @@ async function executeRestore() {
                 document.getElementById('restore-modal').style.display = 'flex';
                 statusDiv.style.color = '#27ae60';
                 statusDiv.style.background = 'rgba(39, 174, 96, 0.1)';
-                statusDiv.innerText = "Erfolgreich! Die Seite wird nun neu geladen...";
+                statusDiv.innerText = "Wiederherstellung erfolgreich! Die Seite wird nun neu geladen...";
                 statusDiv.style.display = 'block';
                 setTimeout(() => window.location.reload(), 2000);
             } else {
@@ -4117,7 +4182,7 @@ async function executeRestore() {
         document.getElementById('restore-modal').style.display = 'flex';
         statusDiv.style.color = '#e74c3c';
         statusDiv.style.background = 'rgba(231, 76, 60, 0.1)';
-        statusDiv.innerText = "Netzwerkfehler beim Upload.";
+        statusDiv.innerText = "Netzwerkfehler beim Hochladen des Backups.";
         statusDiv.style.display = 'block';
         btn.disabled = false;
         btn.innerText = "Wiederherstellen";
@@ -4177,27 +4242,102 @@ window.onload = () => {
 };
 EOF
 
-if ! id -u notizen > /dev/null 2>&1; then 
-    useradd -r -s /bin/false notizen
-fi
+}
+# ==========================================
+# ENDE FUNKTION
+# ==========================================
 
-chown -R notizen:notizen $INSTALL_DIR
-find $INSTALL_DIR -type d -exec chmod 750 {} \;
-find $INSTALL_DIR -type f -exec chmod 640 {} \;
 
-chmod 750 $INSTALL_DIR/backup.sh
-chmod 750 $INSTALL_DIR/cleanup.py
-chmod +x $INSTALL_DIR/app.py
+if [ "$ACTION" == "1" ]; then
+    # --- NEUE INSTANZ ANLEGEN ---
+    echo ""
+    echo "================================================================="
+    echo " 🏢 Schritt 1: Name der Instanz"
+    echo "================================================================="
+    echo "Wie soll deine neue Notiz-Instanz heißen?"
+    echo "Dieser Name wird für den Ordner (z.B. /opt/notiz-firma) und den"
+    echo "Systemd-Service (notizen-firma.service) verwendet."
+    echo "Bitte verwende nur Kleinbuchstaben und keine Leerzeichen."
+    read -p "Name der Instanz (Standard: 'main'): " INSTANCE_NAME
+    
+    if [ -z "$INSTANCE_NAME" ]; then 
+        INSTANCE_NAME="main"
+    fi
+    
+    INSTALL_DIR="$BASE_DIR/notiz-$INSTANCE_NAME"
+    SERVICE_NAME="notizen-$INSTANCE_NAME.service"
+    CRON_FILE="/etc/cron.d/notizen-$INSTANCE_NAME"
+    
+    # Prüfen, ob die Instanz bereits existiert
+    if [ -d "$INSTALL_DIR" ]; then
+        echo ""
+        echo "❌ FEHLER: Eine Instanz mit dem Namen '$INSTANCE_NAME' existiert bereits!"
+        echo "Bitte wähle im Hauptmenü Option [2] für ein Update oder [3] zum Löschen."
+        exit 1
+    fi
+    
+    echo ""
+    echo "================================================================="
+    echo " 🔌 Schritt 2: Port-Konfiguration"
+    echo "================================================================="
+    echo "Über welchen Port soll diese Instanz erreichbar sein?"
+    echo "Wenn du z.B. 8081 wählst, erreichst du sie lokal unter http://IP:8081"
+    
+    # Intelligenter Port-Check
+    while true; do
+        read -p "Gewünschter Port (Standard: 8080): " USER_PORT
+        if [ -z "$USER_PORT" ]; then USER_PORT=8080; fi
+        
+        if grep -q "FLASK_PORT=$USER_PORT" /etc/systemd/system/notizen*.service 2>/dev/null; then
+            echo "❌ FEHLER: Der Port $USER_PORT ist bereits für eine andere Notiz-Instanz reserviert! Bitte wähle einen anderen."
+        elif ss -tuln | grep -q ":$USER_PORT "; then
+            echo "❌ FEHLER: Der Port $USER_PORT wird gerade von einem anderen Programm auf dem Server verwendet! Bitte wähle einen anderen."
+        else
+            break
+        fi
+    done
 
-cat << EOF > /etc/systemd/system/$SERVICE_NAME
+    echo ""
+    echo "================================================================="
+    echo " 💾 Schritt 3: Automatisches Backup"
+    echo "================================================================="
+    echo "Möchtest du, dass das System jede Nacht automatisch ein komprimiertes"
+    echo "Backup (.tar.gz) deiner Datenbank und Bilder anlegt?"
+    read -p "Backup aktivieren? (Y/n): " BACKUP_CONFIRM
+    if [ -z "$BACKUP_CONFIRM" ]; then 
+        BACKUP_CONFIRM="y"
+    fi
+
+    echo ""
+    echo "--- Starte Setup für $INSTALL_DIR auf Port $USER_PORT ---"
+
+    apt update && apt install -y python3 python3-pip python3-venv cron sqlite3
+
+    mkdir -p "$INSTALL_DIR"
+    python3 -m venv "$INSTALL_DIR/venv"
+    "$INSTALL_DIR/venv/bin/python3" -m pip install flask werkzeug requests
+
+    write_app_code "$INSTALL_DIR"
+
+    if ! id -u notizen > /dev/null 2>&1; then 
+        useradd -r -s /bin/false notizen
+    fi
+
+    chown -R notizen:notizen "$INSTALL_DIR"
+    find "$INSTALL_DIR" -type d -exec chmod 750 {} \;
+    find "$INSTALL_DIR" -type f -exec chmod 640 {} \;
+    chmod +x "$INSTALL_DIR/app.py"
+
+    cat << EOF > /etc/systemd/system/$SERVICE_NAME
 [Unit]
-Description=Notizen
+Description=Notizen ($INSTANCE_NAME)
 After=network.target
 
 [Service]
 User=notizen
 Group=notizen
 WorkingDirectory=$INSTALL_DIR
+Environment="FLASK_PORT=$USER_PORT"
 ExecStart=$INSTALL_DIR/venv/bin/python $INSTALL_DIR/app.py
 Restart=always
 
@@ -4205,16 +4345,116 @@ Restart=always
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable $SERVICE_NAME
+    systemctl daemon-reload
+    systemctl enable "$SERVICE_NAME"
+    systemctl start "$SERVICE_NAME"
 
-echo "--- Richte Cronjobs ein ---"
-rm -f /etc/cron.d/notizen-tool
-echo "0 3 * * * notizen /usr/bin/python3 $INSTALL_DIR/cleanup.py" >> /etc/cron.d/notizen-tool
-if [[ "$BACKUP_CONFIRM" =~ ^[Yy]$ ]]; then 
-    echo "0 4 * * * notizen $INSTALL_DIR/backup.sh" >> /etc/cron.d/notizen-tool
+    # Eigene Cron-Datei für diese Instanz
+    echo "0 3 * * * notizen /usr/bin/python3 $INSTALL_DIR/cleanup.py" > "$CRON_FILE"
+    if [[ "$BACKUP_CONFIRM" =~ ^[Yy]$ ]]; then 
+        echo "0 4 * * * notizen $INSTALL_DIR/backup.sh" >> "$CRON_FILE"
+    fi
+    chmod 644 "$CRON_FILE"
+
+    echo "--- ✅ Instanz '$INSTANCE_NAME' erfolgreich auf Port $USER_PORT installiert! ---"
+
+elif [ "$ACTION" == "2" ]; then
+    # --- BESTEHENDE INSTANZEN AKTUALISIEREN ---
+    echo ""
+    echo "Starte Update aller gefundenen Instanzen..."
+    
+    for DIR in "${INSTANCES[@]}"; do
+        INSTANCE_NAME=$(basename "$DIR" | sed 's/notiz-//')
+        
+        # Abwärtskompatibilität für das allererste Skript
+        if [ "$INSTANCE_NAME" == "tool" ]; then
+            SERVICE_NAME="notizen.service"
+        else
+            SERVICE_NAME="notizen-$INSTANCE_NAME.service"
+        fi
+
+        echo "-----------------------------------"
+        echo "Aktualisiere: $DIR (Service: $SERVICE_NAME)"
+        
+        systemctl stop "$SERVICE_NAME" 2>/dev/null
+        
+        write_app_code "$DIR"
+        
+        chown -R notizen:notizen "$DIR"
+        chmod +x "$DIR/app.py"
+        chmod +x "$DIR/backup.sh"
+        
+        systemctl start "$SERVICE_NAME"
+        echo "Fertig: $INSTANCE_NAME aktualisiert und neugestartet."
+    done
+    
+    echo "-----------------------------------"
+    echo "--- ✅ Alle Instanzen sind auf dem neuesten Stand! ---"
+
+elif [ "$ACTION" == "3" ]; then
+    # --- BESTEHENDE INSTANZ LÖSCHEN ---
+    echo ""
+    echo "================================================================="
+    echo " 🗑️ Instanz löschen"
+    echo "================================================================="
+    echo "Welche Instanz möchtest du restlos vom Server entfernen?"
+    echo ""
+    
+    for i in "${!INSTANCES[@]}"; do
+        DISP_NAME=$(basename "${INSTANCES[$i]}" | sed 's/notiz-//')
+        echo " [$((i+1))] $DISP_NAME (${INSTANCES[$i]})"
+    done
+    echo " [0] Abbrechen und zurück"
+    echo ""
+    
+    read -p "Bitte gib die Nummer der Instanz ein, die du löschen willst: " DEL_SELECTION
+
+    if [[ "$DEL_SELECTION" == "0" ]]; then
+        echo "Abbruch. Es wird nichts gelöscht."
+        exit 0
+    fi
+
+    if [[ "$DEL_SELECTION" =~ ^[0-9]+$ ]] && [ "$DEL_SELECTION" -gt 0 ] && [ "$DEL_SELECTION" -le "${#INSTANCES[@]}" ]; then
+        SELECTED_INDEX=$((DEL_SELECTION-1))
+        DEL_DIR="${INSTANCES[$SELECTED_INDEX]}"
+        DEL_NAME=$(basename "$DEL_DIR" | sed 's/notiz-//')
+        
+        echo ""
+        echo "⚠️ ACHTUNG: Du bist dabei, die Instanz '$DEL_NAME' komplett zu löschen!"
+        echo "Das beinhaltet alle Notizen (data.db), Bilder, Skizzen, Backups und Einstellungen."
+        read -p "Bist du absolut sicher? (tippe 'ja' zum Löschen): " CONFIRM_DEL
+
+        if [ "$CONFIRM_DEL" == "ja" ]; then
+            if [ "$DEL_NAME" == "tool" ]; then
+                SERVICE_NAME="notizen.service"
+                CRON_NAME="notizen-tool"
+            else
+                SERVICE_NAME="notizen-$DEL_NAME.service"
+                CRON_NAME="notizen-$DEL_NAME"
+            fi
+
+            echo "Stoppe und entferne Service $SERVICE_NAME..."
+            systemctl stop "$SERVICE_NAME" 2>/dev/null
+            systemctl disable "$SERVICE_NAME" 2>/dev/null
+            rm -f "/etc/systemd/system/$SERVICE_NAME"
+
+            echo "Entferne Cronjobs..."
+            rm -f "/etc/cron.d/$CRON_NAME"
+
+            echo "Lösche Verzeichnis $DEL_DIR..."
+            rm -rf "$DEL_DIR"
+
+            systemctl daemon-reload
+            echo "✅ Instanz '$DEL_NAME' wurde restlos und sauber vom Server entfernt."
+        else
+            echo "Abbruch. Es wurde nichts gelöscht."
+        fi
+    else
+        echo "Ungültige Eingabe. Skript wird beendet."
+        exit 1
+    fi
+
+else
+    echo "Ungültige Eingabe. Skript wird beendet."
+    exit 1
 fi
-chmod 644 /etc/cron.d/notizen-tool
-
-systemctl restart $SERVICE_NAME
-echo "--- Setup abgeschlossen! Tool ist unter Port $USER_PORT erreichbar. ---"
