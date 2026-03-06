@@ -43,8 +43,7 @@ Lade das Installationsskript direkt von GitHub herunter:
 
 ```bash
 wget -O setup_notes_sql_lite.sh [https://raw.githubusercontent.com/ipod86/Notizen/main/setup_notes_sql_lite.sh](https://raw.githubusercontent.com/ipod86/Notizen/main/setup_notes_sql_lite.sh) && chmod +x setup_notes_sql_lite.sh && sudo ./setup_notes_sql_lite.sh
-
----
+```
 
 ## Verwendete Open-Source-Bibliotheken & Ressourcen
 
