@@ -52,7 +52,6 @@ write_app_code() {
     wget -qO /tmp/notizen-static.zip https://github.com/ipod86/Notizen/archive/refs/heads/main.zip
     unzip -qo /tmp/notizen-static.zip -d /tmp/notizen-extract
     
-    # Kopiere nur die Ordner icons und lib in unser static Verzeichnis
     cp -r /tmp/notizen-extract/Notizen-main/static/icons "$TARGET_DIR/static/" 2>/dev/null || true
     cp -r /tmp/notizen-extract/Notizen-main/static/lib "$TARGET_DIR/static/" 2>/dev/null || true
     
@@ -75,6 +74,7 @@ import threading
 import sqlite3
 import tempfile
 import shutil
+import re
 from datetime import datetime
 
 app = Flask(__name__)
@@ -125,6 +125,7 @@ def init_db():
             )
         ''')
         
+        # Sicherstellen, dass die neuen Spalten existieren
         try:
             conn.execute('ALTER TABLE notes ADD COLUMN is_trashed INTEGER DEFAULT 0')
         except sqlite3.OperationalError:
@@ -134,7 +135,7 @@ def init_db():
             conn.execute('ALTER TABLE notes ADD COLUMN share_id TEXT')
         except sqlite3.OperationalError:
             pass
-        
+            
         conn.execute('''
             CREATE TABLE IF NOT EXISTS note_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -142,6 +143,16 @@ def init_db():
                 title TEXT,
                 text TEXT,
                 saved_at REAL
+            )
+        ''')
+        
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS media (
+                id TEXT PRIMARY KEY,
+                original_name TEXT,
+                filename TEXT,
+                file_type TEXT,
+                uploaded_at REAL
             )
         ''')
         
@@ -153,6 +164,7 @@ def init_db():
             conn.execute("INSERT INTO settings (key, value) VALUES ('history_days', '30')")
             conn.execute("INSERT INTO settings (key, value) VALUES ('tree_last_modified', '0')")
             
+        # Trigger für Synchronisation
         conn.execute('DROP TRIGGER IF EXISTS update_tree_mod')
         conn.execute('''
             CREATE TRIGGER update_tree_mod AFTER UPDATE ON notes 
@@ -177,6 +189,7 @@ def init_db():
             END;
         ''')
 
+# --- Webhook & Timer Logik ---
 def send_webhook(title, time_str):
     try:
         with get_db() as conn:
@@ -281,19 +294,13 @@ def login():
     
     if failed_attempts[client_ip]['lock_until'] > now:
         remaining_secs = int(failed_attempts[client_ip]['lock_until'] - now)
-        error_msg = f"Zu viele Fehlversuche. Login gesperrt für {remaining_secs} Sekunde(n)."
-        if remaining_secs > 60:
-            error_msg = f"Zu viele Fehlversuche. Login gesperrt für {int(remaining_secs/60)} Minute(n)."
-        return render_template('login.html', theme=sets.get('theme', 'dark'), accent=sets.get('accent', '#27ae60'), error=error_msg, v=str(time.time()))
+        return render_template('login.html', theme=sets.get('theme', 'dark'), accent=sets.get('accent', '#27ae60'), error=f"Zu viele Fehlversuche. Login gesperrt für {remaining_secs} Sekunde(n).", v=str(time.time()))
     
     if failed_attempts[client_ip]['lock_until'] != 0 and failed_attempts[client_ip]['lock_until'] <= now:
         if failed_attempts[client_ip]['count'] >= 5:
             failed_attempts[client_ip] = {'count': 0, 'lock_until': 0, 'first_attempt': now}
         else:
             failed_attempts[client_ip]['lock_until'] = 0
-
-    if now - failed_attempts[client_ip]['first_attempt'] > 60 and failed_attempts[client_ip]['lock_until'] == 0:
-        failed_attempts[client_ip] = {'count': 0, 'lock_until': 0, 'first_attempt': now}
 
     if request.method == 'POST':
         if check_password_hash(sets.get('password_hash', ''), request.form.get('password')):
@@ -309,8 +316,7 @@ def login():
             return render_template('login.html', theme=sets.get('theme', 'dark'), accent=sets.get('accent', '#27ae60'), error="5 Fehlversuche! Login für 5 Minuten gesperrt.", v=str(time.time()))
         
         failed_attempts[client_ip]['lock_until'] = now + 5
-        remaining_attempts = 5 - failed_attempts[client_ip]['count']
-        return render_template('login.html', theme=sets.get('theme', 'dark'), accent=sets.get('accent', '#27ae60'), error=f"Falsches Passwort. 5 Sekunden Wartezeit aktiv. Noch {remaining_attempts} Versuch(e) bis zur langen Sperre.", v=str(time.time()))
+        return render_template('login.html', theme=sets.get('theme', 'dark'), accent=sets.get('accent', '#27ae60'), error=f"Falsches Passwort. 5 Sekunden Wartezeit aktiv.", v=str(time.time()))
         
     return render_template('login.html', theme=sets.get('theme', 'dark'), accent=sets.get('accent', '#27ae60'), v=str(time.time()))
 
@@ -655,20 +661,39 @@ def uploaded_file(filename):
 def upload_file():
     file = request.files.get('file') or request.files.get('image')
     if file:
-        ext = file.filename.rsplit('.', 1)[1].lower()
+        ext = file.filename.rsplit('.', 1)[1].lower() if '.' in file.filename else ''
         filename = f"{uuid.uuid4().hex}.{ext}"
         file.save(os.path.join(UPLOAD_FOLDER, filename))
+        
+        file_type = 'file'
+        if file.mimetype.startswith('image/'): file_type = 'image'
+        elif file.mimetype.startswith('audio/'): file_type = 'audio'
+        
+        with get_db() as conn:
+            conn.execute("INSERT INTO media (id, original_name, filename, file_type, uploaded_at) VALUES (?, ?, ?, ?, ?)",
+                         (uuid.uuid4().hex, file.filename, filename, file_type, time.time()))
+                         
         return jsonify({"filename": filename, "original": file.filename})
     return jsonify({"error": "error"}), 400
 
 @app.route('/api/sketch', methods=['POST'])
 def save_sketch():
     data = request.json
+    is_new = not bool(data.get('id'))
     sid = data.get('id') or uuid.uuid4().hex
-    with open(os.path.join(UPLOAD_FOLDER, f"sketch_{sid}.png"), "wb") as f: 
+    
+    filename = f"sketch_{sid}.png"
+    
+    with open(os.path.join(UPLOAD_FOLDER, filename), "wb") as f: 
         f.write(base64.b64decode(data['image'].split(',')[1]))
     with open(os.path.join(UPLOAD_FOLDER, f"sketch_{sid}.json"), "w") as f: 
         json.dump({"bg": data['bg'], "strokes": data['strokes']}, f)
+        
+    if is_new:
+        with get_db() as conn:
+            conn.execute("INSERT INTO media (id, original_name, filename, file_type, uploaded_at) VALUES (?, ?, ?, ?, ?)",
+                         (sid, f"Skizze_{sid[:6]}.png", filename, 'sketch', time.time()))
+                         
     return jsonify({"id": sid})
 
 @app.route('/api/sketch/<sid>', methods=['GET'])
@@ -678,6 +703,61 @@ def load_sketch(sid):
         with open(p, 'r') as f: 
             return jsonify(json.load(f))
     return jsonify({"error": "404"}), 404
+
+# --- Medien-Manager Routes ---
+@app.route('/api/media', methods=['GET'])
+def get_media_list():
+    with get_db() as conn:
+        rows = conn.execute("SELECT id, original_name, filename, file_type, uploaded_at FROM media ORDER BY uploaded_at DESC").fetchall()
+        return jsonify([dict(r) for r in rows])
+
+@app.route('/api/media/<filename>/refs', methods=['GET'])
+def get_media_refs(filename):
+    with get_db() as conn:
+        safe_name = f'%{filename}%'
+        rows = conn.execute("SELECT id, title FROM notes WHERE is_trashed=0 AND text LIKE ?", (safe_name,)).fetchall()
+        return jsonify([dict(r) for r in rows])
+
+@app.route('/api/media/<filename>', methods=['DELETE'])
+def delete_media_item(filename):
+    with get_db() as conn:
+        conn.execute("DELETE FROM media WHERE filename=?", (filename,))
+        
+        # Säubere alle Notizen (Regex Ersetzung)
+        rows = conn.execute("SELECT id, text FROM notes WHERE text LIKE ?", (f'%{filename}%',)).fetchall()
+        for r in rows:
+            new_text = r['text']
+            # Entferne z.B. [img:filename.png], [file:filename.pdf|Original], [audio:filename.webm], [sketch:id]
+            # Extrahiere die Basis-ID für Skizzen (ohne sketch_ prefix und ohne .png)
+            if filename.startswith('sketch_') and filename.endswith('.png'):
+                sid = filename.replace('sketch_', '').replace('.png', '')
+                new_text = re.sub(r'\[sketch:' + re.escape(sid) + r'\]\n?', '', new_text)
+            else:
+                new_text = re.sub(r'\[(img|file|audio):' + re.escape(filename) + r'(\|[^\]]+)?\]\n?', '', new_text)
+            conn.execute("UPDATE notes SET text=? WHERE id=?", (new_text, r['id']))
+            
+        # Säubere auch die Historie
+        hist_rows = conn.execute("SELECT id, text FROM note_history WHERE text LIKE ?", (f'%{filename}%',)).fetchall()
+        for r in hist_rows:
+            new_text = r['text']
+            if filename.startswith('sketch_') and filename.endswith('.png'):
+                sid = filename.replace('sketch_', '').replace('.png', '')
+                new_text = re.sub(r'\[sketch:' + re.escape(sid) + r'\]\n?', '', new_text)
+            else:
+                new_text = re.sub(r'\[(img|file|audio):' + re.escape(filename) + r'(\|[^\]]+)?\]\n?', '', new_text)
+            conn.execute("UPDATE note_history SET text=? WHERE id=?", (new_text, r['id']))
+            
+    # Physische Datei löschen
+    try:
+        os.remove(os.path.join(UPLOAD_FOLDER, filename))
+        if filename.startswith('sketch_'):
+            json_file = filename.replace('.png', '.json')
+            if os.path.exists(os.path.join(UPLOAD_FOLDER, json_file)):
+                os.remove(os.path.join(UPLOAD_FOLDER, json_file))
+    except Exception:
+        pass
+        
+    return jsonify({"status": "success"})
 
 @app.route('/api/export', methods=['GET'])
 def export_backup():
@@ -831,8 +911,12 @@ for f in os.listdir(UPL):
     if f not in used_files:
         try: 
             os.remove(os.path.join(UPL, f))
+            # Auch aus der neuen Medien-Tabelle entfernen
+            conn.execute("DELETE FROM media WHERE filename=?", (f,))
         except Exception: 
             pass
+            
+conn.commit()
 EOF
 
 # --- backup.sh ---
@@ -1124,6 +1208,7 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
                     </div>
                 </div>
                 
+                <div class="menu-row" onclick="openMediaModal()"><span><i class="icon icon-media" style="margin-right:8px;"></i> Medien-Manager</span></div>
                 <div class="menu-row" onclick="openShareOverviewModal()"><span><i class="icon icon-share" style="margin-right:8px;"></i> Freigaben verwalten</span></div>
                 <div class="menu-row" onclick="openTrashModal()">
                     <span style="display:flex; align-items:center; width:100%;">
@@ -1245,6 +1330,34 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
             </div>
             <div class="modal-btns">
                 <button class="btn-cancel" onclick="document.getElementById('todo-modal').style.display='none'">Schließen</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="media-modal" class="modal-overlay">
+        <div class="modal" style="width: 800px; max-width: 95vw;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+                <h3 style="margin:0"><i class="icon icon-media"></i> Medien-Manager</h3>
+                <span style="font-size:0.8em; color:#888;">Alle hochgeladenen Dateien</span>
+            </div>
+            <div id="media-list" style="text-align:left; max-height: 60vh; overflow-y: auto; margin-bottom: 20px; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 15px;">
+                Lade Medien...
+            </div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('media-modal').style.display='none'">Schließen</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="media-info-modal" class="modal-overlay" style="z-index: 2500;">
+        <div class="modal" style="width: 500px; max-width: 95vw;">
+            <h3 style="margin-top:0"><i class="icon icon-link"></i> Verknüpfte Notizen</h3>
+            <p style="font-size:0.85em; opacity:0.7; margin-bottom:15px; text-align: left;">Diese Datei wird in folgenden Notizen verwendet:</p>
+            <div id="media-info-list" style="text-align:left; max-height: 40vh; overflow-y: auto; margin-bottom: 20px;">
+                Suche nach Verknüpfungen...
+            </div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('media-info-modal').style.display='none'">Schließen</button>
             </div>
         </div>
     </div>
@@ -1539,7 +1652,7 @@ body {
 .icon-undo { -webkit-mask-image: url('/static/icons/undo.svg'); mask-image: url('/static/icons/undo.svg'); }
 .icon-sort-abc { -webkit-mask-image: url('/static/icons/sort-alphabetical-variant.svg'); mask-image: url('/static/icons/sort-alphabetical-variant.svg'); }
 .icon-mic { -webkit-mask-image: url('/static/icons/microphone-outline.svg'); mask-image: url('/static/icons/microphone-outline.svg'); }
-
+.icon-media { -webkit-mask-image: url('/static/icons/media.svg'); mask-image: url('/static/icons/media.svg'); }
 
 #sidebar { 
     width: var(--sidebar-width); 
@@ -3245,6 +3358,150 @@ function renderTodoList() {
     });
 }
 
+// --- MEDIEN MANAGER LOGIK ---
+async function openMediaModal() {
+    document.getElementById('media-modal').style.display = 'flex';
+    renderMediaList();
+}
+
+async function renderMediaList() {
+    const list = document.getElementById('media-list');
+    list.innerHTML = 'Lade Medien...';
+    try {
+        const res = await fetch('/api/media');
+        const data = await res.json();
+        
+        if (data.length === 0) {
+            list.innerHTML = '<p style="opacity:0.5; grid-column: 1 / -1; text-align:center;">Noch keine Dateien hochgeladen.</p>';
+            return;
+        }
+        
+        list.innerHTML = '';
+        data.forEach(m => {
+            const dt = new Date(m.uploaded_at * 1000).toLocaleString('de-DE');
+            
+            const card = document.createElement('div');
+            card.style = "background: rgba(255,255,255,0.05); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 10px;";
+            
+            const preview = document.createElement('div');
+            preview.style = "height: 120px; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.2); border-radius: 4px; overflow: hidden; cursor: pointer;";
+            
+            if (m.file_type === 'image' || m.file_type === 'sketch') {
+                let v = Date.now();
+                preview.innerHTML = `<img src="/uploads/${m.filename}?v=${v}" style="max-width: 100%; max-height: 100%; object-fit: contain;">`;
+                preview.onclick = () => openLightbox(`/uploads/${m.filename}?v=${v}`);
+            } else if (m.file_type === 'audio') {
+                preview.innerHTML = `<i class="icon icon-mic" style="font-size: 3em; opacity: 0.5;"></i>`;
+            } else {
+                preview.innerHTML = `<i class="icon icon-file" style="font-size: 3em; opacity: 0.5;"></i>`;
+            }
+            
+            const nameDiv = document.createElement('div');
+            nameDiv.style = "font-size: 0.85em; word-break: break-all; font-weight: bold; margin-top: 5px;";
+            nameDiv.innerText = m.original_name || m.filename;
+            
+            const dateDiv = document.createElement('div');
+            dateDiv.style = "font-size: 0.75em; color: #888;";
+            dateDiv.innerText = dt;
+            
+            const actionDiv = document.createElement('div');
+            actionDiv.style = "display: flex; gap: 5px; margin-top: auto; justify-content: space-between;";
+            
+            const btnDownload = document.createElement('button');
+            btnDownload.className = "tool-btn";
+            btnDownload.title = "Herunterladen";
+            btnDownload.innerHTML = `<i class="icon icon-export"></i>`;
+            btnDownload.onclick = () => {
+                const a = document.createElement('a');
+                a.href = `/uploads/${m.filename}`;
+                a.download = m.original_name || m.filename;
+                a.click();
+            };
+            
+            const btnInfo = document.createElement('button');
+            btnInfo.className = "tool-btn";
+            btnInfo.title = "Info / Verwendungen";
+            btnInfo.innerHTML = `<i class="icon icon-link"></i>`;
+            btnInfo.onclick = () => showMediaInfo(m.filename);
+            
+            const btnDelete = document.createElement('button');
+            btnDelete.className = "tool-btn";
+            btnDelete.title = "Löschen";
+            btnDelete.style.borderColor = "#e74c3c";
+            btnDelete.style.color = "#e74c3c";
+            btnDelete.innerHTML = `<i class="icon icon-trash"></i>`;
+            btnDelete.onclick = () => deleteMedia(m.filename, m.original_name);
+            
+            actionDiv.appendChild(btnDownload);
+            actionDiv.appendChild(btnInfo);
+            actionDiv.appendChild(btnDelete);
+            
+            card.appendChild(preview);
+            card.appendChild(nameDiv);
+            card.appendChild(dateDiv);
+            card.appendChild(actionDiv);
+            list.appendChild(card);
+        });
+        
+    } catch(e) {
+        list.innerHTML = 'Fehler beim Laden der Medien.';
+    }
+}
+
+async function showMediaInfo(filename) {
+    document.getElementById('media-info-modal').style.display = 'flex';
+    const list = document.getElementById('media-info-list');
+    list.innerHTML = 'Lade Verknüpfungen...';
+    
+    try {
+        const res = await fetch(`/api/media/${filename}/refs`);
+        const data = await res.json();
+        
+        if (data.length === 0) {
+            list.innerHTML = '<p style="opacity:0.5; text-align:center;">Wird in keinen aktiven Notizen verwendet.</p>';
+            return;
+        }
+        
+        list.innerHTML = '';
+        data.forEach(n => {
+            const d = document.createElement('div');
+            d.style = "padding:10px; border-bottom:1px solid var(--border-color);";
+            
+            const link = document.createElement('a');
+            link.href = '#';
+            link.style.color = 'var(--accent)';
+            link.style.textDecoration = 'none';
+            link.innerText = n.title || 'Unbenannt';
+            link.onclick = (e) => {
+                e.preventDefault();
+                document.getElementById('media-info-modal').style.display = 'none';
+                document.getElementById('media-modal').style.display = 'none';
+                selectNode(n.id);
+            };
+            
+            d.appendChild(link);
+            list.appendChild(d);
+        });
+    } catch(e) {
+        list.innerHTML = 'Fehler beim Laden.';
+    }
+}
+
+function deleteMedia(filename, original_name) {
+    showModal("Medium komplett löschen", `Möchtest du die Datei "${original_name}" wirklich löschen?\n\nDie Datei wird vom Server gelöscht und restlos aus allen Notizen und der Historie entfernt. Dies kann nicht rückgängig gemacht werden!`, [
+        { label: "Ja, löschen", class: "btn-discard", action: async () => {
+            await fetch(`/api/media/${filename}`, { method: 'DELETE' });
+            renderMediaList();
+            
+            if (activeId && document.getElementById('edit-mode').style.display !== 'block') {
+                activeNoteData = await fetchNoteData(activeId);
+                renderDisplayArea();
+            }
+        }},
+        { label: "Abbrechen", class: "btn-cancel", action: () => {} }
+    ]);
+}
+
 async function openTrashModal() {
     document.getElementById('trash-modal').style.display = 'flex';
     const list = document.getElementById('trash-list');
@@ -4192,6 +4449,8 @@ document.addEventListener('keydown', function(e) {
         else if (document.getElementById('todo-modal') && document.getElementById('todo-modal').style.display === 'flex') document.getElementById('todo-modal').style.display = 'none';
         else if (document.getElementById('trash-modal') && document.getElementById('trash-modal').style.display === 'flex') document.getElementById('trash-modal').style.display = 'none';
         else if (document.getElementById('share-overview-modal') && document.getElementById('share-overview-modal').style.display === 'flex') document.getElementById('share-overview-modal').style.display = 'none';
+        else if (document.getElementById('media-modal') && document.getElementById('media-modal').style.display === 'flex') document.getElementById('media-modal').style.display = 'none';
+        else if (document.getElementById('media-info-modal') && document.getElementById('media-info-modal').style.display === 'flex') document.getElementById('media-info-modal').style.display = 'none';
         else if (document.getElementById('edit-mode') && document.getElementById('edit-mode').style.display === 'block') cancelEdit();
     }
 });
