@@ -1538,7 +1538,7 @@ body {
 .icon-color { -webkit-mask-image: url('/static/icons/color.svg'); mask-image: url('/static/icons/color.svg'); }
 .icon-undo { -webkit-mask-image: url('/static/icons/undo.svg'); mask-image: url('/static/icons/undo.svg'); }
 .icon-sort-abc { -webkit-mask-image: url('/static/icons/sort-alphabetical-variant.svg'); mask-image: url('/static/icons/sort-alphabetical-variant.svg'); }
-.icon-mic { -webkit-mask-image: url('/static/icons/microphone-outline.svg'); mask-image: url('/static/icons/microphone-outline.png'); }
+.icon-mic { -webkit-mask-image: url('/static/icons/microphone-outline.svg'); mask-image: url('/static/icons/microphone-outline.svg'); }
 
 
 #sidebar { 
