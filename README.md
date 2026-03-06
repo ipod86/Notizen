@@ -21,6 +21,7 @@ Das Notiz-Tool bietet eine Vielzahl an Funktionen, die es zu einer vollwertigen,
 * **Drag & Drop Uploads:** Bilder und Dateien einfach in den Textbereich ziehen.
 * **Skizzen-Block:** Integriertes Zeichen-Tool mit Stift, Textmarker und Radiergummi für handschriftliche Notizen.
 * **Verlinkungen (Mentions):** Tippe `@`, um blitzschnell andere Notizen im Text zu verlinken.
+* **Sprachnotiz:** Sprachaufnahmen direkt in der App aufnhemen und abspielen..
 
 ### 🌍 Freigaben & Verwaltung
 * **Öffentliche Freigabe-Links:** Generiere Lese-Links für einzelne Notizen, um sie mit Leuten ohne Account zu teilen.
