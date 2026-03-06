@@ -1203,6 +1203,7 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
                     <button class="tool-btn" onclick="uploadImage()"><i class="icon icon-image"></i><span>Bild</span></button>
                     <button class="tool-btn" onclick="uploadGenericFile()"><i class="icon icon-file-plus"></i><span>Datei</span></button>
                     <button class="tool-btn" onclick="openSketch()"><i class="icon icon-sketch"></i><span>Skizze</span></button>
+                    <button class="tool-btn" id="btn-record-audio" onclick="toggleAudioRecording()"><i class="icon icon-mic"></i><span>Audio</span></button>
                     <button class="tool-btn" onclick="triggerMentionButton()"><i class="icon icon-mention"></i><span>Verweis</span></button>
                     <button class="tool-btn" onclick="wrapSelection('[','](https://)', 'Link-Text')"><i class="icon icon-link"></i><span>Web-Link</span></button>
                     <div class="tool-btn color-tool">
@@ -1537,6 +1538,7 @@ body {
 .icon-color { -webkit-mask-image: url('/static/icons/color.svg'); mask-image: url('/static/icons/color.svg'); }
 .icon-undo { -webkit-mask-image: url('/static/icons/undo.svg'); mask-image: url('/static/icons/undo.svg'); }
 .icon-sort-abc { -webkit-mask-image: url('/static/icons/sort-alphabetical-variant.svg'); mask-image: url('/static/icons/sort-alphabetical-variant.svg'); }
+.icon-mic { -webkit-mask-image: url('/static/icons/microphone-outline.svg'); mask-image: url('/static/icons/microphone-outline.png'); }
 
 
 #sidebar { 
@@ -2382,11 +2384,9 @@ function updateToggleAllIcon() {
     }
 
     if (collapsedIds.size >= totalFolders / 2) { 
-        // Viele sind zu -> Klick wird aufklappen -> Icon zeigt offenen Ordner (Ziel-Status)
         btn.innerHTML = '<i class="icon icon-folder_open"></i>';
         btn.title = "Alle aufklappen";
     } else { 
-        // Viele sind offen -> Klick wird zuklappen -> Icon zeigt geschlossenen Ordner (Ziel-Status)
         btn.innerHTML = '<i class="icon icon-folder"></i>';
         btn.title = "Alle zuklappen";
     }
@@ -2620,6 +2620,7 @@ function renderMarkdown(text) {
     html = html.replace(/\[img:(.*?)\]/g, '<img src="/uploads/$1" class="note-img" onclick="openLightbox(this.src)">');
     html = html.replace(/\[sketch:([a-zA-Z0-9]+)\]/g, '<img src="/uploads/sketch_$1.png?v='+Date.now()+'" class="note-img sketch-img" title="Skizze bearbeiten" onclick="openSketch(\'$1\')">');
     html = html.replace(/\[file:([a-zA-Z0-9.\-]+)\|([^\]]+)\]/g, '<a href="/uploads/$1" target="_blank" class="note-link"><i class="icon icon-file-plus"></i> $2</a>');
+    html = html.replace(/\[audio:(.*?)\]/g, '<audio controls src="/uploads/$1" style="max-width: 100%; margin: 10px 0; outline: none; border-radius: 5px;"></audio>');
     
     html = html.replace(/\[note:([a-zA-Z0-9]+)\|([^\]]+)\]/g, (match, id, title) => `<a href="#" onclick="if(!window.isShareView){selectNode('${id}'); return false;}" class="note-link"><i class="icon icon-mention"></i> ${title}</a>`);
     html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" style="color:var(--accent); text-decoration:underline;">$1</a>');
@@ -2937,7 +2938,6 @@ function renderItems(items, parent) {
         const icon = document.createElement('span'); 
         icon.className = 'tree-icon'; 
         if (isFolder) {
-            // Hier beide Icons auf das gleiche warme Orange (#f39c12) gesetzt
             icon.innerHTML = isCollapsed ? '<i class="icon icon-folder" style="color: #f39c12;"></i>' : '<i class="icon icon-folder_open" style="color: #f39c12;"></i>';
         } else {
             icon.innerHTML = '<i class="icon icon-file" style="opacity: 0.6;"></i>';
@@ -2957,7 +2957,7 @@ function renderItems(items, parent) {
                     filterTree();
                 } else {
                     renderTree(); 
-                    updateToggleAllIcon(); // Icon direkt aktualisieren
+                    updateToggleAllIcon();
                 }
             } 
         }; 
@@ -3285,7 +3285,7 @@ async function openTrashModal() {
             info.style.gap = '8px';
 
             const icon = document.createElement('span');
-            icon.innerHTML = childrenMap[node.id] ? '<i class="icon icon-folder" style="color: #f1c40f;"></i>' : '<i class="icon icon-file" style="color: #bdc3c7;"></i>';
+            icon.innerHTML = childrenMap[node.id] ? '<i class="icon icon-folder" style="color: #f1c40f;"></i>' : '<i class="icon icon-file" style="opacity: 0.6;"></i>';
 
             const titleSpan = document.createElement('div');
             titleSpan.innerText = node.title || 'Unbenannt';
@@ -4353,6 +4353,58 @@ window.addEventListener('afterprint', () => {
     initiallyClosedSpoilers.forEach(s => s.removeAttribute('open'));
     initiallyClosedSpoilers = [];
 });
+
+let mediaRecorder = null;
+let audioChunks = [];
+let isRecording = false;
+
+async function toggleAudioRecording() {
+    const btn = document.getElementById('btn-record-audio');
+    
+    if (isRecording) {
+        mediaRecorder.stop();
+        isRecording = false;
+        btn.innerHTML = '<i class="icon icon-mic"></i><span>Audio</span>';
+        btn.style.color = ''; 
+        btn.style.borderColor = '';
+        return;
+    }
+
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream);
+        audioChunks = [];
+
+        mediaRecorder.ondataavailable = event => {
+            if (event.data.size > 0) {
+                audioChunks.push(event.data);
+            }
+        };
+
+        mediaRecorder.onstop = () => {
+            const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+            const file = new File([audioBlob], "audiomemo.webm", { type: 'audio/webm' });
+            
+            uploadWithProgress(file, (data) => {
+                if(data.filename) { 
+                    wrapSelection(`\n[audio:${data.filename}]\n`, '', ''); 
+                }
+            });
+            
+            stream.getTracks().forEach(track => track.stop());
+        };
+
+        mediaRecorder.start();
+        isRecording = true;
+        
+        btn.innerHTML = '<i class="icon icon-mic"></i><span style="animation: pulse 1s infinite;">Aufnahme...</span>';
+        btn.style.color = '#e74c3c';
+        btn.style.borderColor = '#e74c3c';
+
+    } catch (err) {
+        showModal("Fehler", "Zugriff auf das Mikrofon verweigert oder nicht gefunden.", [{ label: "Okay", class: "btn-cancel", action: () => {} }]);
+    }
+}
 
 window.onload = () => { 
     if (window.isShareView) {
