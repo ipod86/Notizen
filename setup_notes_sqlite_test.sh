@@ -3408,6 +3408,14 @@ async function renderMediaList() {
             const actionDiv = document.createElement('div');
             actionDiv.style = "display: flex; gap: 5px; margin-top: auto; justify-content: space-between;";
             
+            const btnOpen = document.createElement('button');
+            btnOpen.className = "tool-btn";
+            btnOpen.title = "Im Browser ansehen";
+            btnOpen.innerHTML = `<i class="icon icon-search"></i>`;
+            btnOpen.onclick = () => {
+                window.open(`/uploads/${m.filename}`, '_blank');
+            };
+            
             const btnDownload = document.createElement('button');
             btnDownload.className = "tool-btn";
             btnDownload.title = "Herunterladen";
@@ -3430,6 +3438,7 @@ async function renderMediaList() {
             btnDelete.innerHTML = `<i class="icon icon-trash"></i>`;
             btnDelete.onclick = () => deleteMedia(m.filename, m.original_name);
             
+            actionDiv.appendChild(btnOpen);
             actionDiv.appendChild(btnDownload);
             actionDiv.appendChild(btnInfo);
             actionDiv.appendChild(btnDelete);
