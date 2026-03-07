@@ -42,7 +42,7 @@ Das Tool wird über ein interaktives Setup-Skript installiert. Es richtet die Py
 Lade das Installationsskript direkt von GitHub herunter:
 
 ```bash
-wget -O setup_notes_sql_lite.sh [https://raw.githubusercontent.com/ipod86/Notizen/main/setup_notes_sql_lite.sh](https://raw.githubusercontent.com/ipod86/Notizen/main/setup_notes_sql_lite.sh) && chmod +x setup_notes_sql_lite.sh && sudo ./setup_notes_sql_lite.sh
+wget -O setup_notes_sqlite.sh [https://raw.githubusercontent.com/ipod86/Notizen/main/setup_notes_sqlite.sh](https://raw.githubusercontent.com/ipod86/Notizen/main/setup_notes_sqlite.sh) && chmod +x setup_notes_sqlite.sh && sudo ./setup_notes_sqlite.sh
 ```
 
 ## Verwendete Open-Source-Bibliotheken & Ressourcen
