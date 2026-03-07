@@ -1218,10 +1218,11 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
                     </span>
                 </div>
                 <div class="menu-row" id="logout-btn" style="display:none; color:#e74c3c;" onclick="window.location.href='/logout'"><span><i class="icon icon-logout" style="margin-right:8px;"></i> Abmelden</span></div>
-            </div>
-            <div class="menu-row" style="opacity: 0.5; font-size: 0.75em; border-top: 1px dashed var(--border-color); margin-top: 5px;" onclick="window.open('https://github.com/ipod86/Notizen', '_blank')">
+                <div class="menu-row" style="opacity: 0.5; font-size: 0.75em; border-top: 1px dashed var(--border-color); margin-top: 5px;" onclick="window.open('https://github.com/ipod86/Notizen', '_blank')">
                     <span><i class="icon icon-link" style="margin-right:8px;"></i> Open Source auf GitHub</span>
-                </div>
+                
+            </div>
+            
         </div>
     </div>
     
