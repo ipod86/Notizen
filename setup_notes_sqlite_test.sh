@@ -939,7 +939,7 @@ cat << 'EOF' > "$TARGET_DIR/templates/login.html"
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Login - Notizen</title>
+    <title>Login - Notizen</title><link rel="icon" type="image/svg+xml" href="/static/icons/alpha-n-box.svg">
     <link rel="stylesheet" href="/static/style.css?v={{ v }}">
     <style>
         body {
@@ -1099,7 +1099,7 @@ cat << 'EOF' > "$TARGET_DIR/templates/share.html"
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width,initial-scale=1.0">
-    <title>{{ title }} - Geteilte Notiz</title>
+    <title>{{ title }} - Geteilte Notiz</title><link rel="icon" type="image/svg+xml" href="/static/icons/alpha-n-box.svg">
     <link rel="stylesheet" href="/static/style.css?v={{ v }}">
     <link rel="stylesheet" href="/static/lib/highlight/tomorrow-night-blue.min.css">
     <script src="/static/lib/highlight/highlight.min.js"></script>
@@ -1142,7 +1142,7 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width,initial-scale=1.0">
-    <title>Notizen</title>
+    <title>Notizen</title><link rel="icon" type="image/svg+xml" href="/static/icons/alpha-n-box.svg">
     <link rel="stylesheet" href="/static/style.css?v={{ v }}">
     <script src="/static/lib/sortable/Sortable.min.js"></script>
     <link rel="stylesheet" href="/static/lib/highlight/tomorrow-night-blue.min.css">
