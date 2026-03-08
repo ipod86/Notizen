@@ -3351,9 +3351,19 @@ async function loadData() {
     renderTree(); 
     updateToggleAllIcon();
     
-    const lastId = localStorage.getItem('lastActiveId'); 
-    if (lastId && findNode(fullTree.content, lastId)) {
-        selectNode(lastId); 
+    const hash = window.location.hash;
+    const hashMatch = hash.match(/^#note=(.+)$/);
+    if (hashMatch && findNode(fullTree.content, hashMatch[1])) {
+        history.replaceState({ noteId: hashMatch[1] }, '', hash);
+        doSelectNode(hashMatch[1], true);
+    } else {
+        const lastId = localStorage.getItem('lastActiveId'); 
+        if (lastId && findNode(fullTree.content, lastId)) {
+            history.replaceState({ noteId: lastId }, '', '#note=' + lastId);
+            doSelectNode(lastId, true);
+        } else {
+            history.replaceState({ noteId: null }, '', '#');
+        }
     }
 }
 
@@ -3668,21 +3678,21 @@ function renderDisplayArea() {
     }).catch(e => console.error(e));
 }
 
-async function selectNode(id) { 
+async function selectNode(id, fromPopState) { 
     if (document.getElementById('edit-mode').style.display === 'block') {
         if (activeNoteData && (document.getElementById('node-title').value !== activeNoteData.title || document.getElementById('node-text').value !== activeNoteData.text)) { 
             showModal("Ungespeicherte Änderungen", "Du hast diese Notiz bearbeitet, aber noch nicht gespeichert. Möchtest du deine Änderungen jetzt speichern?", [ 
-                { label: "Ja, speichern", class: "btn-save", action: async () => { await saveChanges(); doSelectNode(id); } }, 
-                { label: "Nein, verwerfen", class: "btn-discard", action: () => { cancelEdit(); doSelectNode(id); } }, 
+                { label: "Ja, speichern", class: "btn-save", action: async () => { await saveChanges(); doSelectNode(id, fromPopState); } }, 
+                { label: "Nein, verwerfen", class: "btn-discard", action: () => { cancelEdit(); doSelectNode(id, fromPopState); } }, 
                 { label: "Abbruch", class: "btn-cancel", action: () => {} } 
             ]); 
             return; 
         } 
     }
-    doSelectNode(id);
+    doSelectNode(id, fromPopState);
 }
 
-async function doSelectNode(id) {
+async function doSelectNode(id, fromPopState) {
     activeId = id; 
     localStorage.setItem('lastActiveId', id); 
     
@@ -3691,6 +3701,10 @@ async function doSelectNode(id) {
     
     document.getElementById('no-selection').style.display = 'none'; 
     document.getElementById('edit-area').style.display = 'block'; 
+
+    if (!fromPopState) {
+        history.pushState({ noteId: id }, '', '#note=' + id);
+    }
     
     const pathData = getPath(fullTree.content, id) || []; 
     const breadcrumbEl = document.getElementById('breadcrumb'); 
@@ -5578,12 +5592,12 @@ async function createNoteFromTemplate(template) {
     enableEdit();
 }
 
-function goToDashboard() {
+function goToDashboard(fromPopState) {
     if (document.getElementById('edit-mode').style.display === 'block') {
         if (activeNoteData && (document.getElementById('node-title').value !== activeNoteData.title || document.getElementById('node-text').value !== activeNoteData.text)) {
             showModal("Ungespeicherte Änderungen", "Du hast diese Notiz bearbeitet, aber noch nicht gespeichert. Möchtest du deine Änderungen jetzt speichern?", [
-                { label: "Ja, speichern", class: "btn-save", action: async () => { await saveChanges(); goToDashboard(); } },
-                { label: "Nein, verwerfen", class: "btn-discard", action: () => { cancelEdit(); goToDashboard(); } },
+                { label: "Ja, speichern", class: "btn-save", action: async () => { await saveChanges(); goToDashboard(fromPopState); } },
+                { label: "Nein, verwerfen", class: "btn-discard", action: () => { cancelEdit(); goToDashboard(fromPopState); } },
                 { label: "Abbruch", class: "btn-cancel", action: () => {} }
             ]);
             return;
@@ -5596,6 +5610,9 @@ function goToDashboard() {
     document.getElementById('edit-area').style.display = 'none';
     document.getElementById('no-selection').style.display = 'block';
     document.querySelectorAll('.tree-item').forEach(el => el.classList.remove('active'));
+    if (!fromPopState) {
+        history.pushState({ noteId: null }, '', '#');
+    }
     loadDashboard();
 }
 
@@ -5699,6 +5716,24 @@ function formatRelativeDate(dateStr) {
         return targetStart.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
     } catch(e) { return dateStr.replace('T', ' '); }
 }
+
+window.addEventListener('popstate', function(e) {
+    if (window.isShareView) return;
+    const state = e.state;
+    if (state && state.noteId) {
+        if (state.noteId !== activeId) {
+            if (document.getElementById('edit-mode').style.display === 'block') {
+                cancelEdit();
+            }
+            doSelectNode(state.noteId, true);
+        }
+    } else {
+        if (document.getElementById('edit-mode').style.display === 'block') {
+            cancelEdit();
+        }
+        goToDashboard(true);
+    }
+});
 
 window.onload = () => { 
     if (window.isShareView) { if (window.hljs) hljs.highlightAll(); return; }
