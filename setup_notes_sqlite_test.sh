@@ -1068,18 +1068,6 @@ def get_dashboard():
             "total_notes": total_notes
         })
 
-# --- QUICKNOTE API ---
-@app.route('/api/quicknote', methods=['POST'])
-def create_quicknote():
-    data = request.json or {}
-    new_id = uuid.uuid4().hex
-    title = data.get('title', 'Schnellnotiz ' + datetime.now().strftime('%d.%m.%Y %H:%M'))
-    text = data.get('text', '')
-    with get_db() as conn:
-        conn.execute("INSERT INTO notes (id, parent_id, sort_order, title, text) VALUES (?, ?, ?, ?, ?)",
-                     (new_id, None, 0, title, text))
-    return jsonify({"status": "success", "id": new_id})
-
 @app.route('/api/export', methods=['GET'])
 def export_backup():
     mem = io.BytesIO()
@@ -1493,12 +1481,6 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
         <div class="dropdown">
             <button onclick="toggleSettings(event)" style="font-size:1.4em"><i class="icon icon-settings"></i></button>
             <div class="dropdown-content" id="dropdown-menu">
-                <div class="menu-row" onclick="toggleTheme()"><span><i class="icon icon-theme" style="margin-right:8px;"></i> Theme wechseln</span></div>
-                <div class="menu-row">
-                    <span><i class="icon icon-color" style="margin-right:8px;"></i> Akzentfarbe</span>
-                    <input type="color" id="accent-color-picker" onchange="updateGlobalAccent(this.value)" onclick="event.stopPropagation()">
-                </div>
-                
                 <div class="menu-row" onclick="openContactsModal()"><span><i class="icon icon-contact" style="margin-right:8px;"></i> Kontakte</span></div>
                 <div class="menu-row" onclick="openTagsManagerModal()"><span><i class="icon icon-tag" style="margin-right:8px;"></i> Tags verwalten</span></div>
                 <div class="menu-row" onclick="openTemplatesModal()"><span><i class="icon icon-file" style="margin-right:8px;"></i> Vorlagen</span></div>
@@ -1516,6 +1498,11 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
                         <span><i class="icon icon-folder" style="margin-right:8px;"></i> Allgemeine Einstellungen</span><span class="submenu-arrow">▶</span>
                     </div>
                     <div class="submenu-content">
+                        <div class="menu-row" onclick="handleMenuAction(event, toggleTheme)"><span><i class="icon icon-theme" style="margin-right:8px;"></i> Theme wechseln</span></div>
+                        <div class="menu-row" onclick="event.stopPropagation()">
+                            <span><i class="icon icon-color" style="margin-right:8px;"></i> Akzentfarbe</span>
+                            <input type="color" id="accent-color-picker" onchange="updateGlobalAccent(this.value)" onclick="event.stopPropagation()">
+                        </div>
                         <div class="menu-row" onclick="handleMenuAction(event, togglePassword)"><span id="pwd-toggle-text"><i class="icon icon-password" style="margin-right:8px;"></i> Passwortschutz an</span></div>
                         <div class="menu-row" onclick="handleMenuAction(event, toggleHistorySettings)"><span><i class="icon icon-history" style="margin-right:8px;"></i> Historien-Optionen</span></div>
                     </div>
@@ -1557,7 +1544,7 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
     
     <div id="sidebar">
         <div class="sidebar-header">
-            <h3 style="margin:0">Notizen</h3>
+            <h3 style="margin:0; cursor:pointer;" onclick="goToDashboard()" title="Zum Dashboard">Notizen</h3>
             <div style="display:flex; gap:8px;">
                 <button id="toggle-all-btn" onclick="toggleAllFolders()" title="Alle auf/zu"><i class="icon icon-folder_open"></i></button>
                 <button id="sort-btn" onclick="confirmAutoSort()" title="Automatisch sortieren"><i class="icon icon-sort-abc"></i></button>
@@ -1569,7 +1556,7 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
                 <input type="text" id="search-input" placeholder="Titel oder Text suchen..." oninput="filterTree()">
                 <span id="clear-search" onclick="clearSearch()"><i class="icon icon-clear"></i></span>
             </div>
-            <div id="tag-filter-bar" style="display:none; margin-bottom:10px; display:flex; flex-wrap:wrap; gap:4px;"></div>
+            <div id="tag-filter-bar" style="display:none; margin-bottom:10px; flex-wrap:wrap; gap:4px;"></div>
             <div style="display:flex; gap:5px;">
                 <button onclick="addItem(null)" style="flex:1;background:var(--accent) !important;color:white;padding:8px;border-radius:4px;font-weight:bold;"><i class="icon icon-add"></i> Hauptkategorie</button>
                 <button onclick="addItemFromTemplate(null)" style="background:rgba(var(--accent-rgb),0.15) !important;color:var(--accent);padding:8px;border-radius:4px;font-weight:bold;" title="Aus Vorlage erstellen"><i class="icon icon-file"></i></button>
@@ -1595,14 +1582,14 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
                         <div class="dropdown">
                             <button onclick="toggleNoteMenu(event)" style="font-size:1.4em; padding:0 5px; font-weight:bold; letter-spacing: 2px;">⋮</button>
                             <div class="dropdown-content" id="note-menu-content" style="top:35px;">
-                                <div class="menu-row" onclick="handleMenuAction(event, enableEdit)"><span>Bearbeiten</span></div>
+                                <div class="menu-row" onclick="handleMenuAction(event, enableEdit)"><span><i class="icon icon-sketch" style="margin-right:8px;"></i> Bearbeiten</span></div>
                                 <div class="menu-row" onclick="handleMenuAction(event, togglePinNote)"><span id="pin-menu-text"><i class="icon icon-pin" style="margin-right:8px;"></i> Anpinnen</span></div>
                                 <div class="menu-row" onclick="handleMenuAction(event, duplicateNote)"><span><i class="icon icon-add" style="margin-right:8px;"></i> Notiz duplizieren</span></div>
                                 <div class="menu-row" onclick="handleMenuAction(event, openNoteTagsModal)"><span><i class="icon icon-tag" style="margin-right:8px;"></i> Tags bearbeiten</span></div>
-                                <div class="menu-row" onclick="handleMenuAction(event, shareNote)"><span>Freigabe-Link</span></div>
-                                <div class="menu-row" id="menu-row-history" onclick="handleMenuAction(event, openHistoryModal)"><span>Versionsverlauf</span></div>
+                                <div class="menu-row" onclick="handleMenuAction(event, shareNote)"><span><i class="icon icon-share" style="margin-right:8px;"></i> Freigabe-Link</span></div>
+                                <div class="menu-row" id="menu-row-history" onclick="handleMenuAction(event, openHistoryModal)"><span><i class="icon icon-history" style="margin-right:8px;"></i> Versionsverlauf</span></div>
                                 <div class="menu-row" onclick="handleMenuAction(event, saveAsTemplate)"><span><i class="icon icon-file" style="margin-right:8px;"></i> Als Vorlage speichern</span></div>
-                                <div class="menu-row" onclick="handleMenuAction(event, window.print)"><span>Drucken / PDF</span></div>
+                                <div class="menu-row" onclick="handleMenuAction(event, window.print)"><span><i class="icon icon-printer" style="margin-right:8px;"></i> Drucken / PDF</span></div>
                             </div>
                         </div>
                     </div>
@@ -1947,8 +1934,6 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
         </div>
     </div>
 
-    <button id="quicknote-fab" onclick="createQuickNote()" title="Schnellnotiz erstellen"><i class="icon icon-add"></i></button>
-
     <div id="tags-manager-modal" class="modal-overlay">
         <div class="modal" style="width: 500px; max-width: 95vw;">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
@@ -2114,8 +2099,10 @@ body {
 .icon-mic { -webkit-mask-image: url('/static/icons/microphone-outline.svg'); mask-image: url('/static/icons/microphone-outline.svg'); }
 .icon-media { -webkit-mask-image: url('/static/icons/media.svg'); mask-image: url('/static/icons/media.svg'); }
 .icon-contact { -webkit-mask-image: url('/static/icons/card-account-phone-outline.svg'); mask-image: url('/static/icons/card-account-phone-outline.svg'); }
-.icon-pin { -webkit-mask-image: url('/static/icons/reminders.svg'); mask-image: url('/static/icons/reminders.svg'); }
-.icon-tag { -webkit-mask-image: url('/static/icons/spoiler.svg'); mask-image: url('/static/icons/spoiler.svg'); }
+.icon-pin { -webkit-mask-image: url('/static/icons/pin.svg'); mask-image: url('/static/icons/pin.svg'); }
+.icon-pin-off { -webkit-mask-image: url('/static/icons/pin-off.svg'); mask-image: url('/static/icons/pin-off.svg'); }
+.icon-tag { -webkit-mask-image: url('/static/icons/tag.svg'); mask-image: url('/static/icons/tag.svg'); }
+.icon-printer { -webkit-mask-image: url('/static/icons/printer.svg'); mask-image: url('/static/icons/printer.svg'); }
 
 #sidebar { 
     width: var(--sidebar-width); 
@@ -2854,28 +2841,6 @@ input[type="checkbox"].task-check { width: 16px; height: 16px; margin: 0; cursor
 .dash-stat-number { font-size: 2em; font-weight: bold; color: var(--accent); }
 .dash-stat-label { font-size: 0.85em; opacity: 0.6; margin-top: 4px; }
 
-/* --- FAB BUTTON --- */
-#quicknote-fab {
-    position: fixed;
-    bottom: 25px;
-    right: 25px;
-    width: 56px;
-    height: 56px;
-    border-radius: 50%;
-    background: var(--accent) !important;
-    color: white;
-    border: none;
-    font-size: 1.5em;
-    cursor: pointer;
-    box-shadow: 0 4px 15px rgba(0,0,0,0.3);
-    z-index: 999;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: transform 0.2s, box-shadow 0.2s;
-}
-#quicknote-fab:hover { transform: scale(1.1); box-shadow: 0 6px 20px rgba(0,0,0,0.4); }
-
 /* --- TEMPLATE STYLES --- */
 .template-card {
     background: rgba(255,255,255,0.05);
@@ -2890,7 +2855,7 @@ input[type="checkbox"].task-check { width: 16px; height: 16px; margin: 0; cursor
 .template-card-preview { font-size: 0.75em; color: #888; max-height: 60px; overflow: hidden; word-break: break-word; }
 
 @media print {
-    #sidebar, .header-actions, #mobile-toggle-btn, .toolbar, #edit-mode, #breadcrumb, #view-reminder-badge, #view-reminder-ack, .dropdown, #note-menu-content, #no-selection, #add-sub-level-btn, #quicknote-fab { display: none !important; }
+    #sidebar, .header-actions, #mobile-toggle-btn, .toolbar, #edit-mode, #breadcrumb, #view-reminder-badge, #view-reminder-ack, .dropdown, #note-menu-content, #no-selection, #add-sub-level-btn { display: none !important; }
     body, html { background: white !important; color: black !important; height: auto !important; width: auto !important; overflow: visible !important; display: block !important; position: static !important; }
     #editor { padding: 0 !important; margin: 0 !important; height: auto !important; width: auto !important; overflow: visible !important; display: block !important; position: static !important; }
     img, pre, blockquote, .code-container, .task-list-item, .spoiler, .md-table { page-break-inside: avoid; break-inside: avoid; }
@@ -3833,7 +3798,13 @@ function renderItems(items, parent) {
     const isEdit = document.body.classList.contains('edit-mode-active'); 
     const searchTerm = document.getElementById('search-input').value.trim();
     
-    items.forEach(item => { 
+    const sorted = isEdit ? items : [...items].sort((a, b) => {
+        const aPinned = a.is_pinned ? 1 : 0;
+        const bPinned = b.is_pinned ? 1 : 0;
+        return bPinned - aPinned;
+    });
+
+    sorted.forEach(item => { 
         if (!item || !item.id) return;
         
         const isFolder = item.children && item.children.length > 0; 
@@ -5196,7 +5167,7 @@ function updatePinMenuText() {
     if (!el || !activeId) return;
     const node = findNode(fullTree.content, activeId);
     if (node && node.is_pinned) {
-        el.innerHTML = '<i class="icon icon-pin" style="margin-right:8px;"></i> Anpinnung aufheben';
+        el.innerHTML = '<i class="icon icon-pin-off" style="margin-right:8px;"></i> Anpinnung aufheben';
     } else {
         el.innerHTML = '<i class="icon icon-pin" style="margin-right:8px;"></i> Anpinnen';
     }
@@ -5229,13 +5200,27 @@ async function loadAllTags() {
 function renderTagFilterBar() {
     const bar = document.getElementById('tag-filter-bar');
     if (!bar) return;
-    if (allTagsCache.length === 0) {
+
+    const usedTagIds = new Set();
+    function collectTags(nodes) {
+        if (!Array.isArray(nodes)) return;
+        nodes.forEach(n => {
+            if (n.tags) n.tags.forEach(t => usedTagIds.add(t.id));
+            if (n.children) collectTags(n.children);
+        });
+    }
+    collectTags(fullTree.content);
+
+    const usedTags = allTagsCache.filter(t => usedTagIds.has(t.id));
+
+    if (usedTags.length === 0) {
         bar.style.display = 'none';
+        if (activeTagFilter) { activeTagFilter = null; renderTree(); }
         return;
     }
     bar.style.display = 'flex';
     bar.innerHTML = '';
-    allTagsCache.forEach(t => {
+    usedTags.forEach(t => {
         const chip = document.createElement('span');
         chip.className = 'tag-filter-chip' + (activeTagFilter === t.id ? ' active' : '');
         chip.style.background = t.color;
@@ -5428,6 +5413,27 @@ async function createNoteFromTemplate(template) {
     enableEdit();
 }
 
+function goToDashboard() {
+    if (document.getElementById('edit-mode').style.display === 'block') {
+        if (activeNoteData && (document.getElementById('node-title').value !== activeNoteData.title || document.getElementById('node-text').value !== activeNoteData.text)) {
+            showModal("Ungespeicherte Änderungen", "Du hast diese Notiz bearbeitet, aber noch nicht gespeichert. Möchtest du deine Änderungen jetzt speichern?", [
+                { label: "Ja, speichern", class: "btn-save", action: async () => { await saveChanges(); goToDashboard(); } },
+                { label: "Nein, verwerfen", class: "btn-discard", action: () => { cancelEdit(); goToDashboard(); } },
+                { label: "Abbruch", class: "btn-cancel", action: () => {} }
+            ]);
+            return;
+        }
+        cancelEdit();
+    }
+    activeId = null;
+    activeNoteData = null;
+    localStorage.removeItem('lastActiveId');
+    document.getElementById('edit-area').style.display = 'none';
+    document.getElementById('no-selection').style.display = 'block';
+    document.querySelectorAll('.tree-item').forEach(el => el.classList.remove('active'));
+    loadDashboard();
+}
+
 // --- DASHBOARD ---
 async function loadDashboard() {
     const container = document.getElementById('dashboard');
@@ -5466,19 +5472,6 @@ async function loadDashboard() {
         
         html += '</div>';
         container.innerHTML = html;
-    } catch(e) { console.error(e); }
-}
-
-// --- QUICKNOTE ---
-async function createQuickNote() {
-    try {
-        const res = await fetch('/api/quicknote', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
-        const data = await res.json();
-        if (data.id) {
-            await checkAndReloadData();
-            selectNode(data.id);
-            enableEdit();
-        }
     } catch(e) { console.error(e); }
 }
 
