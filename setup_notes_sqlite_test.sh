@@ -194,6 +194,13 @@ def init_db():
         conn.execute('DROP TRIGGER IF EXISTS update_tree_mod')
         conn.execute('''
             CREATE TRIGGER update_tree_mod AFTER UPDATE ON notes 
+            WHEN COALESCE(OLD.title,'') != COALESCE(NEW.title,'')
+              OR COALESCE(OLD.parent_id,'') != COALESCE(NEW.parent_id,'')
+              OR COALESCE(OLD.sort_order,0) != COALESCE(NEW.sort_order,0)
+              OR COALESCE(OLD.reminder,'') != COALESCE(NEW.reminder,'')
+              OR COALESCE(OLD.is_trashed,0) != COALESCE(NEW.is_trashed,0)
+              OR COALESCE(OLD.share_id,'') != COALESCE(NEW.share_id,'')
+              OR COALESCE(OLD.text,'') != COALESCE(NEW.text,'')
             BEGIN 
                 UPDATE settings SET value = strftime('%s', 'now') WHERE key = 'tree_last_modified'; 
             END;
@@ -432,6 +439,12 @@ def restore_history(note_id, history_id):
                 
         hist = conn.execute("SELECT title, text FROM note_history WHERE id=? AND note_id=?", (history_id, note_id)).fetchone()
         if hist:
+            sets = get_settings()
+            if sets.get('history_enabled', True):
+                current = conn.execute("SELECT title, text FROM notes WHERE id=?", (note_id,)).fetchone()
+                if current:
+                    conn.execute("INSERT INTO note_history (note_id, title, text, saved_at) VALUES (?, ?, ?, ?)",
+                                 (note_id, current['title'] or '', current['text'] or '', now))
             conn.execute("UPDATE notes SET title=?, text=? WHERE id=?", (hist['title'], hist['text'], note_id))
     return jsonify({"status": "success"})
 
@@ -473,7 +486,14 @@ def update_note(note_id):
 
 @app.route('/api/notes/<note_id>', methods=['DELETE'])
 def delete_note(note_id):
+    now = time.time()
     with get_db() as conn:
+        row = conn.execute("SELECT locked_by, locked_at FROM notes WHERE id=?", (note_id,)).fetchone()
+        if row:
+            lock_owner = row['locked_by']
+            lock_time = row['locked_at'] or 0
+            if lock_owner and (now - lock_time) < 30:
+                return jsonify({"error": "Diese Notiz wird gerade bearbeitet und kann nicht gelöscht werden."}), 403
         def trash_recursive(nid):
             children = conn.execute("SELECT id FROM notes WHERE parent_id=?", (nid,)).fetchall()
             for c in children: 
@@ -2789,11 +2809,16 @@ async function clearReminderById(id) {
             noteData.reminder = null;
             noteData.client_id = myClientId;
             
-            await fetch(`/api/notes/${id}`, {
+            const putRes = await fetch(`/api/notes/${id}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(noteData)
             });
+            
+            if (putRes.status === 403) {
+                showModal("Gesperrt", "Diese Erinnerung kann nicht bestätigt werden, da die Notiz gerade bearbeitet wird.", [{ label: "Verstanden", class: "btn-cancel", action: () => {} }]);
+                return;
+            }
             
             if (id === activeId && activeNoteData) {
                 activeNoteData.reminder = null;
@@ -3577,11 +3602,17 @@ async function saveReminder() {
         
         document.getElementById('reminder-modal').style.display = 'none'; 
         
-        await fetch(`/api/notes/${activeId}`, { 
+        const res = await fetch(`/api/notes/${activeId}`, { 
             method: 'PUT', 
             headers: { 'Content-Type': 'application/json' }, 
             body: JSON.stringify(activeNoteData) 
         }); 
+        
+        if (res.status === 403) {
+            activeNoteData.reminder = null;
+            showModal("Gesperrt", "Erinnerung konnte nicht gespeichert werden, da die Notiz gerade von einem anderen Gerät bearbeitet wird.", [{ label: "Verstanden", class: "btn-cancel", action: () => {} }]);
+            return;
+        }
         
         await checkAndReloadData(); 
         renderDisplayArea(); 
@@ -3590,14 +3621,21 @@ async function saveReminder() {
 
 async function clearReminder() { 
     if(activeNoteData && activeNoteData.reminder) { 
+        const oldReminder = activeNoteData.reminder;
         activeNoteData.reminder = null; 
         activeNoteData.client_id = myClientId; 
         
-        await fetch(`/api/notes/${activeId}`, { 
+        const res = await fetch(`/api/notes/${activeId}`, { 
             method: 'PUT', 
             headers: { 'Content-Type': 'application/json' }, 
             body: JSON.stringify(activeNoteData) 
         }); 
+        
+        if (res.status === 403) {
+            activeNoteData.reminder = oldReminder;
+            showModal("Gesperrt", "Erinnerung konnte nicht gelöscht werden, da die Notiz gerade von einem anderen Gerät bearbeitet wird.", [{ label: "Verstanden", class: "btn-cancel", action: () => {} }]);
+            return;
+        }
         
         await checkAndReloadData(); 
         renderDisplayArea(); 
@@ -4586,7 +4624,7 @@ function updateMenuUI() {
 
 async function addItem(parentId) { const newId = Date.now().toString() + Math.random().toString(36).substring(2, 6); const payload = { id: newId, parent_id: parentId, title: 'Neu', text: '' }; await fetch('/api/notes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); if (parentId) { collapsedIds.delete(parentId); saveCollapsedToLocal(); } await checkAndReloadData(); selectNode(newId); enableEdit(); }
 
-function deleteItem(id) { showModal("Notiz löschen", "Möchtest du diese Notiz wirklich in den Papierkorb verschieben?", [ { label: "Ja, in den Papierkorb", class: "btn-discard", action: async () => { await fetch(`/api/notes/${id}`, { method: 'DELETE' }); if (activeId === id) { activeId = null; document.getElementById('edit-area').style.display = 'none'; } const el = document.querySelector(`.tree-item-container[data-id="${id}"]`); if (el) el.remove(); updateBadges(); await checkAndReloadData(); } }, { label: "Abbruch", class: "btn-cancel", action: () => {} } ]); }
+function deleteItem(id) { showModal("Notiz löschen", "Möchtest du diese Notiz wirklich in den Papierkorb verschieben?", [ { label: "Ja, in den Papierkorb", class: "btn-discard", action: async () => { const res = await fetch(`/api/notes/${id}`, { method: 'DELETE' }); if (res.status === 403) { showModal("Gesperrt", "Diese Notiz wird gerade von einem anderen Gerät bearbeitet und kann nicht gelöscht werden.", [{ label: "Verstanden", class: "btn-cancel", action: () => {} }]); return; } if (activeId === id) { activeId = null; document.getElementById('edit-area').style.display = 'none'; } const el = document.querySelector(`.tree-item-container[data-id="${id}"]`); if (el) el.remove(); updateBadges(); await checkAndReloadData(); } }, { label: "Abbruch", class: "btn-cancel", action: () => {} } ]); }
 
 function findNode(items, id) { if (!Array.isArray(items)) return null; for (let i of items) { if (i.id === id) return i; if (i.children) { const f = findNode(i.children, id); if (f) return f; } } return null; }
 function getPath(items, id, path = []) { if (!Array.isArray(items)) return null; for (let i of items) { const n = [...path, {title: i.title, id: i.id}]; if (i.id === id) return n; if (i.children) { const r = getPath(i.children, id, n); if (r) return r; } } return null; }
