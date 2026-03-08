@@ -985,6 +985,7 @@ def update_tag(tag_id):
     with get_db() as conn:
         conn.execute("UPDATE tags SET name=?, color=? WHERE id=?",
                      (data.get('name', ''), data.get('color', '#27ae60'), tag_id))
+        conn.execute("UPDATE settings SET value = strftime('%s', 'now') WHERE key = 'tree_last_modified'")
     return jsonify({"status": "success"})
 
 @app.route('/api/tags/<tag_id>', methods=['DELETE'])
@@ -992,6 +993,7 @@ def delete_tag(tag_id):
     with get_db() as conn:
         conn.execute("DELETE FROM note_tags WHERE tag_id=?", (tag_id,))
         conn.execute("DELETE FROM tags WHERE id=?", (tag_id,))
+        conn.execute("UPDATE settings SET value = strftime('%s', 'now') WHERE key = 'tree_last_modified'")
     return jsonify({"status": "success"})
 
 @app.route('/api/notes/<note_id>/tags', methods=['GET'])
@@ -1008,6 +1010,7 @@ def set_note_tags(note_id):
         conn.execute("DELETE FROM note_tags WHERE note_id=?", (note_id,))
         for tid in tag_ids:
             conn.execute("INSERT OR IGNORE INTO note_tags (note_id, tag_id) VALUES (?, ?)", (note_id, tid))
+        conn.execute("UPDATE settings SET value = strftime('%s', 'now') WHERE key = 'tree_last_modified'")
     return jsonify({"status": "success"})
 
 # --- TEMPLATES API ---
@@ -2402,9 +2405,11 @@ input, textarea {
     margin-left: 10px;
     display: none;
     text-align: center;
-    flex-shrink: 0;
-    flex-grow: 0;
     line-height: 1.4;
+}
+.menu-row .menu-badge {
+    flex-grow: 0;
+    flex-shrink: 0;
 }
 
 .modal-overlay { 
@@ -5219,26 +5224,14 @@ function renderTagFilterBar() {
     const bar = document.getElementById('tag-filter-bar');
     if (!bar) return;
 
-    const usedTagIds = new Set();
-    function collectTags(nodes) {
-        if (!Array.isArray(nodes)) return;
-        nodes.forEach(n => {
-            if (n.tags) n.tags.forEach(t => usedTagIds.add(t.id));
-            if (n.children) collectTags(n.children);
-        });
-    }
-    collectTags(fullTree.content);
-
-    const usedTags = allTagsCache.filter(t => usedTagIds.has(t.id));
-
-    if (usedTags.length === 0) {
+    if (allTagsCache.length === 0) {
         bar.style.display = 'none';
         if (activeTagFilter) { activeTagFilter = null; renderTree(); }
         return;
     }
     bar.style.display = 'flex';
     bar.innerHTML = '';
-    usedTags.forEach(t => {
+    allTagsCache.forEach(t => {
         const chip = document.createElement('span');
         chip.className = 'tag-filter-chip' + (activeTagFilter === t.id ? ' active' : '');
         chip.style.background = t.color;
