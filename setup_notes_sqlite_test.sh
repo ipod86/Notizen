@@ -1042,7 +1042,8 @@ def get_dashboard():
         recent = conn.execute("SELECT id, title FROM notes WHERE is_trashed=0 ORDER BY rowid DESC LIMIT 8").fetchall()
         pinned = conn.execute("SELECT id, title FROM notes WHERE is_trashed=0 AND is_pinned=1 ORDER BY title").fetchall()
         
-        reminders = []
+        upcoming = []
+        overdue = []
         rem_rows = conn.execute("SELECT id, title, reminder FROM notes WHERE reminder IS NOT NULL AND reminder != '' AND is_trashed=0 ORDER BY reminder").fetchall()
         now = datetime.now()
         for r in rem_rows:
@@ -1050,9 +1051,10 @@ def get_dashboard():
                 r_str = r['reminder'].replace('Z', '')
                 r_dt = datetime.fromisoformat(r_str) if 'T' in r_str else datetime.strptime(r_str, '%Y-%m-%d')
                 if r_dt >= now:
-                    reminders.append(dict(r))
-                    if len(reminders) >= 5:
-                        break
+                    if len(upcoming) < 5:
+                        upcoming.append(dict(r))
+                else:
+                    overdue.append(dict(r))
             except:
                 pass
         
@@ -1063,12 +1065,16 @@ def get_dashboard():
         
         total_notes = conn.execute("SELECT COUNT(*) as c FROM notes WHERE is_trashed=0").fetchone()['c']
         
+        recent_media = conn.execute("SELECT id, original_name, filename, file_type, uploaded_at FROM media ORDER BY uploaded_at DESC LIMIT 6").fetchall()
+        
         return jsonify({
             "recent": [dict(r) for r in recent],
             "pinned": [dict(r) for r in pinned],
-            "upcoming_reminders": reminders,
+            "upcoming_reminders": upcoming,
+            "overdue_reminders": overdue,
             "open_tasks": open_tasks,
-            "total_notes": total_notes
+            "total_notes": total_notes,
+            "recent_media": [dict(r) for r in recent_media]
         })
 
 @app.route('/api/export', methods=['GET'])
@@ -5612,11 +5618,48 @@ async function loadDashboard() {
             d.pinned.forEach(n => { html += `<div class="dash-card-item" onclick="selectNode('${n.id}')">${n.title || 'Unbenannt'}</div>`; });
             html += '</div>';
         }
+
+        if (d.overdue_reminders && d.overdue_reminders.length > 0) {
+            html += '<div class="dash-card" style="border-color: #e74c3c;"><h4 style="color:#e74c3c;"><i class="icon icon-reminder_active"></i> Überfällig (' + d.overdue_reminders.length + ')</h4>';
+            d.overdue_reminders.forEach(n => {
+                const rel = formatRelativeDate(n.reminder);
+                html += `<div class="dash-card-item" onclick="selectNode('${n.id}')" style="display:flex; justify-content:space-between; align-items:center;">` +
+                    `<span style="overflow:hidden; text-overflow:ellipsis;">${n.title || 'Unbenannt'}</span>` +
+                    `<span style="font-size:0.7em; color:#e74c3c; flex-shrink:0; margin-left:8px;">${rel}</span></div>`;
+            });
+            html += '</div>';
+        }
         
         if (d.upcoming_reminders && d.upcoming_reminders.length > 0) {
-            html += '<div class="dash-card"><h4><i class="icon icon-reminders"></i> Nächste Erinnerungen</h4>';
-            d.upcoming_reminders.forEach(n => { html += `<div class="dash-card-item" onclick="selectNode('${n.id}')">${n.title || 'Unbenannt'} <span style="font-size:0.75em; color:#888;">${(n.reminder||'').replace('T',' ')}</span></div>`; });
+            html += '<div class="dash-card"><h4><i class="icon icon-reminders"></i> Nächste Termine</h4>';
+            d.upcoming_reminders.forEach(n => {
+                const rel = formatRelativeDate(n.reminder);
+                html += `<div class="dash-card-item" onclick="selectNode('${n.id}')" style="display:flex; justify-content:space-between; align-items:center;">` +
+                    `<span style="overflow:hidden; text-overflow:ellipsis;">${n.title || 'Unbenannt'}</span>` +
+                    `<span style="font-size:0.7em; color:var(--accent); flex-shrink:0; margin-left:8px;">${rel}</span></div>`;
+            });
             html += '</div>';
+        }
+
+        if (d.recent_media && d.recent_media.length > 0) {
+            html += '<div class="dash-card"><h4><i class="icon icon-media"></i> Zuletzt hinzugefügt</h4>';
+            html += '<div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(80px,1fr)); gap:8px;">';
+            d.recent_media.forEach(m => {
+                const dt = new Date(m.uploaded_at * 1000).toLocaleDateString('de-DE');
+                if (m.file_type === 'image' || m.file_type === 'sketch') {
+                    html += `<div style="text-align:center; cursor:pointer;" onclick="openLightbox('/uploads/${m.filename}')" title="${m.original_name}\n${dt}">` +
+                        `<div style="width:100%; aspect-ratio:1; border-radius:6px; overflow:hidden; border:1px solid var(--border-color); background:rgba(0,0,0,0.2);">` +
+                        `<img src="/uploads/${m.filename}" style="width:100%; height:100%; object-fit:cover;"></div>` +
+                        `<div style="font-size:0.6em; color:#888; margin-top:3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${dt}</div></div>`;
+                } else {
+                    const icon = m.file_type === 'audio' ? 'icon-mic' : 'icon-file';
+                    html += `<div style="text-align:center;" title="${m.original_name}\n${dt}">` +
+                        `<div style="width:100%; aspect-ratio:1; border-radius:6px; border:1px solid var(--border-color); background:rgba(0,0,0,0.2); display:flex; align-items:center; justify-content:center;">` +
+                        `<i class="icon ${icon}" style="font-size:1.5em; opacity:0.5;"></i></div>` +
+                        `<div style="font-size:0.6em; color:#888; margin-top:3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${m.original_name || m.filename}</div></div>`;
+                }
+            });
+            html += '</div></div>';
         }
         
         html += '<div class="dash-card" style="grid-column: 1 / -1;"><h4><i class="icon icon-history"></i> Zuletzt bearbeitet</h4>';
@@ -5632,6 +5675,29 @@ async function loadDashboard() {
         html += '</div>';
         container.innerHTML = html;
     } catch(e) { console.error(e); }
+}
+
+function formatRelativeDate(dateStr) {
+    if (!dateStr) return '';
+    try {
+        const d = dateStr.includes('T') ? new Date(dateStr) : new Date(dateStr + 'T00:00:00');
+        const now = new Date();
+        const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const targetStart = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+        const diffDays = Math.round((targetStart - todayStart) / 86400000);
+        
+        if (diffDays < -1) return 'vor ' + Math.abs(diffDays) + ' Tagen';
+        if (diffDays === -1) return 'gestern';
+        if (diffDays === 0) {
+            if (dateStr.includes('T')) {
+                return 'heute ' + d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+            }
+            return 'heute';
+        }
+        if (diffDays === 1) return 'morgen';
+        if (diffDays <= 7) return 'in ' + diffDays + ' Tagen';
+        return targetStart.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
+    } catch(e) { return dateStr.replace('T', ' '); }
 }
 
 window.onload = () => { 
