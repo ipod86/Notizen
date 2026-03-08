@@ -160,13 +160,28 @@ def init_db():
             CREATE TABLE IF NOT EXISTS contacts (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
-                phone TEXT,
+                phone_mobile TEXT,
+                phone_landline TEXT,
                 email TEXT,
                 company TEXT,
+                address TEXT,
+                notes TEXT,
                 image_filename TEXT,
                 created_at REAL
             )
         ''')
+        
+        # Migration: add new columns if upgrading from old schema
+        for col in ['phone_mobile', 'phone_landline', 'address', 'notes']:
+            try:
+                conn.execute(f'ALTER TABLE contacts ADD COLUMN {col} TEXT')
+            except sqlite3.OperationalError:
+                pass
+        # Migration: rename old 'phone' column data to phone_mobile
+        try:
+            conn.execute("UPDATE contacts SET phone_mobile = phone WHERE phone_mobile IS NULL AND phone IS NOT NULL")
+        except sqlite3.OperationalError:
+            pass
         
         if not conn.execute("SELECT key FROM settings WHERE key='theme'").fetchone():
             conn.execute("INSERT INTO settings (key, value) VALUES ('theme', 'dark')")
@@ -742,6 +757,10 @@ def get_media_refs(filename):
 @app.route('/api/media/<filename>', methods=['DELETE'])
 def delete_media_item(filename):
     with get_db() as conn:
+        media_row = conn.execute("SELECT original_name, file_type FROM media WHERE filename=?", (filename,)).fetchone()
+        orig_name = media_row['original_name'] if media_row and media_row['original_name'] else filename
+        file_type = media_row['file_type'] if media_row else 'file'
+        
         conn.execute("DELETE FROM media WHERE filename=?", (filename,))
         
         search_term = filename
@@ -754,18 +773,18 @@ def delete_media_item(filename):
         for r in rows:
             new_text = r['text']
             if sid:
-                new_text = re.sub(r'\[sketch:' + re.escape(sid) + r'\]\n?', '', new_text)
+                new_text = re.sub(r'\[sketch:' + re.escape(sid) + r'\]', f'[media_deleted:{orig_name}]', new_text)
             else:
-                new_text = re.sub(r'\[(img|file|audio):' + re.escape(filename) + r'(\|[^\]]+)?\]\n?', '', new_text)
+                new_text = re.sub(r'\[(img|file|audio):' + re.escape(filename) + r'(\|[^\]]+)?\]', f'[media_deleted:{orig_name}]', new_text)
             conn.execute("UPDATE notes SET text=? WHERE id=?", (new_text, r['id']))
             
         hist_rows = conn.execute("SELECT id, text FROM note_history WHERE text LIKE ?", (f'%{search_term}%',)).fetchall()
         for r in hist_rows:
             new_text = r['text']
             if sid:
-                new_text = re.sub(r'\[sketch:' + re.escape(sid) + r'\]\n?', '', new_text)
+                new_text = re.sub(r'\[sketch:' + re.escape(sid) + r'\]', f'[media_deleted:{orig_name}]', new_text)
             else:
-                new_text = re.sub(r'\[(img|file|audio):' + re.escape(filename) + r'(\|[^\]]+)?\]\n?', '', new_text)
+                new_text = re.sub(r'\[(img|file|audio):' + re.escape(filename) + r'(\|[^\]]+)?\]', f'[media_deleted:{orig_name}]', new_text)
             conn.execute("UPDATE note_history SET text=? WHERE id=?", (new_text, r['id']))
             
     try:
@@ -783,7 +802,7 @@ def delete_media_item(filename):
 @app.route('/api/contacts', methods=['GET'])
 def get_contacts():
     with get_db() as conn:
-        rows = conn.execute("SELECT id, name, phone, email, company, image_filename, created_at FROM contacts ORDER BY name").fetchall()
+        rows = conn.execute("SELECT id, name, phone_mobile, phone_landline, email, company, address, notes, image_filename, created_at FROM contacts ORDER BY name").fetchall()
         return jsonify([dict(r) for r in rows])
 
 @app.route('/api/contacts', methods=['POST'])
@@ -791,16 +810,16 @@ def create_contact():
     data = request.json
     cid = uuid.uuid4().hex
     with get_db() as conn:
-        conn.execute("INSERT INTO contacts (id, name, phone, email, company, image_filename, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                     (cid, data.get('name', ''), data.get('phone', ''), data.get('email', ''), data.get('company', ''), None, time.time()))
+        conn.execute("INSERT INTO contacts (id, name, phone_mobile, phone_landline, email, company, address, notes, image_filename, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     (cid, data.get('name', ''), data.get('phone_mobile', ''), data.get('phone_landline', ''), data.get('email', ''), data.get('company', ''), data.get('address', ''), data.get('notes', ''), None, time.time()))
     return jsonify({"status": "success", "id": cid})
 
 @app.route('/api/contacts/<contact_id>', methods=['PUT'])
 def update_contact(contact_id):
     data = request.json
     with get_db() as conn:
-        conn.execute("UPDATE contacts SET name=?, phone=?, email=?, company=? WHERE id=?",
-                     (data.get('name', ''), data.get('phone', ''), data.get('email', ''), data.get('company', ''), contact_id))
+        conn.execute("UPDATE contacts SET name=?, phone_mobile=?, phone_landline=?, email=?, company=?, address=?, notes=? WHERE id=?",
+                     (data.get('name', ''), data.get('phone_mobile', ''), data.get('phone_landline', ''), data.get('email', ''), data.get('company', ''), data.get('address', ''), data.get('notes', ''), contact_id))
     return jsonify({"status": "success"})
 
 @app.route('/api/contacts/<contact_id>', methods=['DELETE'])
@@ -1662,7 +1681,7 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
     </div>
 
     <div id="contact-form-modal" class="modal-overlay" style="z-index: 2500;">
-        <div class="modal" style="width: 450px; max-width: 95vw;">
+        <div class="modal" style="width: 500px; max-width: 95vw; max-height: 90vh; overflow-y: auto;">
             <h3 style="margin-top:0" id="contact-form-title">Neuer Kontakt</h3>
             <div style="text-align:left; margin-bottom:15px;">
                 <div id="contact-form-avatar" style="text-align:center; margin-bottom:15px;">
@@ -1674,12 +1693,18 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
                 <input type="hidden" id="contact-form-id">
                 <label style="display:block; margin-bottom:5px; font-size:0.9em;">Name *</label>
                 <input type="text" id="contact-form-name" placeholder="Vor- und Nachname" style="margin-bottom:10px;">
-                <label style="display:block; margin-bottom:5px; font-size:0.9em;">Telefon</label>
-                <input type="text" id="contact-form-phone" placeholder="+49 ..." style="margin-bottom:10px;">
+                <label style="display:block; margin-bottom:5px; font-size:0.9em;">Mobil</label>
+                <input type="text" id="contact-form-phone-mobile" placeholder="+49 170 ..." style="margin-bottom:10px;">
+                <label style="display:block; margin-bottom:5px; font-size:0.9em;">Festnetz</label>
+                <input type="text" id="contact-form-phone-landline" placeholder="+49 271 ..." style="margin-bottom:10px;">
                 <label style="display:block; margin-bottom:5px; font-size:0.9em;">E-Mail</label>
                 <input type="text" id="contact-form-email" placeholder="name@example.de" style="margin-bottom:10px;">
                 <label style="display:block; margin-bottom:5px; font-size:0.9em;">Firma</label>
                 <input type="text" id="contact-form-company" placeholder="Firma / Organisation" style="margin-bottom:10px;">
+                <label style="display:block; margin-bottom:5px; font-size:0.9em;">Adresse</label>
+                <textarea id="contact-form-address" placeholder="Straße, PLZ, Ort" rows="2" style="margin-bottom:10px; resize:vertical;"></textarea>
+                <label style="display:block; margin-bottom:5px; font-size:0.9em;">Notizen</label>
+                <textarea id="contact-form-notes" placeholder="Eigene Notizen zum Kontakt..." rows="3" style="margin-bottom:10px; resize:vertical;"></textarea>
             </div>
             <div class="modal-btns">
                 <button class="btn-cancel" onclick="document.getElementById('contact-form-modal').style.display='none'">Abbruch</button>
@@ -2427,6 +2452,21 @@ input[type="checkbox"].task-check { width: 16px; height: 16px; margin: 0; cursor
     vertical-align: middle;
 }
 
+.media-deleted-inline {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    background: rgba(231, 76, 60, 0.08);
+    border: 1px dashed rgba(231, 76, 60, 0.4);
+    border-radius: 6px;
+    color: #e74c3c;
+    font-size: 0.85em;
+    font-style: italic;
+    margin: 4px 2px;
+    vertical-align: middle;
+}
+
 .contact-picker-tile {
     background: rgba(255,255,255,0.05);
     border: 1px solid var(--border-color);
@@ -3037,11 +3077,18 @@ function renderContactCardHTML(contact) {
         avatarHtml = '<img src="/uploads/contacts/' + contact.image_filename + '?v=' + Date.now() + '">';
     }
     let detailParts = [];
-    if (contact.phone) detailParts.push(contact.phone);
+    if (contact.phone_mobile) detailParts.push(contact.phone_mobile);
+    if (contact.phone_landline) detailParts.push(contact.phone_landline);
     if (contact.email) detailParts.push(contact.email);
     if (contact.company) detailParts.push(contact.company);
     let detailHtml = detailParts.length > 0 ? '<div class="contact-card-inline-detail">' + detailParts.join(' · ') + '</div>' : '';
-    return '<span class="contact-card-inline"><span class="contact-avatar">' + avatarHtml + '</span><span class="contact-card-inline-info"><span class="contact-card-inline-name">' + (contact.name || 'Unbenannt') + '</span>' + detailHtml + '</span></span>';
+    let clickAttr = window.isShareView ? '' : ' onclick="openContactFromNote(\'' + contact.id + '\')" style="cursor:pointer;" title="Klick zum Bearbeiten"';
+    return '<span class="contact-card-inline"' + clickAttr + '><span class="contact-avatar">' + avatarHtml + '</span><span class="contact-card-inline-info"><span class="contact-card-inline-name">' + (contact.name || 'Unbenannt') + '</span>' + detailHtml + '</span></span>';
+}
+
+async function openContactFromNote(contactId) {
+    await loadContacts();
+    editContact(contactId);
 }
 
 function renderMarkdown(text) { 
@@ -3069,6 +3116,8 @@ function renderMarkdown(text) {
     });
 
     html = html.replace(/\[contact_deleted:([^\]]+)\]/g, '<span class="contact-deleted-inline"><i class="icon icon-contact"></i> Kontakt gelöscht ($1)</span>');
+
+    html = html.replace(/\[media_deleted:([^\]]+)\]/g, '<span class="media-deleted-inline"><i class="icon icon-media"></i> Medium gelöscht ($1)</span>');
     
     html = html.replace(/\[note:([a-zA-Z0-9]+)\|([^\]]+)\]/g, (match, id, title) => `<a href="#" onclick="if(!window.isShareView){selectNode('${id}'); return false;}" class="note-link"><i class="icon icon-mention"></i> ${title}</a>`);
     html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" style="color:var(--accent); text-decoration:underline;">$1</a>');
@@ -3872,7 +3921,8 @@ function renderContactsList() {
         info.className = 'contact-tile-info';
         let infoParts = [];
         if (c.company) infoParts.push(c.company);
-        if (c.phone) infoParts.push(c.phone);
+        if (c.phone_mobile) infoParts.push(c.phone_mobile);
+        if (c.phone_landline) infoParts.push(c.phone_landline);
         if (c.email) infoParts.push(c.email);
         info.innerText = infoParts.join(' · ') || '';
         
@@ -3907,9 +3957,12 @@ function renderContactsList() {
 function openCreateContactForm() {
     document.getElementById('contact-form-id').value = '';
     document.getElementById('contact-form-name').value = '';
-    document.getElementById('contact-form-phone').value = '';
+    document.getElementById('contact-form-phone-mobile').value = '';
+    document.getElementById('contact-form-phone-landline').value = '';
     document.getElementById('contact-form-email').value = '';
     document.getElementById('contact-form-company').value = '';
+    document.getElementById('contact-form-address').value = '';
+    document.getElementById('contact-form-notes').value = '';
     document.getElementById('contact-form-title').innerText = 'Neuer Kontakt';
     document.getElementById('contact-avatar-preview').innerHTML = '<i class="icon icon-contact" style="font-size:1.2em;"></i>';
     document.getElementById('contact-form-modal').style.display = 'flex';
@@ -3921,9 +3974,12 @@ function editContact(contactId) {
     
     document.getElementById('contact-form-id').value = c.id;
     document.getElementById('contact-form-name').value = c.name || '';
-    document.getElementById('contact-form-phone').value = c.phone || '';
+    document.getElementById('contact-form-phone-mobile').value = c.phone_mobile || '';
+    document.getElementById('contact-form-phone-landline').value = c.phone_landline || '';
     document.getElementById('contact-form-email').value = c.email || '';
     document.getElementById('contact-form-company').value = c.company || '';
+    document.getElementById('contact-form-address').value = c.address || '';
+    document.getElementById('contact-form-notes').value = c.notes || '';
     document.getElementById('contact-form-title').innerText = 'Kontakt bearbeiten';
     
     const preview = document.getElementById('contact-avatar-preview');
@@ -3940,9 +3996,12 @@ async function saveContactForm() {
     const id = document.getElementById('contact-form-id').value;
     const data = {
         name: document.getElementById('contact-form-name').value,
-        phone: document.getElementById('contact-form-phone').value,
+        phone_mobile: document.getElementById('contact-form-phone-mobile').value,
+        phone_landline: document.getElementById('contact-form-phone-landline').value,
         email: document.getElementById('contact-form-email').value,
-        company: document.getElementById('contact-form-company').value
+        company: document.getElementById('contact-form-company').value,
+        address: document.getElementById('contact-form-address').value,
+        notes: document.getElementById('contact-form-notes').value
     };
     
     if (!data.name.trim()) {
@@ -3969,6 +4028,9 @@ async function saveContactForm() {
         document.getElementById('contact-form-modal').style.display = 'none';
         await loadContacts();
         renderContactsList();
+        if (activeId && activeNoteData && document.getElementById('edit-mode').style.display !== 'block') {
+            renderDisplayArea();
+        }
     } catch(e) {
         console.error(e);
     }
@@ -4063,7 +4125,8 @@ function renderContactPickerList() {
         
         let subInfo = '';
         if (c.company) subInfo = c.company;
-        else if (c.phone) subInfo = c.phone;
+        else if (c.phone_mobile) subInfo = c.phone_mobile;
+        else if (c.phone_landline) subInfo = c.phone_landline;
         
         const info = document.createElement('div');
         info.className = 'contact-tile-info';
