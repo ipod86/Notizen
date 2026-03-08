@@ -5168,6 +5168,44 @@ function initTabHandler() {
                 ta.setSelectionRange(lineStart, lineStart + newBlock.length);
             }
         }
+
+        if (e.key === 'Enter') {
+            const start = ta.selectionStart;
+            const text = ta.value;
+            const lineStart = text.lastIndexOf('\n', start - 1) + 1;
+            const line = text.substring(lineStart, start);
+            const trimmed = line.trimStart();
+            const indent = line.substring(0, line.length - trimmed.length);
+
+            let prefix = null;
+            let isEmpty = false;
+
+            if (trimmed.match(/^- \[([ xX])\] $/)) {
+                isEmpty = true;
+            } else if (trimmed.match(/^- \[([ xX])\] .+/)) {
+                prefix = indent + '- [ ] ';
+            } else if (trimmed.match(/^\d+\. $/)) {
+                isEmpty = true;
+            } else if (trimmed.match(/^(\d+)\. .+/)) {
+                const num = parseInt(trimmed.match(/^(\d+)\./)[1]);
+                prefix = indent + (num + 1) + '. ';
+            } else if (trimmed === '- ') {
+                isEmpty = true;
+            } else if (trimmed.startsWith('- ') && trimmed.length > 2) {
+                prefix = indent + '- ';
+            }
+
+            if (isEmpty) {
+                e.preventDefault();
+                ta.value = text.substring(0, lineStart) + '\n' + text.substring(start);
+                ta.setSelectionRange(lineStart + 1, lineStart + 1);
+            } else if (prefix) {
+                e.preventDefault();
+                ta.value = text.substring(0, start) + '\n' + prefix + text.substring(start);
+                const newPos = start + 1 + prefix.length;
+                ta.setSelectionRange(newPos, newPos);
+            }
+        }
     });
 }
 
