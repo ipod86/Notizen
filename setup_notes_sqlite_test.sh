@@ -2882,6 +2882,7 @@ input[type="checkbox"].task-check { width: 16px; height: 16px; margin: 0; cursor
 }
 .dash-stat-number { font-size: 2em; font-weight: bold; color: var(--accent); }
 .dash-stat-label { font-size: 0.85em; opacity: 0.6; margin-top: 4px; }
+.dash-empty { font-size: 0.85em; opacity: 0.4; font-style: italic; margin: 8px 0 0 0; }
 
 /* --- TEMPLATE STYLES --- */
 .template-card {
@@ -3853,14 +3854,8 @@ function renderItems(items, parent) {
     if (!Array.isArray(items)) return;
     const isEdit = document.body.classList.contains('edit-mode-active'); 
     const searchTerm = document.getElementById('search-input').value.trim();
-    
-    const sorted = isEdit ? items : [...items].sort((a, b) => {
-        const aPinned = a.is_pinned ? 1 : 0;
-        const bPinned = b.is_pinned ? 1 : 0;
-        return bPinned - aPinned;
-    });
 
-    sorted.forEach(item => { 
+    items.forEach(item => { 
         if (!item || !item.id) return;
         
         const isFolder = item.children && item.children.length > 0; 
@@ -5630,36 +5625,47 @@ async function loadDashboard() {
         html += '<div class="dash-card"><div class="dash-stat"><div class="dash-stat-number">' + d.total_notes + '</div><div class="dash-stat-label">Notizen gesamt</div></div></div>';
         html += '<div class="dash-card"><div class="dash-stat"><div class="dash-stat-number">' + d.open_tasks + '</div><div class="dash-stat-label">Offene Aufgaben</div></div></div>';
         
+        // Angepinnt
+        html += '<div class="dash-card"><h4><i class="icon icon-pin"></i> Angepinnt</h4>';
         if (d.pinned && d.pinned.length > 0) {
-            html += '<div class="dash-card"><h4><i class="icon icon-pin"></i> Angepinnt</h4>';
             d.pinned.forEach(n => { html += `<div class="dash-card-item" onclick="selectNode('${n.id}')">${n.title || 'Unbenannt'}</div>`; });
-            html += '</div>';
+        } else {
+            html += '<p class="dash-empty">Keine angepinnten Notizen</p>';
         }
+        html += '</div>';
 
+        // Überfällig
+        html += '<div class="dash-card"' + (d.overdue_reminders && d.overdue_reminders.length > 0 ? ' style="border-color:#e74c3c;"' : '') + '>';
+        html += '<h4' + (d.overdue_reminders && d.overdue_reminders.length > 0 ? ' style="color:#e74c3c;"' : '') + '><i class="icon icon-reminder_active"></i> Überfällig' + (d.overdue_reminders && d.overdue_reminders.length > 0 ? ' (' + d.overdue_reminders.length + ')' : '') + '</h4>';
         if (d.overdue_reminders && d.overdue_reminders.length > 0) {
-            html += '<div class="dash-card" style="border-color: #e74c3c;"><h4 style="color:#e74c3c;"><i class="icon icon-reminder_active"></i> Überfällig (' + d.overdue_reminders.length + ')</h4>';
             d.overdue_reminders.forEach(n => {
                 const rel = formatRelativeDate(n.reminder);
                 html += `<div class="dash-card-item" onclick="selectNode('${n.id}')" style="display:flex; justify-content:space-between; align-items:center;">` +
                     `<span style="overflow:hidden; text-overflow:ellipsis;">${n.title || 'Unbenannt'}</span>` +
                     `<span style="font-size:0.7em; color:#e74c3c; flex-shrink:0; margin-left:8px;">${rel}</span></div>`;
             });
-            html += '</div>';
+        } else {
+            html += '<p class="dash-empty">Keine überfälligen Termine</p>';
         }
+        html += '</div>';
         
+        // Nächste Termine
+        html += '<div class="dash-card"><h4><i class="icon icon-reminders"></i> Nächste Termine</h4>';
         if (d.upcoming_reminders && d.upcoming_reminders.length > 0) {
-            html += '<div class="dash-card"><h4><i class="icon icon-reminders"></i> Nächste Termine</h4>';
             d.upcoming_reminders.forEach(n => {
                 const rel = formatRelativeDate(n.reminder);
                 html += `<div class="dash-card-item" onclick="selectNode('${n.id}')" style="display:flex; justify-content:space-between; align-items:center;">` +
                     `<span style="overflow:hidden; text-overflow:ellipsis;">${n.title || 'Unbenannt'}</span>` +
                     `<span style="font-size:0.7em; color:var(--accent); flex-shrink:0; margin-left:8px;">${rel}</span></div>`;
             });
-            html += '</div>';
+        } else {
+            html += '<p class="dash-empty">Keine anstehenden Termine</p>';
         }
+        html += '</div>';
 
+        // Medien
+        html += '<div class="dash-card"><h4><i class="icon icon-media"></i> Zuletzt hinzugefügt</h4>';
         if (d.recent_media && d.recent_media.length > 0) {
-            html += '<div class="dash-card"><h4><i class="icon icon-media"></i> Zuletzt hinzugefügt</h4>';
             html += '<div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(80px,1fr)); gap:8px;">';
             d.recent_media.forEach(m => {
                 const dt = new Date(m.uploaded_at * 1000).toLocaleDateString('de-DE');
@@ -5676,16 +5682,20 @@ async function loadDashboard() {
                         `<div style="font-size:0.6em; color:#888; margin-top:3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${m.original_name || m.filename}</div></div>`;
                 }
             });
-            html += '</div></div>';
+            html += '</div>';
+        } else {
+            html += '<p class="dash-empty">Keine Medien vorhanden</p>';
         }
+        html += '</div>';
         
+        // Zuletzt bearbeitet
         html += '<div class="dash-card" style="grid-column: 1 / -1;"><h4><i class="icon icon-history"></i> Zuletzt bearbeitet</h4>';
         if (d.recent && d.recent.length > 0) {
             html += '<div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(180px,1fr)); gap:8px;">';
             d.recent.forEach(n => { html += `<div class="dash-card-item" onclick="selectNode('${n.id}')" style="padding:8px; background:rgba(255,255,255,0.03); border-radius:6px; border:1px solid var(--border-color);">${n.title || 'Unbenannt'}</div>`; });
             html += '</div>';
         } else {
-            html += '<p style="opacity:0.5;">Noch keine Notizen vorhanden.</p>';
+            html += '<p class="dash-empty">Noch keine Notizen vorhanden</p>';
         }
         html += '</div>';
         
