@@ -45,6 +45,7 @@ write_app_code() {
     mkdir -p "$TARGET_DIR/static"
     mkdir -p "$TARGET_DIR/templates"
     mkdir -p "$TARGET_DIR/uploads"
+    mkdir -p "$TARGET_DIR/uploads/contacts"
     mkdir -p "$TARGET_DIR/backups"
 
     echo "Lade statische Bibliotheken und Icons von GitHub herunter..."
@@ -154,6 +155,18 @@ def init_db():
                 uploaded_at REAL
             )
         ''')
+
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS contacts (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                phone TEXT,
+                email TEXT,
+                company TEXT,
+                image_filename TEXT,
+                created_at REAL
+            )
+        ''')
         
         if not conn.execute("SELECT key FROM settings WHERE key='theme'").fetchone():
             conn.execute("INSERT INTO settings (key, value) VALUES ('theme', 'dark')")
@@ -245,6 +258,7 @@ def webhook_worker():
         time.sleep(30)
 
 init_db()
+os.makedirs(os.path.join(UPLOAD_FOLDER, 'contacts'), exist_ok=True)
 threading.Thread(target=webhook_worker, daemon=True).start()
 
 @app.after_request
@@ -268,7 +282,7 @@ def get_settings():
 
 @app.before_request
 def require_login():
-    if request.endpoint in ['login', 'static', 'view_shared_note', 'uploaded_file', 'download_file']: 
+    if request.endpoint in ['login', 'static', 'view_shared_note', 'uploaded_file', 'download_file', 'contact_image']: 
         return
         
     sets = get_settings()
@@ -654,6 +668,10 @@ def handle_lock(note_id):
 def uploaded_file(filename): 
     return send_from_directory(UPLOAD_FOLDER, filename)
 
+@app.route('/uploads/contacts/<filename>')
+def contact_image(filename):
+    return send_from_directory(os.path.join(UPLOAD_FOLDER, 'contacts'), filename)
+
 @app.route('/api/download/<filename>')
 def download_file(filename):
     with get_db() as conn:
@@ -760,6 +778,84 @@ def delete_media_item(filename):
         pass
         
     return jsonify({"status": "success"})
+
+# --- CONTACTS API ---
+@app.route('/api/contacts', methods=['GET'])
+def get_contacts():
+    with get_db() as conn:
+        rows = conn.execute("SELECT id, name, phone, email, company, image_filename, created_at FROM contacts ORDER BY name").fetchall()
+        return jsonify([dict(r) for r in rows])
+
+@app.route('/api/contacts', methods=['POST'])
+def create_contact():
+    data = request.json
+    cid = uuid.uuid4().hex
+    with get_db() as conn:
+        conn.execute("INSERT INTO contacts (id, name, phone, email, company, image_filename, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                     (cid, data.get('name', ''), data.get('phone', ''), data.get('email', ''), data.get('company', ''), None, time.time()))
+    return jsonify({"status": "success", "id": cid})
+
+@app.route('/api/contacts/<contact_id>', methods=['PUT'])
+def update_contact(contact_id):
+    data = request.json
+    with get_db() as conn:
+        conn.execute("UPDATE contacts SET name=?, phone=?, email=?, company=? WHERE id=?",
+                     (data.get('name', ''), data.get('phone', ''), data.get('email', ''), data.get('company', ''), contact_id))
+    return jsonify({"status": "success"})
+
+@app.route('/api/contacts/<contact_id>', methods=['DELETE'])
+def delete_contact(contact_id):
+    with get_db() as conn:
+        row = conn.execute("SELECT name, image_filename FROM contacts WHERE id=?", (contact_id,)).fetchone()
+        if not row:
+            return jsonify({"error": "not found"}), 404
+        
+        contact_name = row['name'] or 'Unbekannt'
+        
+        notes = conn.execute("SELECT id, text FROM notes WHERE text LIKE ?", (f'%[contact:{contact_id}]%',)).fetchall()
+        for n in notes:
+            new_text = n['text'].replace(f'[contact:{contact_id}]', f'[contact_deleted:{contact_name}]')
+            conn.execute("UPDATE notes SET text=? WHERE id=?", (new_text, n['id']))
+        
+        hist_notes = conn.execute("SELECT id, text FROM note_history WHERE text LIKE ?", (f'%[contact:{contact_id}]%',)).fetchall()
+        for n in hist_notes:
+            new_text = n['text'].replace(f'[contact:{contact_id}]', f'[contact_deleted:{contact_name}]')
+            conn.execute("UPDATE note_history SET text=? WHERE id=?", (new_text, n['id']))
+        
+        if row['image_filename']:
+            try:
+                os.remove(os.path.join(UPLOAD_FOLDER, 'contacts', row['image_filename']))
+            except:
+                pass
+        
+        conn.execute("DELETE FROM contacts WHERE id=?", (contact_id,))
+    return jsonify({"status": "success"})
+
+@app.route('/api/contacts/<contact_id>/image', methods=['POST'])
+def upload_contact_image(contact_id):
+    file = request.files.get('image')
+    if not file:
+        return jsonify({"error": "no file"}), 400
+    
+    ext = file.filename.rsplit('.', 1)[1].lower() if '.' in file.filename else 'png'
+    filename = f"{contact_id}.{ext}"
+    
+    os.makedirs(os.path.join(UPLOAD_FOLDER, 'contacts'), exist_ok=True)
+    
+    with get_db() as conn:
+        old = conn.execute("SELECT image_filename FROM contacts WHERE id=?", (contact_id,)).fetchone()
+        if old and old['image_filename']:
+            try:
+                os.remove(os.path.join(UPLOAD_FOLDER, 'contacts', old['image_filename']))
+            except:
+                pass
+    
+    file.save(os.path.join(UPLOAD_FOLDER, 'contacts', filename))
+    
+    with get_db() as conn:
+        conn.execute("UPDATE contacts SET image_filename=? WHERE id=?", (filename, contact_id))
+    
+    return jsonify({"status": "success", "filename": filename})
 
 @app.route('/api/export', methods=['GET'])
 def export_backup():
@@ -910,6 +1006,8 @@ for text in all_texts:
                 used_files.add(f"sketch_{sid}.json")
                 
 for f in os.listdir(UPL):
+    if f == 'contacts':
+        continue
     if f not in used_files:
         try: 
             os.remove(os.path.join(UPL, f))
@@ -1211,6 +1309,7 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
                 
                 <div class="menu-row" onclick="openMediaModal()"><span><i class="icon icon-media" style="margin-right:8px;"></i> Medien-Manager</span></div>
                 <div class="menu-row" onclick="openShareOverviewModal()"><span><i class="icon icon-share" style="margin-right:8px;"></i> Freigaben verwalten</span></div>
+                <div class="menu-row" onclick="openContactsModal()"><span><i class="icon icon-contact" style="margin-right:8px;"></i> Kontakte</span></div>
                 <div class="menu-row" onclick="openTrashModal()">
                     <span style="display:flex; align-items:center; width:100%;">
                         <span style="flex-grow:1;"><i class="icon icon-trash" style="margin-right:8px;"></i> Papierkorb</span>
@@ -1297,6 +1396,7 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
                     <button class="tool-btn" onclick="openSketch()"><i class="icon icon-sketch"></i><span>Skizze</span></button>
                     <button class="tool-btn" id="btn-record-audio" onclick="toggleAudioRecording()"><i class="icon icon-mic"></i><span>Audio</span></button>
                     <button class="tool-btn" onclick="triggerMentionButton()"><i class="icon icon-mention"></i><span>Verweis</span></button>
+                    <button class="tool-btn" onclick="openContactPicker()"><i class="icon icon-contact"></i><span>Kontakt</span></button>
                     <button class="tool-btn" onclick="wrapSelection('[','](https://)', 'Link-Text')"><i class="icon icon-link"></i><span>Web-Link</span></button>
                     <div class="tool-btn color-tool">
                         <div class="color-row">
@@ -1546,6 +1646,63 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
         </div>
     </div>
 
+    <div id="contacts-modal" class="modal-overlay">
+        <div class="modal" style="width: 800px; max-width: 95vw;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+                <h3 style="margin:0"><i class="icon icon-contact"></i> Kontakte</h3>
+                <button class="btn-save" onclick="openCreateContactForm()"><i class="icon icon-add"></i> Neuer Kontakt</button>
+            </div>
+            <div id="contacts-list" style="text-align:left; max-height: 60vh; overflow-y: auto; margin-bottom: 20px; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 15px;">
+                Lade Kontakte...
+            </div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('contacts-modal').style.display='none'">Schließen</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="contact-form-modal" class="modal-overlay" style="z-index: 2500;">
+        <div class="modal" style="width: 450px; max-width: 95vw;">
+            <h3 style="margin-top:0" id="contact-form-title">Neuer Kontakt</h3>
+            <div style="text-align:left; margin-bottom:15px;">
+                <div id="contact-form-avatar" style="text-align:center; margin-bottom:15px;">
+                    <div id="contact-avatar-preview" style="width:80px; height:80px; border-radius:50%; background:rgba(var(--accent-rgb),0.2); display:inline-flex; align-items:center; justify-content:center; font-size:2em; color:var(--accent); cursor:pointer; overflow:hidden; border:2px dashed var(--border-color);" onclick="uploadContactAvatar()" title="Bild hochladen">
+                        <i class="icon icon-contact" style="font-size:1.2em;"></i>
+                    </div>
+                    <div style="font-size:0.75em; color:#888; margin-top:5px;">Klick zum Hochladen</div>
+                </div>
+                <input type="hidden" id="contact-form-id">
+                <label style="display:block; margin-bottom:5px; font-size:0.9em;">Name *</label>
+                <input type="text" id="contact-form-name" placeholder="Vor- und Nachname" style="margin-bottom:10px;">
+                <label style="display:block; margin-bottom:5px; font-size:0.9em;">Telefon</label>
+                <input type="text" id="contact-form-phone" placeholder="+49 ..." style="margin-bottom:10px;">
+                <label style="display:block; margin-bottom:5px; font-size:0.9em;">E-Mail</label>
+                <input type="text" id="contact-form-email" placeholder="name@example.de" style="margin-bottom:10px;">
+                <label style="display:block; margin-bottom:5px; font-size:0.9em;">Firma</label>
+                <input type="text" id="contact-form-company" placeholder="Firma / Organisation" style="margin-bottom:10px;">
+            </div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('contact-form-modal').style.display='none'">Abbruch</button>
+                <button class="btn-save" onclick="saveContactForm()">Speichern</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="contact-picker-modal" class="modal-overlay" style="z-index: 2500;">
+        <div class="modal" style="width: 700px; max-width: 95vw;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+                <h3 style="margin:0"><i class="icon icon-contact"></i> Kontakt einfügen</h3>
+                <button class="btn-save" onclick="document.getElementById('contact-picker-modal').style.display='none'; openContactsModal();" style="font-size:0.85em;"><i class="icon icon-settings"></i> Verwalten</button>
+            </div>
+            <div id="contact-picker-list" style="text-align:left; max-height: 55vh; overflow-y: auto; margin-bottom: 20px; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px;">
+                Lade Kontakte...
+            </div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('contact-picker-modal').style.display='none'">Abbruch</button>
+            </div>
+        </div>
+    </div>
+
     <div id="custom-modal" class="modal-overlay">
         <div class="modal">
             <h3 id="modal-title"></h3>
@@ -1660,6 +1817,7 @@ body {
 .icon-sort-abc { -webkit-mask-image: url('/static/icons/sort-alphabetical-variant.svg'); mask-image: url('/static/icons/sort-alphabetical-variant.svg'); }
 .icon-mic { -webkit-mask-image: url('/static/icons/microphone-outline.svg'); mask-image: url('/static/icons/microphone-outline.svg'); }
 .icon-media { -webkit-mask-image: url('/static/icons/media.svg'); mask-image: url('/static/icons/media.svg'); }
+.icon-contact { -webkit-mask-image: url('/static/icons/card-account-phone-outline.svg'); mask-image: url('/static/icons/card-account-phone-outline.svg'); }
 
 #sidebar { 
     width: var(--sidebar-width); 
@@ -2166,6 +2324,128 @@ input[type="checkbox"].task-check { width: 16px; height: 16px; margin: 0; cursor
 .history-item summary:hover { background: rgba(var(--accent-rgb), 0.2); }
 .history-item[open] summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; border-bottom: 1px solid var(--border-color); }
 
+/* --- CONTACT STYLES --- */
+.contact-tile {
+    background: rgba(255,255,255,0.05);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 15px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    text-align: center;
+    transition: border-color 0.2s, background 0.2s;
+}
+.contact-tile:hover {
+    border-color: var(--accent);
+    background: rgba(var(--accent-rgb), 0.05);
+}
+.contact-avatar {
+    width: 60px;
+    height: 60px;
+    border-radius: 50%;
+    background: rgba(var(--accent-rgb), 0.2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.5em;
+    color: var(--accent);
+    overflow: hidden;
+    flex-shrink: 0;
+}
+.contact-avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+.contact-tile-name {
+    font-weight: bold;
+    font-size: 0.95em;
+    word-break: break-word;
+}
+.contact-tile-info {
+    font-size: 0.75em;
+    color: #888;
+    word-break: break-all;
+}
+.contact-tile-actions {
+    display: flex;
+    gap: 5px;
+    margin-top: 5px;
+}
+
+.contact-card-inline {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    background: rgba(var(--accent-rgb), 0.08);
+    border: 1px solid rgba(var(--accent-rgb), 0.25);
+    border-radius: 8px;
+    margin: 4px 2px;
+    max-width: 100%;
+    box-sizing: border-box;
+    vertical-align: middle;
+}
+.contact-card-inline .contact-avatar {
+    width: 32px;
+    height: 32px;
+    font-size: 0.9em;
+    flex-shrink: 0;
+}
+.contact-card-inline-info {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+.contact-card-inline-name {
+    font-weight: bold;
+    font-size: 0.9em;
+    color: var(--accent);
+}
+.contact-card-inline-detail {
+    font-size: 0.75em;
+    color: #888;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.contact-deleted-inline {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    background: rgba(231, 76, 60, 0.08);
+    border: 1px dashed rgba(231, 76, 60, 0.4);
+    border-radius: 6px;
+    color: #e74c3c;
+    font-size: 0.85em;
+    font-style: italic;
+    margin: 4px 2px;
+    vertical-align: middle;
+}
+
+.contact-picker-tile {
+    background: rgba(255,255,255,0.05);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s, transform 0.1s;
+}
+.contact-picker-tile:hover {
+    border-color: var(--accent);
+    background: rgba(var(--accent-rgb), 0.1);
+    transform: scale(1.02);
+}
+
 @media print {
     #sidebar, .header-actions, #mobile-toggle-btn, .toolbar, #edit-mode, #breadcrumb, #view-reminder-badge, #view-reminder-ack, .dropdown, #note-menu-content, #no-selection, #add-sub-level-btn { display: none !important; }
     body, html { background: white !important; color: black !important; height: auto !important; width: auto !important; overflow: visible !important; display: block !important; position: static !important; }
@@ -2181,6 +2461,8 @@ input[type="checkbox"].task-check { width: 16px; height: 16px; margin: 0; cursor
     details.spoiler { border: 1px solid #ccc; }
     .md-table th, .md-table td { border-color: #aaa !important; color: #000 !important; }
     .md-table th { background: #eee !important; }
+    .contact-card-inline { border-color: #ccc !important; background: #f5f5f5 !important; }
+    .contact-card-inline-name { color: #333 !important; }
 }
 EOF
 
@@ -2195,6 +2477,7 @@ var currentTreeLastMod = null;
 var searchTimeout = null;
 
 var currentTodosList = [];
+var contactsCache = [];
 
 let myClientId = sessionStorage.getItem('clientId');
 if (!myClientId) {
@@ -2334,6 +2617,15 @@ window.addEventListener('beforeunload', () => {
         navigator.sendBeacon(`/api/lock/${currentLockedNote}`, blob);
     }
 });
+
+async function loadContacts() {
+    try {
+        const res = await fetch('/api/contacts');
+        if (res.ok) {
+            contactsCache = await res.json();
+        }
+    } catch(e) { console.error("Kontakte laden:", e); }
+}
 
 async function updateBadges() {
     try {
@@ -2546,6 +2838,7 @@ async function checkAndReloadData() {
         }
         
         await updateBadges();
+        await loadContacts();
         updateToggleAllIcon();
 
         if (activeId) {
@@ -2733,11 +3026,28 @@ function cancelEdit() {
     renderDisplayArea(); 
 }
 
+function getContactById(id) {
+    return contactsCache.find(c => c.id === id) || null;
+}
+
+function renderContactCardHTML(contact) {
+    if (!contact) return '';
+    let avatarHtml = '<i class="icon icon-contact"></i>';
+    if (contact.image_filename) {
+        avatarHtml = '<img src="/uploads/contacts/' + contact.image_filename + '?v=' + Date.now() + '">';
+    }
+    let detailParts = [];
+    if (contact.phone) detailParts.push(contact.phone);
+    if (contact.email) detailParts.push(contact.email);
+    if (contact.company) detailParts.push(contact.company);
+    let detailHtml = detailParts.length > 0 ? '<div class="contact-card-inline-detail">' + detailParts.join(' · ') + '</div>' : '';
+    return '<span class="contact-card-inline"><span class="contact-avatar">' + avatarHtml + '</span><span class="contact-card-inline-info"><span class="contact-card-inline-name">' + (contact.name || 'Unbenannt') + '</span>' + detailHtml + '</span></span>';
+}
+
 function renderMarkdown(text) { 
     if (!text) return ''; 
     let html = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); 
     
-    // 1. Zuerst die reine Text-Formatierung (Fett, Kursiv, Farbe etc.)
     let last = ""; 
     while (last !== html) { 
         last = html; 
@@ -2747,17 +3057,23 @@ function renderMarkdown(text) {
         html = html.replace(/~~(.*?)~~/g, '<s>$1</s>'); 
     } 
 
-    // 2. DANACH erst die Medien und Links generieren (verhindert URL-Zerstörung durch Unterstriche)
     html = html.replace(/\[img:(.*?)\]/g, '<img src="/uploads/$1" class="note-img" onclick="openLightbox(this.src)">');
     html = html.replace(/\[sketch:([a-zA-Z0-9]+)\]/g, '<img src="/uploads/sketch_$1.png?v='+Date.now()+'" class="note-img sketch-img" title="Skizze bearbeiten" onclick="openSketch(\'$1\')">');
     html = html.replace(/\[file:([a-zA-Z0-9.\-]+)\|([^\]]+)\]/g, '<a href="/api/download/$1" class="note-link"><i class="icon icon-file"></i> $2</a>');
     html = html.replace(/\[audio:(.*?)\]/g, '<audio controls src="/uploads/$1" style="max-width: 100%; margin: 10px 0; outline: none; border-radius: 5px;"></audio>');
     
+    html = html.replace(/\[contact:([a-zA-Z0-9]+)\]/g, function(match, cid) {
+        const contact = getContactById(cid);
+        if (contact) return renderContactCardHTML(contact);
+        return '<span class="contact-deleted-inline"><i class="icon icon-contact"></i> Kontakt nicht gefunden</span>';
+    });
+
+    html = html.replace(/\[contact_deleted:([^\]]+)\]/g, '<span class="contact-deleted-inline"><i class="icon icon-contact"></i> Kontakt gelöscht ($1)</span>');
+    
     html = html.replace(/\[note:([a-zA-Z0-9]+)\|([^\]]+)\]/g, (match, id, title) => `<a href="#" onclick="if(!window.isShareView){selectNode('${id}'); return false;}" class="note-link"><i class="icon icon-mention"></i> ${title}</a>`);
     html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" style="color:var(--accent); text-decoration:underline;">$1</a>');
     html = html.replace(/\[s=(.*?)\]\n?([\s\S]*?)\n?\[\/s\]/g, '<details class="spoiler"><summary>$1</summary><div class="spoiler-content">$2</div></details>');
 
-    // 3. Tabellen
     let tableRegex = /((?:\|[^\n]+\|\n?)+)/g;
     html = html.replace(tableRegex, function(match) {
         let rows = match.trim().split('\n');
@@ -2775,7 +3091,6 @@ function renderMarkdown(text) {
         return table;
     });
     
-    // 4. Blöcke (Code, Listen, Zitate etc.)
     let parts = html.split("'''"); 
     let res = ''; 
     window.taskIndexCounter = 0; 
@@ -2912,6 +3227,10 @@ async function doSelectNode(id) {
     const activeEl = document.querySelector(`.tree-item-container[data-id="${id}"] > .tree-item`); 
     if(activeEl) activeEl.classList.add('active'); 
 }
+EOF
+
+# --- static/script.js (continued) ---
+cat << 'EOF' >> "$TARGET_DIR/static/script.js"
 
 function toggleEditMode() { 
     if (!document.body.classList.contains('edit-mode-active')) { 
@@ -3369,7 +3688,6 @@ function renderTodoList() {
     });
 }
 
-// --- MEDIEN MANAGER LOGIK ---
 async function openMediaModal() {
     document.getElementById('media-modal').style.display = 'flex';
     renderMediaList();
@@ -3422,17 +3740,13 @@ async function renderMediaList() {
             btnOpen.className = "tool-btn";
             btnOpen.title = "Im Browser ansehen";
             btnOpen.innerHTML = `<i class="icon icon-search"></i>`;
-            btnOpen.onclick = () => {
-                window.open(`/uploads/${m.filename}`, '_blank');
-            };
+            btnOpen.onclick = () => { window.open(`/uploads/${m.filename}`, '_blank'); };
             
             const btnDownload = document.createElement('button');
             btnDownload.className = "tool-btn";
             btnDownload.title = "Herunterladen";
             btnDownload.innerHTML = `<i class="icon icon-export"></i>`;
-            btnDownload.onclick = () => {
-                window.location.href = `/api/download/${m.filename}`;
-            };
+            btnDownload.onclick = () => { window.location.href = `/api/download/${m.filename}`; };
             
             const btnInfo = document.createElement('button');
             btnInfo.className = "tool-btn";
@@ -3483,7 +3797,6 @@ async function showMediaInfo(filename) {
         data.forEach(n => {
             const d = document.createElement('div');
             d.style = "padding:10px; border-bottom:1px solid var(--border-color);";
-            
             const link = document.createElement('a');
             link.href = '#';
             link.style.color = 'var(--accent)';
@@ -3495,7 +3808,6 @@ async function showMediaInfo(filename) {
                 document.getElementById('media-modal').style.display = 'none';
                 selectNode(n.id);
             };
-            
             d.appendChild(link);
             list.appendChild(d);
         });
@@ -3509,7 +3821,199 @@ function deleteMedia(filename, original_name) {
         { label: "Ja, löschen", class: "btn-discard", action: async () => {
             await fetch(`/api/media/${filename}`, { method: 'DELETE' });
             renderMediaList();
-            
+            if (activeId && document.getElementById('edit-mode').style.display !== 'block') {
+                activeNoteData = await fetchNoteData(activeId);
+                renderDisplayArea();
+            }
+        }},
+        { label: "Abbrechen", class: "btn-cancel", action: () => {} }
+    ]);
+}
+EOF
+
+# --- static/script.js (contacts + remaining) ---
+cat << 'EOF' >> "$TARGET_DIR/static/script.js"
+
+// --- CONTACTS FUNCTIONS ---
+async function openContactsModal() {
+    document.getElementById('contacts-modal').style.display = 'flex';
+    await loadContacts();
+    renderContactsList();
+}
+
+function renderContactsList() {
+    const list = document.getElementById('contacts-list');
+    list.innerHTML = '';
+    
+    if (contactsCache.length === 0) {
+        list.innerHTML = '<p style="opacity:0.5; grid-column: 1 / -1; text-align:center;">Noch keine Kontakte angelegt.</p>';
+        return;
+    }
+    
+    contactsCache.forEach(c => {
+        const tile = document.createElement('div');
+        tile.className = 'contact-tile';
+        
+        const avatar = document.createElement('div');
+        avatar.className = 'contact-avatar';
+        if (c.image_filename) {
+            avatar.innerHTML = '<img src="/uploads/contacts/' + c.image_filename + '?v=' + Date.now() + '">';
+        } else {
+            const initials = (c.name || '?').split(' ').map(w => w.charAt(0).toUpperCase()).join('').substring(0, 2);
+            avatar.innerText = initials;
+            avatar.style.fontWeight = 'bold';
+        }
+        
+        const name = document.createElement('div');
+        name.className = 'contact-tile-name';
+        name.innerText = c.name || 'Unbenannt';
+        
+        const info = document.createElement('div');
+        info.className = 'contact-tile-info';
+        let infoParts = [];
+        if (c.company) infoParts.push(c.company);
+        if (c.phone) infoParts.push(c.phone);
+        if (c.email) infoParts.push(c.email);
+        info.innerText = infoParts.join(' · ') || '';
+        
+        const actions = document.createElement('div');
+        actions.className = 'contact-tile-actions';
+        
+        const btnEdit = document.createElement('button');
+        btnEdit.className = 'tool-btn';
+        btnEdit.title = 'Bearbeiten';
+        btnEdit.innerHTML = '<i class="icon icon-sketch"></i>';
+        btnEdit.onclick = () => editContact(c.id);
+        
+        const btnDelete = document.createElement('button');
+        btnDelete.className = 'tool-btn';
+        btnDelete.title = 'Löschen';
+        btnDelete.style.borderColor = '#e74c3c';
+        btnDelete.style.color = '#e74c3c';
+        btnDelete.innerHTML = '<i class="icon icon-trash"></i>';
+        btnDelete.onclick = () => deleteContact(c.id, c.name);
+        
+        actions.appendChild(btnEdit);
+        actions.appendChild(btnDelete);
+        
+        tile.appendChild(avatar);
+        tile.appendChild(name);
+        tile.appendChild(info);
+        tile.appendChild(actions);
+        list.appendChild(tile);
+    });
+}
+
+function openCreateContactForm() {
+    document.getElementById('contact-form-id').value = '';
+    document.getElementById('contact-form-name').value = '';
+    document.getElementById('contact-form-phone').value = '';
+    document.getElementById('contact-form-email').value = '';
+    document.getElementById('contact-form-company').value = '';
+    document.getElementById('contact-form-title').innerText = 'Neuer Kontakt';
+    document.getElementById('contact-avatar-preview').innerHTML = '<i class="icon icon-contact" style="font-size:1.2em;"></i>';
+    document.getElementById('contact-form-modal').style.display = 'flex';
+}
+
+function editContact(contactId) {
+    const c = getContactById(contactId);
+    if (!c) return;
+    
+    document.getElementById('contact-form-id').value = c.id;
+    document.getElementById('contact-form-name').value = c.name || '';
+    document.getElementById('contact-form-phone').value = c.phone || '';
+    document.getElementById('contact-form-email').value = c.email || '';
+    document.getElementById('contact-form-company').value = c.company || '';
+    document.getElementById('contact-form-title').innerText = 'Kontakt bearbeiten';
+    
+    const preview = document.getElementById('contact-avatar-preview');
+    if (c.image_filename) {
+        preview.innerHTML = '<img src="/uploads/contacts/' + c.image_filename + '?v=' + Date.now() + '" style="width:100%;height:100%;object-fit:cover;">';
+    } else {
+        preview.innerHTML = '<i class="icon icon-contact" style="font-size:1.2em;"></i>';
+    }
+    
+    document.getElementById('contact-form-modal').style.display = 'flex';
+}
+
+async function saveContactForm() {
+    const id = document.getElementById('contact-form-id').value;
+    const data = {
+        name: document.getElementById('contact-form-name').value,
+        phone: document.getElementById('contact-form-phone').value,
+        email: document.getElementById('contact-form-email').value,
+        company: document.getElementById('contact-form-company').value
+    };
+    
+    if (!data.name.trim()) {
+        showModal("Fehler", "Bitte gib mindestens einen Namen ein.", [{ label: "OK", class: "btn-cancel", action: () => { document.getElementById('contact-form-modal').style.display = 'flex'; } }]);
+        document.getElementById('contact-form-modal').style.display = 'none';
+        return;
+    }
+    
+    try {
+        if (id) {
+            await fetch(`/api/contacts/${id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            });
+        } else {
+            await fetch('/api/contacts', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            });
+        }
+        
+        document.getElementById('contact-form-modal').style.display = 'none';
+        await loadContacts();
+        renderContactsList();
+    } catch(e) {
+        console.error(e);
+    }
+}
+
+function uploadContactAvatar() {
+    const contactId = document.getElementById('contact-form-id').value;
+    if (!contactId) {
+        showModal("Hinweis", "Bitte speichere den Kontakt zuerst, bevor du ein Bild hochlädst.", [{ label: "OK", class: "btn-cancel", action: () => { document.getElementById('contact-form-modal').style.display = 'flex'; } }]);
+        document.getElementById('contact-form-modal').style.display = 'none';
+        return;
+    }
+    
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.onchange = async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        
+        const fd = new FormData();
+        fd.append('image', file);
+        
+        try {
+            const res = await fetch(`/api/contacts/${contactId}/image`, { method: 'POST', body: fd });
+            const data = await res.json();
+            if (data.status === 'success') {
+                const preview = document.getElementById('contact-avatar-preview');
+                preview.innerHTML = '<img src="/uploads/contacts/' + data.filename + '?v=' + Date.now() + '" style="width:100%;height:100%;object-fit:cover;">';
+                await loadContacts();
+                renderContactsList();
+            }
+        } catch(err) {
+            console.error(err);
+        }
+    };
+    input.click();
+}
+
+function deleteContact(contactId, contactName) {
+    showModal("Kontakt löschen", `Möchtest du den Kontakt "${contactName}" wirklich löschen?\n\nIn allen Notizen, in denen dieser Kontakt eingefügt ist, wird stattdessen "Kontakt gelöscht" angezeigt.`, [
+        { label: "Ja, löschen", class: "btn-discard", action: async () => {
+            await fetch(`/api/contacts/${contactId}`, { method: 'DELETE' });
+            await loadContacts();
+            renderContactsList();
             if (activeId && document.getElementById('edit-mode').style.display !== 'block') {
                 activeNoteData = await fetchNoteData(activeId);
                 renderDisplayArea();
@@ -3519,6 +4023,70 @@ function deleteMedia(filename, original_name) {
     ]);
 }
 
+async function openContactPicker() {
+    await loadContacts();
+    document.getElementById('contact-picker-modal').style.display = 'flex';
+    renderContactPickerList();
+}
+
+function renderContactPickerList() {
+    const list = document.getElementById('contact-picker-list');
+    list.innerHTML = '';
+    
+    if (contactsCache.length === 0) {
+        list.innerHTML = '<p style="opacity:0.5; grid-column: 1 / -1; text-align:center;">Noch keine Kontakte vorhanden. Erstelle zuerst einen Kontakt über "Verwalten".</p>';
+        return;
+    }
+    
+    contactsCache.forEach(c => {
+        const tile = document.createElement('div');
+        tile.className = 'contact-picker-tile';
+        tile.onclick = () => {
+            insertContactTag(c.id);
+            document.getElementById('contact-picker-modal').style.display = 'none';
+        };
+        
+        const avatar = document.createElement('div');
+        avatar.className = 'contact-avatar';
+        if (c.image_filename) {
+            avatar.innerHTML = '<img src="/uploads/contacts/' + c.image_filename + '?v=' + Date.now() + '">';
+        } else {
+            const initials = (c.name || '?').split(' ').map(w => w.charAt(0).toUpperCase()).join('').substring(0, 2);
+            avatar.innerText = initials;
+            avatar.style.fontWeight = 'bold';
+        }
+        
+        const name = document.createElement('div');
+        name.className = 'contact-tile-name';
+        name.innerText = c.name || 'Unbenannt';
+        name.style.fontSize = '0.85em';
+        
+        let subInfo = '';
+        if (c.company) subInfo = c.company;
+        else if (c.phone) subInfo = c.phone;
+        
+        const info = document.createElement('div');
+        info.className = 'contact-tile-info';
+        info.innerText = subInfo;
+        
+        tile.appendChild(avatar);
+        tile.appendChild(name);
+        if (subInfo) tile.appendChild(info);
+        list.appendChild(tile);
+    });
+}
+
+function insertContactTag(contactId) {
+    const ta = document.getElementById('node-text');
+    if (!ta) return;
+    const tag = `[contact:${contactId}]`;
+    const s = ta.selectionStart;
+    ta.value = ta.value.substring(0, s) + tag + ta.value.substring(ta.selectionEnd);
+    ta.focus();
+    ta.setSelectionRange(s + tag.length, s + tag.length);
+}
+
+// --- TRASH ---
 async function openTrashModal() {
     document.getElementById('trash-modal').style.display = 'flex';
     const list = document.getElementById('trash-list');
@@ -3639,7 +4207,6 @@ async function openHistoryModal() {
         listEl.innerHTML = '';
         data.forEach(h => {
             const dt = new Date(h.saved_at * 1000).toLocaleString('de-DE');
-            
             const details = document.createElement('details');
             details.className = 'history-item';
             details.style.marginBottom = '10px';
@@ -3716,15 +4283,9 @@ async function saveHistorySettings() {
         history_days: document.getElementById('history-days').value
     };
     
-    await fetch('/api/settings', { 
-        method: 'POST', 
-        headers: { 'Content-Type': 'application/json' }, 
-        body: JSON.stringify(payload) 
-    });
-    
+    await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     fullTree.settings.history_enabled = payload.history_enabled;
     fullTree.settings.history_days = payload.history_days;
-    
     document.getElementById('history-settings-modal').style.display = 'none';
     renderDisplayArea(); 
 }
@@ -3743,51 +4304,24 @@ function toggleWebhookPayload() {
 }
 
 async function testWebhook() {
-    const payload = {
-        url: document.getElementById('webhook-url').value,
-        method: document.getElementById('webhook-method').value,
-        payload: document.getElementById('webhook-payload').value
-    };
-    
-    if (!payload.url) {
-        showModal("Hinweis", "Bitte trage zuerst eine gültige Ziel-URL ein, bevor du den Test startest.", [{ label: "Okay", class: "btn-cancel", action: () => {} }]);
-        return;
-    }
-    
+    const payload = { url: document.getElementById('webhook-url').value, method: document.getElementById('webhook-method').value, payload: document.getElementById('webhook-payload').value };
+    if (!payload.url) { showModal("Hinweis", "Bitte trage zuerst eine gültige Ziel-URL ein, bevor du den Test startest.", [{ label: "Okay", class: "btn-cancel", action: () => {} }]); return; }
     document.getElementById('webhook-modal').style.display = 'none';
-    
     try {
-        const res = await fetch('/api/webhook/test', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
-        
+        const res = await fetch('/api/webhook/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
         const data = await res.json();
-        
         if (res.ok) {
-            showModal("Test erfolgreich gesendet", `Der Server meldet den Status-Code: ${data.status_code}\n\nAntwort des Zielservers:\n${data.response_text || '(Keine Text-Antwort erhalten)'}`, [
-                { label: "Zurück zu den Einstellungen", class: "btn-cancel", action: () => { document.getElementById('webhook-modal').style.display = 'flex'; } }
-            ]);
+            showModal("Test erfolgreich gesendet", `Der Server meldet den Status-Code: ${data.status_code}\n\nAntwort des Zielservers:\n${data.response_text || '(Keine Text-Antwort erhalten)'}`, [{ label: "Zurück zu den Einstellungen", class: "btn-cancel", action: () => { document.getElementById('webhook-modal').style.display = 'flex'; } }]);
         } else {
-            showModal("Fehler beim Senden", `Der Test konnte nicht erfolgreich ausgeführt werden. Der Server meldet:\n\n${data.error}`, [
-                { label: "Zurück zu den Einstellungen", class: "btn-cancel", action: () => { document.getElementById('webhook-modal').style.display = 'flex'; } }
-            ]);
+            showModal("Fehler beim Senden", `Der Test konnte nicht erfolgreich ausgeführt werden. Der Server meldet:\n\n${data.error}`, [{ label: "Zurück zu den Einstellungen", class: "btn-cancel", action: () => { document.getElementById('webhook-modal').style.display = 'flex'; } }]);
         }
     } catch(e) {
-        showModal("Netzwerkfehler", `Es gab ein technisches Problem beim Verbinden zum Server:\n\n${e}`, [
-            { label: "Zurück zu den Einstellungen", class: "btn-cancel", action: () => { document.getElementById('webhook-modal').style.display = 'flex'; } }
-        ]);
+        showModal("Netzwerkfehler", `Es gab ein technisches Problem beim Verbinden zum Server:\n\n${e}`, [{ label: "Zurück zu den Einstellungen", class: "btn-cancel", action: () => { document.getElementById('webhook-modal').style.display = 'flex'; } }]);
     }
 }
 
 async function saveWebhook() {
-    const payload = { 
-        webhook_enabled: document.getElementById('webhook-enabled').checked, 
-        webhook_method: document.getElementById('webhook-method').value, 
-        webhook_url: document.getElementById('webhook-url').value, 
-        webhook_payload: document.getElementById('webhook-payload').value 
-    };
+    const payload = { webhook_enabled: document.getElementById('webhook-enabled').checked, webhook_method: document.getElementById('webhook-method').value, webhook_url: document.getElementById('webhook-url').value, webhook_payload: document.getElementById('webhook-payload').value };
     await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); 
     fullTree.settings.webhook_enabled = payload.webhook_enabled; 
     document.getElementById('webhook-modal').style.display = 'none'; 
@@ -3799,28 +4333,19 @@ async function toggleHeaderIcon(type, event) {
     const key = type === 'tasks' ? 'icon_tasks_enabled' : 'icon_reminders_enabled';
     const currentVal = fullTree.settings[key] !== false && fullTree.settings[key] !== 'false';
     const newVal = !currentVal;
-
     fullTree.settings[key] = newVal;
     updateMenuUI();
-
-    await fetch('/api/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ [key]: newVal })
-    });
+    await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ [key]: newVal }) });
 }
 
 function showModal(title, text, buttons, showInput=false) { 
     document.getElementById('modal-title').innerText = title; 
     document.getElementById('modal-text').innerText = text; 
-    
     const inp = document.getElementById('modal-input'); 
     inp.style.display = showInput ? 'block' : 'none'; 
     inp.value = ''; 
-    
     const container = document.getElementById('modal-btns-container'); 
     container.innerHTML = ''; 
-    
     buttons.forEach(btn => { 
         const b = document.createElement('button'); 
         b.innerText = btn.label; 
@@ -3828,7 +4353,6 @@ function showModal(title, text, buttons, showInput=false) {
         b.onclick = () => { document.getElementById('custom-modal').style.display = 'none'; btn.action(); }; 
         container.appendChild(b); 
     }); 
-    
     document.getElementById('custom-modal').style.display = 'flex'; 
     if (showInput) setTimeout(() => { inp.focus(); }, 100); 
 }
@@ -3843,55 +4367,33 @@ function clearSearch() {
 async function filterTree() {
     const term = document.getElementById('search-input').value.toLowerCase().trim(); 
     const clearBtn = document.getElementById('clear-search');
-    
-    if (!term) { 
-        clearBtn.style.display = 'none'; 
-        renderTree(); 
-        updateToggleAllIcon();
-        return; 
-    }
-    
+    if (!term) { clearBtn.style.display = 'none'; renderTree(); updateToggleAllIcon(); return; }
     clearBtn.style.display = 'flex'; 
-    
     if (searchTimeout) clearTimeout(searchTimeout);
-    
     searchTimeout = setTimeout(async () => {
         let matchedIds = new Set();
-        
         try {
             const res = await fetch('/api/search?q=' + encodeURIComponent(term));
-            if (res.ok) {
-                const ids = await res.json();
-                ids.forEach(id => matchedIds.add(id));
-            }
-        } catch(e) { 
-            console.error("Suchfehler:", e); 
-        }
-        
+            if (res.ok) { const ids = await res.json(); ids.forEach(id => matchedIds.add(id)); }
+        } catch(e) { console.error("Suchfehler:", e); }
         const container = document.getElementById('tree'); 
         container.innerHTML = '';
-        
         const rootGroup = document.createElement('div'); 
         rootGroup.className = 'tree-group'; 
         container.appendChild(rootGroup);
-        
         function getFilteredItems(items) { 
             let results = []; 
             items.forEach(item => { 
                 const matchInTitle = item.title && item.title.toLowerCase().includes(term); 
                 const matchInText = matchedIds.has(item.id); 
                 let filteredChildren = item.children ? getFilteredItems(item.children) : [];
-                
                 if (matchInTitle || matchInText || filteredChildren.length > 0) {
-                    if ((matchInTitle || matchInText || filteredChildren.length > 0) && collapsedIds.has(item.id)) {
-                        collapsedIds.delete(item.id);
-                    }
+                    if ((matchInTitle || matchInText || filteredChildren.length > 0) && collapsedIds.has(item.id)) { collapsedIds.delete(item.id); }
                     results.push({ ...item, children: filteredChildren }); 
                 }
             }); 
             return results; 
         }
-        
         renderItems(getFilteredItems(fullTree.content), rootGroup);
         updateToggleAllIcon();
     }, 300); 
@@ -3899,7 +4401,7 @@ async function filterTree() {
 
 function togglePassword() {
     if (fullTree.settings.password_enabled) { 
-        showModal("Passwortschutz deaktivieren", "Möchtest du den Passwortschutz für diese Instanz wirklich deaktivieren? \n\nJeder, der die Server-URL kennt, hat dann sofort wieder vollen Lese- und Schreibzugriff auf alle deine Notizen.", [
+        showModal("Passwortschutz deaktivieren", "Möchtest du den Passwortschutz für diese Instanz wirklich deaktivieren?", [
             { label: "Ja, Schutz aufheben", class: "btn-discard", action: async () => { await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password_enabled: false }) }); fullTree.settings.password_enabled = false; updateMenuUI(); } }, 
             { label: "Abbruch", class: "btn-cancel", action: () => {} }
         ]); 
@@ -3914,549 +4416,129 @@ function togglePassword() {
 function toggleAllFolders() {
     const searchTerm = document.getElementById('search-input').value; 
     let totalFolders = 0;
-    
-    function countFolders(items) { 
-        if (!Array.isArray(items)) return;
-        items.forEach(i => { 
-            if (i.children && i.children.length > 0) { 
-                totalFolders++; 
-                countFolders(i.children); 
-            } 
-        }); 
-    }
-    
+    function countFolders(items) { if (!Array.isArray(items)) return; items.forEach(i => { if (i.children && i.children.length > 0) { totalFolders++; countFolders(i.children); } }); }
     countFolders(fullTree.content);
-    
-    if (collapsedIds.size >= totalFolders / 2 && totalFolders > 0) { 
-        collapsedIds.clear(); 
-    } else { 
-        function collect(items) { 
-            items.forEach(i => { 
-                if(i.children && i.children.length > 0) { 
-                    collapsedIds.add(i.id); 
-                    collect(i.children); 
-                } 
-            }); 
-        } 
-        collect(fullTree.content); 
-    }
-    
+    if (collapsedIds.size >= totalFolders / 2 && totalFolders > 0) { collapsedIds.clear(); } else { function collect(items) { items.forEach(i => { if(i.children && i.children.length > 0) { collapsedIds.add(i.id); collect(i.children); } }); } collect(fullTree.content); }
     saveCollapsedToLocal(); 
     if (searchTerm) filterTree(); else renderTree();
     updateToggleAllIcon();
 }
 
 function confirmAutoSort() { 
-    showModal("Notizen sortieren?", "Möchtest du den gesamten Notizbaum automatisch alphabetisch sortieren lassen?\n\nHinweis: Ordner werden dabei immer oben angezeigt.", [
+    showModal("Notizen sortieren?", "Möchtest du den gesamten Notizbaum automatisch alphabetisch sortieren lassen?", [
         { label: "Ja, jetzt sortieren", class: "btn-discard", action: async () => { await applyAutoSort(); } }, 
         { label: "Abbrechen", class: "btn-cancel", action: () => {} }
     ]); 
 }
 
 async function applyAutoSort() { 
-    const sortRecursive = (list) => { 
-        list.sort((a, b) => { 
-            const aIsFolder = a.children && a.children.length > 0; 
-            const bIsFolder = b.children && b.children.length > 0; 
-            if (aIsFolder && !bIsFolder) return -1; 
-            if (!aIsFolder && bIsFolder) return 1; 
-            return a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: 'base' }); 
-        }); 
-        list.forEach(item => { if(item.children) sortRecursive(item.children); }); 
-    }; 
+    const sortRecursive = (list) => { list.sort((a, b) => { const aIsFolder = a.children && a.children.length > 0; const bIsFolder = b.children && b.children.length > 0; if (aIsFolder && !bIsFolder) return -1; if (!aIsFolder && bIsFolder) return 1; return a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: 'base' }); }); list.forEach(item => { if(item.children) sortRecursive(item.children); }); }; 
     sortRecursive(fullTree.content); 
-    document.body.classList.add('edit-mode-active'); 
-    renderTree(); 
-    await rebuildDataFromDOM(); 
-    document.body.classList.remove('edit-mode-active'); 
-    renderTree();
-    updateToggleAllIcon();
+    document.body.classList.add('edit-mode-active'); renderTree(); await rebuildDataFromDOM(); document.body.classList.remove('edit-mode-active'); renderTree(); updateToggleAllIcon();
 }
 
-function wrapSelection(b, a, p = "") { 
-    const ta = document.getElementById('node-text'); 
-    const s = ta.selectionStart; 
-    const e = ta.selectionEnd; 
-    let txt = ta.value.substring(s, e) || p;
-    ta.value = ta.value.substring(0, s) + b + txt + a + ta.value.substring(e); 
-    ta.focus(); 
-    ta.setSelectionRange(s + b.length, s + b.length + txt.length); 
-}
+function wrapSelection(b, a, p = "") { const ta = document.getElementById('node-text'); const s = ta.selectionStart; const e = ta.selectionEnd; let txt = ta.value.substring(s, e) || p; ta.value = ta.value.substring(0, s) + b + txt + a + ta.value.substring(e); ta.focus(); ta.setSelectionRange(s + b.length, s + b.length + txt.length); }
 
 function handleListAction(prefix, placeholder) {
-    const ta = document.getElementById('node-text'); 
-    const start = ta.selectionStart; 
-    const end = ta.selectionEnd; 
-    const text = ta.value; 
-    const selectedText = text.substring(start, end);
-    
-    if (selectedText.includes('\n')) { 
-        const newText = selectedText.split('\n').map(line => (line.trim() === '' || line.trim().startsWith(prefix.trim())) ? line : prefix + line).join('\n'); 
-        ta.value = text.substring(0, start) + newText + text.substring(end); 
-        ta.setSelectionRange(start, start + newText.length); 
-        ta.focus(); 
-        return; 
-    }
-    
+    const ta = document.getElementById('node-text'); const start = ta.selectionStart; const end = ta.selectionEnd; const text = ta.value; const selectedText = text.substring(start, end);
+    if (selectedText.includes('\n')) { const newText = selectedText.split('\n').map(line => (line.trim() === '' || line.trim().startsWith(prefix.trim())) ? line : prefix + line).join('\n'); ta.value = text.substring(0, start) + newText + text.substring(end); ta.setSelectionRange(start, start + newText.length); ta.focus(); return; }
     const textBefore = text.substring(0, start);
-    if (selectedText === placeholder && textBefore.endsWith(prefix)) { 
-        const insertStr = '\n' + prefix + placeholder; 
-        ta.value = text.substring(0, end) + insertStr + text.substring(end); 
-        const newStart = end + '\n'.length + prefix.length; 
-        ta.setSelectionRange(newStart, newStart + placeholder.length); 
-        ta.focus(); 
-        return; 
-    }
-    
-    let insertPrefix = (textBefore.length > 0 && !textBefore.endsWith('\n')) ? '\n' + prefix : prefix; 
-    let insertText = selectedText || placeholder;
-    ta.value = text.substring(0, start) + insertPrefix + insertText + text.substring(end); 
-    const selectStart = start + insertPrefix.length; 
-    ta.setSelectionRange(selectStart, selectStart + insertText.length); 
-    ta.focus();
+    if (selectedText === placeholder && textBefore.endsWith(prefix)) { const insertStr = '\n' + prefix + placeholder; ta.value = text.substring(0, end) + insertStr + text.substring(end); const newStart = end + '\n'.length + prefix.length; ta.setSelectionRange(newStart, newStart + placeholder.length); ta.focus(); return; }
+    let insertPrefix = (textBefore.length > 0 && !textBefore.endsWith('\n')) ? '\n' + prefix : prefix; let insertText = selectedText || placeholder; ta.value = text.substring(0, start) + insertPrefix + insertText + text.substring(end); const selectStart = start + insertPrefix.length; ta.setSelectionRange(selectStart, selectStart + insertText.length); ta.focus();
 }
 
-function insertCodeTag() { 
-    wrapSelection("'''\n", "\n'''", "CODE"); 
-}
+function insertCodeTag() { wrapSelection("'''\n", "\n'''", "CODE"); }
 
-function copyToClipboard(btn) { 
-    const el = document.createElement('textarea'); 
-    el.value = btn.nextElementSibling.innerText; 
-    document.body.appendChild(el); 
-    el.select(); 
-    document.execCommand('copy'); 
-    document.body.removeChild(el); 
-    btn.innerText = 'Kopiert!'; 
-    setTimeout(() => { btn.innerText = 'Copy'; }, 2000); 
-}
+function applyColor() { const hex = document.getElementById('text-color-input').value; wrapSelection(`[${hex}]`, '[/#]', 'Farbiger Text'); }
 
-function toggleSettings(e) { 
-    if (e) e.stopPropagation(); 
-    const m = document.getElementById('dropdown-menu');
-    const isVisible = m.style.display === 'block';
-    closeAllMenus();
-    if (!isVisible) m.style.display = 'block';
-}
+function copyToClipboard(btn) { const el = document.createElement('textarea'); el.value = btn.nextElementSibling.innerText; document.body.appendChild(el); el.select(); document.execCommand('copy'); document.body.removeChild(el); btn.innerText = 'Kopiert!'; setTimeout(() => { btn.innerText = 'Copy'; }, 2000); }
 
-function toggleNoteMenu(e) {
-    if (e) e.stopPropagation();
-    const m = document.getElementById('note-menu-content');
-    const isVisible = m.style.display === 'block';
-    closeAllMenus();
-    if (!isVisible) m.style.display = 'block';
-}
+function toggleSettings(e) { if (e) e.stopPropagation(); const m = document.getElementById('dropdown-menu'); const isVisible = m.style.display === 'block'; closeAllMenus(); if (!isVisible) m.style.display = 'block'; }
+function toggleNoteMenu(e) { if (e) e.stopPropagation(); const m = document.getElementById('note-menu-content'); const isVisible = m.style.display === 'block'; closeAllMenus(); if (!isVisible) m.style.display = 'block'; }
 
-document.addEventListener('click', () => { 
-    closeAllMenus();
-});
+document.addEventListener('click', () => { closeAllMenus(); });
 
-function exportData() { 
-    window.location.href = '/api/export'; 
-}
+function exportData() { window.location.href = '/api/export'; }
 
-function toggleSidebar() { 
-    const h = document.body.classList.toggle('sidebar-hidden'); 
-    localStorage.setItem('sidebarState', h ? 'closed' : 'open'); 
-    document.querySelector('#mobile-toggle-btn span').innerText = h ? '▶' : '◀'; 
-}
+function toggleSidebar() { const h = document.body.classList.toggle('sidebar-hidden'); localStorage.setItem('sidebarState', h ? 'closed' : 'open'); document.querySelector('#mobile-toggle-btn span').innerText = h ? '▶' : '◀'; }
 
-async function uploadImage() { 
-    const input = document.createElement('input'); 
-    input.type = 'file'; 
-    input.accept = 'image/*'; 
-    input.onchange = async (e) => { 
-        const file = e.target.files[0]; 
-        if (!file) return; 
-        
-        uploadWithProgress(file, (data) => {
-            if(data.filename) { 
-                wrapSelection(`[img:${data.filename}]`, '', ''); 
-            }
-        });
-    }; 
-    input.click(); 
-}
+async function uploadImage() { const input = document.createElement('input'); input.type = 'file'; input.accept = 'image/*'; input.onchange = async (e) => { const file = e.target.files[0]; if (!file) return; uploadWithProgress(file, (data) => { if(data.filename) { wrapSelection(`[img:${data.filename}]`, '', ''); } }); }; input.click(); }
 
-async function uploadGenericFile() { 
-    const input = document.createElement('input'); 
-    input.type = 'file'; 
-    input.onchange = async (e) => { 
-        const file = e.target.files[0]; 
-        if (!file) return; 
-        
-        uploadWithProgress(file, (data) => {
-            if(data.filename) { 
-                let txt = file.type.startsWith('image/') ? `[img:${data.filename}]` : `[file:${data.filename}|${data.original}]`; 
-                const ta = document.getElementById('node-text'); 
-                const s = ta.selectionStart; 
-                ta.value = ta.value.substring(0, s) + txt + ta.value.substring(ta.selectionEnd); 
-                ta.focus(); 
-                ta.setSelectionRange(s + txt.length, s + txt.length); 
-            }
-        });
-    }; 
-    input.click(); 
-}
+async function uploadGenericFile() { const input = document.createElement('input'); input.type = 'file'; input.onchange = async (e) => { const file = e.target.files[0]; if (!file) return; uploadWithProgress(file, (data) => { if(data.filename) { let txt = file.type.startsWith('image/') ? `[img:${data.filename}]` : `[file:${data.filename}|${data.original}]`; const ta = document.getElementById('node-text'); const s = ta.selectionStart; ta.value = ta.value.substring(0, s) + txt + ta.value.substring(ta.selectionEnd); ta.focus(); ta.setSelectionRange(s + txt.length, s + txt.length); } }); }; input.click(); }
 
-function openLightbox(src) { 
-    document.getElementById('lightbox-img').src = src; 
-    document.getElementById('lightbox').style.display = 'flex'; 
-}
+function openLightbox(src) { document.getElementById('lightbox-img').src = src; document.getElementById('lightbox').style.display = 'flex'; }
+function closeLightbox() { document.getElementById('lightbox').style.display = 'none'; document.getElementById('lightbox-img').src = ''; }
 
-function closeLightbox() { 
-    document.getElementById('lightbox').style.display = 'none'; 
-    document.getElementById('lightbox-img').src = ''; 
-}
-
-function getAllNotesFlat(nodes, path="") { 
-    let res = []; 
-    if (!Array.isArray(nodes)) return res;
-    nodes.forEach(n => { 
-        let currentPath = path ? path + " / " + n.title : n.title; 
-        res.push({ id: n.id, title: n.title, path: currentPath }); 
-        if(n.children) { 
-            res = res.concat(getAllNotesFlat(n.children, currentPath)); 
-        } 
-    }); 
-    return res; 
-}
+function getAllNotesFlat(nodes, path="") { let res = []; if (!Array.isArray(nodes)) return res; nodes.forEach(n => { let currentPath = path ? path + " / " + n.title : n.title; res.push({ id: n.id, title: n.title, path: currentPath }); if(n.children) { res = res.concat(getAllNotesFlat(n.children, currentPath)); } }); return res; }
 
 function initMentionSystem() {
-    const ta = document.getElementById('node-text'); 
-    const dropdown = document.getElementById('mention-dropdown'); 
-    if(!ta || !dropdown) return;
-    
+    const ta = document.getElementById('node-text'); const dropdown = document.getElementById('mention-dropdown'); if(!ta || !dropdown) return;
     ta.addEventListener('input', function() {
         let match = ta.value.substring(0, ta.selectionStart).match(/(?:^|\s)@([^\n]{0,30})$/);
         if (match) {
-            let search = match[1].toLowerCase(); 
-            let filtered = getAllNotesFlat(fullTree.content).filter(n => n.id !== activeId && (n.title.toLowerCase().includes(search) || n.path.toLowerCase().includes(search)));
-            
-            if (filtered.length > 0) { 
-                dropdown.innerHTML = ''; 
-                filtered.forEach(n => { 
-                    let div = document.createElement('div'); 
-                    div.className = 'mention-item'; 
-                    div.innerHTML = `<strong>${n.title}</strong><span class="mention-path">${n.path}</span>`; 
-                    div.onclick = () => insertMention(n.id, n.title, match[1].length + 1); 
-                    dropdown.appendChild(div); 
-                }); 
-                dropdown.style.display = 'block'; 
-            } else { 
-                dropdown.style.display = 'none'; 
-            }
-        } else { 
-            dropdown.style.display = 'none'; 
-        }
+            let search = match[1].toLowerCase(); let filtered = getAllNotesFlat(fullTree.content).filter(n => n.id !== activeId && (n.title.toLowerCase().includes(search) || n.path.toLowerCase().includes(search)));
+            if (filtered.length > 0) { dropdown.innerHTML = ''; filtered.forEach(n => { let div = document.createElement('div'); div.className = 'mention-item'; div.innerHTML = `<strong>${n.title}</strong><span class="mention-path">${n.path}</span>`; div.onclick = () => insertMention(n.id, n.title, match[1].length + 1); dropdown.appendChild(div); }); dropdown.style.display = 'block'; } else { dropdown.style.display = 'none'; }
+        } else { dropdown.style.display = 'none'; }
     });
-    document.addEventListener('click', (e) => { 
-        if(e.target !== ta && !dropdown.contains(e.target)) dropdown.style.display = 'none'; 
-    });
+    document.addEventListener('click', (e) => { if(e.target !== ta && !dropdown.contains(e.target)) dropdown.style.display = 'none'; });
 }
 
-function insertMention(id, title, replaceLength) { 
-    let ta = document.getElementById('node-text'); 
-    let cursor = ta.selectionStart; 
-    let start = cursor - replaceLength; 
-    let linkCode = `[note:${id}|${title}] `; 
-    ta.value = ta.value.substring(0, start) + linkCode + ta.value.substring(cursor); 
-    ta.focus(); 
-    ta.setSelectionRange(start + linkCode.length, start + linkCode.length); 
-    document.getElementById('mention-dropdown').style.display = 'none'; 
-}
+function insertMention(id, title, replaceLength) { let ta = document.getElementById('node-text'); let cursor = ta.selectionStart; let start = cursor - replaceLength; let linkCode = `[note:${id}|${title}] `; ta.value = ta.value.substring(0, start) + linkCode + ta.value.substring(cursor); ta.focus(); ta.setSelectionRange(start + linkCode.length, start + linkCode.length); document.getElementById('mention-dropdown').style.display = 'none'; }
 
-function triggerMentionButton() { 
-    let ta = document.getElementById('node-text'); 
-    let s = ta.selectionStart; 
-    let prefix = (s === 0 || ta.value.charAt(s - 1) === '\n' || ta.value.charAt(s - 1) === ' ') ? '@' : ' @';
-    ta.value = ta.value.substring(0, s) + prefix + ta.value.substring(ta.selectionEnd); 
-    ta.focus(); 
-    ta.setSelectionRange(s + prefix.length, s + prefix.length); 
-    ta.dispatchEvent(new Event('input')); 
-}
+function triggerMentionButton() { let ta = document.getElementById('node-text'); let s = ta.selectionStart; let prefix = (s === 0 || ta.value.charAt(s - 1) === '\n' || ta.value.charAt(s - 1) === ' ') ? '@' : ' @'; ta.value = ta.value.substring(0, s) + prefix + ta.value.substring(ta.selectionEnd); ta.focus(); ta.setSelectionRange(s + prefix.length, s + prefix.length); ta.dispatchEvent(new Event('input')); }
 
 let sketchCanvas, sketchCtx, isDrawing = false, sketchStrokes = [], currentStroke = null, sketchColor = '#000000', sketchWidth = 8, sketchMode = 'pen', sketchBg = 'white', activeSketchId = null;
 
-async function openSketch(id = null) {
-    const isEdit = document.getElementById('edit-mode').style.display === 'block';
-    if (!isEdit && !await acquireLock(activeId)) { 
-        showModal("Gesperrt", "Skizze kann nicht geöffnet werden.", [{ label: "OK", class: "btn-cancel", action: () => {} }]); 
-        return; 
-    }
-    
-    document.getElementById('sketch-modal').style.display = 'flex'; 
-    if(!sketchCanvas) initSketcher(); 
-    
-    activeSketchId = id; 
-    sketchStrokes = [];
-    
-    if (id) { 
-        try { 
-            const res = await fetch(`/api/sketch/${id}`); 
-            if(res.ok) { 
-                const data = await res.json(); 
-                sketchBg = data.bg || 'white'; 
-                document.getElementById('sketch-bg-select').value = sketchBg; 
-                sketchStrokes = data.strokes || []; 
-            } 
-        } catch(e) { 
-            console.error(e); 
-        } 
-    } else { 
-        sketchBg = document.getElementById('sketch-bg-select').value; 
-    }
-    setSketchMode('pen'); 
-    redrawSketch();
-}
+async function openSketch(id = null) { const isEdit = document.getElementById('edit-mode').style.display === 'block'; if (!isEdit && !await acquireLock(activeId)) { showModal("Gesperrt", "Skizze kann nicht geöffnet werden.", [{ label: "OK", class: "btn-cancel", action: () => {} }]); return; } document.getElementById('sketch-modal').style.display = 'flex'; if(!sketchCanvas) initSketcher(); activeSketchId = id; sketchStrokes = []; if (id) { try { const res = await fetch(`/api/sketch/${id}`); if(res.ok) { const data = await res.json(); sketchBg = data.bg || 'white'; document.getElementById('sketch-bg-select').value = sketchBg; sketchStrokes = data.strokes || []; } } catch(e) { console.error(e); } } else { sketchBg = document.getElementById('sketch-bg-select').value; } setSketchMode('pen'); redrawSketch(); }
+function closeSketch() { document.getElementById('sketch-modal').style.display = 'none'; if (document.getElementById('edit-mode').style.display !== 'block') releaseLock(); }
 
-function closeSketch() { 
-    document.getElementById('sketch-modal').style.display = 'none'; 
-    if (document.getElementById('edit-mode').style.display !== 'block') releaseLock(); 
-}
+async function saveSketch() { const payload = { id: activeSketchId, bg: sketchBg, strokes: sketchStrokes, image: sketchCanvas.toDataURL("image/png") }; const res = await fetch('/api/sketch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); const data = await res.json(); if (!activeSketchId && data.id) wrapSelection(`[sketch:${data.id}]`, '', ''); document.getElementById('sketch-modal').style.display = 'none'; const ta = document.getElementById('node-text'); if (ta) ta.value = ta.value.replace(`[sketch:${data.id}]`, `[sketch:${data.id}] `).trim(); document.querySelectorAll('.sketch-img').forEach(img => { if (img.src.includes(data.id)) img.src = `/uploads/sketch_${data.id}.png?v=` + Date.now(); }); if (document.getElementById('edit-mode').style.display !== 'block') releaseLock(); }
 
-async function saveSketch() {
-    const payload = { id: activeSketchId, bg: sketchBg, strokes: sketchStrokes, image: sketchCanvas.toDataURL("image/png") };
-    const res = await fetch('/api/sketch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); 
-    const data = await res.json();
-    
-    if (!activeSketchId && data.id) wrapSelection(`[sketch:${data.id}]`, '', '');
-    
-    document.getElementById('sketch-modal').style.display = 'none'; 
-    const ta = document.getElementById('node-text'); 
-    if (ta) ta.value = ta.value.replace(`[sketch:${data.id}]`, `[sketch:${data.id}] `).trim();
-    
-    document.querySelectorAll('.sketch-img').forEach(img => { 
-        if (img.src.includes(data.id)) img.src = `/uploads/sketch_${data.id}.png?v=` + Date.now(); 
-    });
-    
-    if (document.getElementById('edit-mode').style.display !== 'block') releaseLock();
-}
+function initSketcher() { sketchCanvas = document.getElementById('sketch-canvas'); sketchCtx = sketchCanvas.getContext('2d'); sketchCanvas.width = 1200; sketchCanvas.height = 900; const getPos = (e) => { const r = sketchCanvas.getBoundingClientRect(); const scaleX = sketchCanvas.width / r.width; const scaleY = sketchCanvas.height / r.height; let cx = e.touches ? e.touches[0].clientX : e.clientX; let cy = e.touches ? e.touches[0].clientY : e.clientY; return { x: (cx - r.left) * scaleX, y: (cy - r.top) * scaleY }; }; const startDraw = (e) => { e.preventDefault(); isDrawing = true; currentStroke = { color: sketchMode === 'eraser' ? sketchBg : sketchColor, width: sketchWidth, mode: sketchMode, points: [getPos(e)] }; sketchStrokes.push(currentStroke); }; const draw = (e) => { if (!isDrawing) return; e.preventDefault(); currentStroke.points.push(getPos(e)); redrawSketch(); }; const endDraw = () => { isDrawing = false; }; sketchCanvas.addEventListener('mousedown', startDraw); sketchCanvas.addEventListener('mousemove', draw); window.addEventListener('mouseup', endDraw); sketchCanvas.addEventListener('touchstart', startDraw, {passive: false}); sketchCanvas.addEventListener('touchmove', draw, {passive: false}); window.addEventListener('touchend', endDraw); }
 
-function initSketcher() {
-    sketchCanvas = document.getElementById('sketch-canvas'); 
-    sketchCtx = sketchCanvas.getContext('2d'); 
-    sketchCanvas.width = 1200; 
-    sketchCanvas.height = 900;
-    
-    const getPos = (e) => { 
-        const r = sketchCanvas.getBoundingClientRect(); 
-        const scaleX = sketchCanvas.width / r.width; 
-        const scaleY = sketchCanvas.height / r.height; 
-        let cx = e.touches ? e.touches[0].clientX : e.clientX; 
-        let cy = e.touches ? e.touches[0].clientY : e.clientY; 
-        return { x: (cx - r.left) * scaleX, y: (cy - r.top) * scaleY }; 
-    };
-    
-    const startDraw = (e) => { 
-        e.preventDefault(); 
-        isDrawing = true; 
-        currentStroke = { color: sketchMode === 'eraser' ? sketchBg : sketchColor, width: sketchWidth, mode: sketchMode, points: [getPos(e)] }; 
-        sketchStrokes.push(currentStroke); 
-    };
-    
-    const draw = (e) => { 
-        if (!isDrawing) return; 
-        e.preventDefault(); 
-        currentStroke.points.push(getPos(e)); 
-        redrawSketch(); 
-    };
-    
-    const endDraw = () => { isDrawing = false; };
-    
-    sketchCanvas.addEventListener('mousedown', startDraw); 
-    sketchCanvas.addEventListener('mousemove', draw); 
-    window.addEventListener('mouseup', endDraw);
-    sketchCanvas.addEventListener('touchstart', startDraw, {passive: false}); 
-    sketchCanvas.addEventListener('touchmove', draw, {passive: false}); 
-    window.addEventListener('touchend', endDraw);
-}
+function redrawSketch() { sketchCtx.globalAlpha = 1.0; sketchCtx.fillStyle = sketchBg; sketchCtx.fillRect(0, 0, sketchCanvas.width, sketchCanvas.height); sketchCtx.lineCap = 'round'; sketchCtx.lineJoin = 'round'; for (let s of sketchStrokes) { if (s.points.length < 2) continue; sketchCtx.globalAlpha = s.mode === 'highlighter' ? 0.4 : 1.0; sketchCtx.beginPath(); sketchCtx.strokeStyle = s.color; sketchCtx.lineWidth = s.width; sketchCtx.moveTo(s.points[0].x, s.points[0].y); for (let i = 1; i < s.points.length - 1; i++) { let xc = (s.points[i].x + s.points[i + 1].x) / 2; let yc = (s.points[i].y + s.points[i + 1].y) / 2; sketchCtx.quadraticCurveTo(s.points[i].x, s.points[i].y, xc, yc); } sketchCtx.lineTo(s.points[s.points.length - 1].x, s.points[s.points.length - 1].y); sketchCtx.stroke(); } sketchCtx.globalAlpha = 1.0; }
 
-function redrawSketch() { 
-    sketchCtx.globalAlpha = 1.0; 
-    sketchCtx.fillStyle = sketchBg; 
-    sketchCtx.fillRect(0, 0, sketchCanvas.width, sketchCanvas.height); 
-    sketchCtx.lineCap = 'round'; 
-    sketchCtx.lineJoin = 'round'; 
-    
-    for (let s of sketchStrokes) { 
-        if (s.points.length < 2) continue; 
-        sketchCtx.globalAlpha = s.mode === 'highlighter' ? 0.4 : 1.0; 
-        sketchCtx.beginPath(); 
-        sketchCtx.strokeStyle = s.color; 
-        sketchCtx.lineWidth = s.width; 
-        sketchCtx.moveTo(s.points[0].x, s.points[0].y); 
-        for (let i = 1; i < s.points.length - 1; i++) { 
-            let xc = (s.points[i].x + s.points[i + 1].x) / 2; 
-            let yc = (s.points[i].y + s.points[i + 1].y) / 2; 
-            sketchCtx.quadraticCurveTo(s.points[i].x, s.points[i].y, xc, yc); 
-        } 
-        sketchCtx.lineTo(s.points[s.points.length - 1].x, s.points[s.points.length - 1].y); 
-        sketchCtx.stroke(); 
-    } 
-    sketchCtx.globalAlpha = 1.0; 
-}
+function undoSketch() { if (sketchStrokes.length > 0) { sketchStrokes.pop(); redrawSketch(); } }
+function setSketchMode(mode) { sketchMode = mode; document.getElementById('btn-pen').classList.toggle('active', mode === 'pen'); document.getElementById('btn-highlighter').classList.toggle('active', mode === 'highlighter'); document.getElementById('btn-eraser').classList.toggle('active', mode === 'eraser'); }
+function setSketchBg(bg) { sketchBg = bg; sketchStrokes.forEach(s => { if (s.mode === 'eraser') s.color = bg; else if (!s.mode && (s.color === 'white' || s.color === 'black')) { if (s.color !== bg && sketchMode === 'eraser') s.color = bg; } }); redrawSketch(); }
 
-function undoSketch() { 
-    if (sketchStrokes.length > 0) { sketchStrokes.pop(); redrawSketch(); } 
-}
-
-function setSketchMode(mode) { 
-    sketchMode = mode; 
-    document.getElementById('btn-pen').classList.toggle('active', mode === 'pen'); 
-    document.getElementById('btn-highlighter').classList.toggle('active', mode === 'highlighter'); 
-    document.getElementById('btn-eraser').classList.toggle('active', mode === 'eraser'); 
-}
-
-function setSketchBg(bg) { 
-    sketchBg = bg; 
-    sketchStrokes.forEach(s => { 
-        if (s.mode === 'eraser') s.color = bg; 
-        else if (!s.mode && (s.color === 'white' || s.color === 'black')) { 
-            if (s.color !== bg && sketchMode === 'eraser') s.color = bg; 
-        } 
-    }); 
-    redrawSketch(); 
-}
-
-function applyAccentColor(hex) { 
-    document.documentElement.style.setProperty('--accent', hex); 
-    const r = parseInt(hex.slice(1,3), 16), g = parseInt(hex.slice(3,5), 16), b = parseInt(hex.slice(5,7), 16); 
-    document.documentElement.style.setProperty('--accent-rgb', `${r}, ${g}, ${b}`); 
-    const p = document.getElementById('accent-color-picker'); 
-    if(p) p.value = hex; 
-}
-
-async function updateGlobalAccent(hex) { 
-    await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accent: hex }) }); 
-    fullTree.settings.accent = hex; 
-    applyAccentColor(hex); 
-}
-
-async function toggleTheme() { 
-    const newTheme = document.body.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'; 
-    await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ theme: newTheme }) }); 
-    fullTree.settings.theme = newTheme; 
-    document.body.setAttribute('data-theme', newTheme); 
-}
+function applyAccentColor(hex) { document.documentElement.style.setProperty('--accent', hex); const r = parseInt(hex.slice(1,3), 16), g = parseInt(hex.slice(3,5), 16), b = parseInt(hex.slice(5,7), 16); document.documentElement.style.setProperty('--accent-rgb', `${r}, ${g}, ${b}`); const p = document.getElementById('accent-color-picker'); if(p) p.value = hex; }
+async function updateGlobalAccent(hex) { await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accent: hex }) }); fullTree.settings.accent = hex; applyAccentColor(hex); }
+async function toggleTheme() { const newTheme = document.body.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'; await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ theme: newTheme }) }); fullTree.settings.theme = newTheme; document.body.setAttribute('data-theme', newTheme); }
 
 function updateMenuUI() { 
-    const pwdBtn = document.getElementById('pwd-toggle-text'); 
-    const logoutBtn = document.getElementById('logout-btn'); 
-    const whToggleText = document.getElementById('webhook-toggle-text'); 
+    const pwdBtn = document.getElementById('pwd-toggle-text'); const logoutBtn = document.getElementById('logout-btn'); const whToggleText = document.getElementById('webhook-toggle-text'); 
     if(pwdBtn) pwdBtn.innerHTML = fullTree.settings.password_enabled ? '<i class="icon icon-password" style="margin-right:8px;"></i> Passwortschutz aus' : '<i class="icon icon-password" style="margin-right:8px;"></i> Passwortschutz an'; 
     if(logoutBtn) logoutBtn.style.display = fullTree.settings.password_enabled ? 'flex' : 'none'; 
     if(whToggleText) whToggleText.innerHTML = fullTree.settings.webhook_enabled ? '<i class="icon icon-webhook" style="margin-right:8px;"></i> Webhook (Aktiviert)' : '<i class="icon icon-webhook" style="margin-right:8px;"></i> Webhook (Push)'; 
-
-    const taskToggleText = document.getElementById('toggle-tasks-text');
-    const remToggleText = document.getElementById('toggle-reminders-text');
-    
+    const taskToggleText = document.getElementById('toggle-tasks-text'); const remToggleText = document.getElementById('toggle-reminders-text');
     const tasksEnabled = fullTree.settings.icon_tasks_enabled !== false && fullTree.settings.icon_tasks_enabled !== 'false';
     const remEnabled = fullTree.settings.icon_reminders_enabled !== false && fullTree.settings.icon_reminders_enabled !== 'false';
-
     if(taskToggleText) taskToggleText.innerHTML = tasksEnabled ? '<i class="icon icon-tasks" style="margin-right:8px;"></i> Aufgaben-Icon: An' : '<i class="icon icon-tasks" style="margin-right:8px;"></i> Aufgaben-Icon: Aus';
     if(remToggleText) remToggleText.innerHTML = remEnabled ? '<i class="icon icon-reminder_active" style="margin-right:8px;"></i> Erinnerungs-Icon: An' : '<i class="icon icon-reminder_active" style="margin-right:8px;"></i> Erinnerungs-Icon: Aus';
-
-    const btnTask = document.getElementById('todo-dashboard-btn');
-    const btnRem = document.getElementById('notification-bell');
+    const btnTask = document.getElementById('todo-dashboard-btn'); const btnRem = document.getElementById('notification-bell');
     if(btnTask) btnTask.style.display = tasksEnabled ? '' : 'none';
     if(btnRem) btnRem.style.display = remEnabled ? '' : 'none';
 }
 
-async function addItem(parentId) { 
-    const newId = Date.now().toString() + Math.random().toString(36).substring(2, 6); 
-    const payload = { id: newId, parent_id: parentId, title: 'Neu', text: '' }; 
-    await fetch('/api/notes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); 
-    if (parentId) { collapsedIds.delete(parentId); saveCollapsedToLocal(); } 
-    await checkAndReloadData(); 
-    selectNode(newId); 
-    enableEdit(); 
-}
+async function addItem(parentId) { const newId = Date.now().toString() + Math.random().toString(36).substring(2, 6); const payload = { id: newId, parent_id: parentId, title: 'Neu', text: '' }; await fetch('/api/notes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); if (parentId) { collapsedIds.delete(parentId); saveCollapsedToLocal(); } await checkAndReloadData(); selectNode(newId); enableEdit(); }
 
-function deleteItem(id) { 
-    showModal("Notiz löschen", "Möchtest du diese Notiz wirklich in den Papierkorb verschieben?\n\nAchtung: Alle Unterkategorien und deren Inhalte werden dabei ebenfalls in den Papierkorb verschoben.", [ 
-        { label: "Ja, in den Papierkorb", class: "btn-discard", action: async () => { 
-            await fetch(`/api/notes/${id}`, { method: 'DELETE' }); 
-            if (activeId === id) { activeId = null; document.getElementById('edit-area').style.display = 'none'; } 
-            const el = document.querySelector(`.tree-item-container[data-id="${id}"]`);
-            if (el) el.remove(); 
-            updateBadges(); 
-            await checkAndReloadData(); 
-        } }, 
-        { label: "Abbruch", class: "btn-cancel", action: () => {} } 
-    ]); 
-}
+function deleteItem(id) { showModal("Notiz löschen", "Möchtest du diese Notiz wirklich in den Papierkorb verschieben?", [ { label: "Ja, in den Papierkorb", class: "btn-discard", action: async () => { await fetch(`/api/notes/${id}`, { method: 'DELETE' }); if (activeId === id) { activeId = null; document.getElementById('edit-area').style.display = 'none'; } const el = document.querySelector(`.tree-item-container[data-id="${id}"]`); if (el) el.remove(); updateBadges(); await checkAndReloadData(); } }, { label: "Abbruch", class: "btn-cancel", action: () => {} } ]); }
 
-function findNode(items, id) { 
-    if (!Array.isArray(items)) return null; 
-    for (let i of items) { 
-        if (i.id === id) return i; 
-        if (i.children) { 
-            const f = findNode(i.children, id); 
-            if (f) return f; 
-        } 
-    } 
-    return null; 
-}
+function findNode(items, id) { if (!Array.isArray(items)) return null; for (let i of items) { if (i.id === id) return i; if (i.children) { const f = findNode(i.children, id); if (f) return f; } } return null; }
+function getPath(items, id, path = []) { if (!Array.isArray(items)) return null; for (let i of items) { const n = [...path, {title: i.title, id: i.id}]; if (i.id === id) return n; if (i.children) { const r = getPath(i.children, id, n); if (r) return r; } } return null; }
 
-function getPath(items, id, path = []) { 
-    if (!Array.isArray(items)) return null; 
-    for (let i of items) { 
-        const n = [...path, {title: i.title, id: i.id}]; 
-        if (i.id === id) return n; 
-        if (i.children) { 
-            const r = getPath(i.children, id, n); 
-            if (r) return r; 
-        } 
-    } 
-    return null; 
-}
-
-function initDragAndDrop() { 
-    const ta = document.getElementById('node-text'); 
-    if (!ta) return;
-    
-    ta.addEventListener('dragover', e => { 
-        e.preventDefault(); 
-        ta.style.border = '1px dashed var(--accent)'; 
-    }); 
-    
-    ta.addEventListener('dragleave', e => { 
-        e.preventDefault(); 
-        ta.style.border = '1px solid var(--border-color)'; 
-    }); 
-    
-    ta.addEventListener('drop', async e => { 
-        e.preventDefault(); 
-        ta.style.border = '1px solid var(--border-color)'; 
-        
-        if(e.dataTransfer.files && e.dataTransfer.files.length > 0) { 
-            const f = e.dataTransfer.files[0]; 
-            
-            uploadWithProgress(f, (data) => {
-                if(data.filename) { 
-                    let txt = f.type.startsWith('image/') ? `[img:${data.filename}]` : `[file:${data.filename}|${data.original}]`; 
-                    const s = ta.selectionStart; 
-                    ta.value = ta.value.substring(0, s) + txt + ta.value.substring(ta.selectionEnd); 
-                    ta.focus(); 
-                    ta.setSelectionRange(s + txt.length, s + txt.length); 
-                }
-            });
-        } 
-    }); 
-}
+function initDragAndDrop() { const ta = document.getElementById('node-text'); if (!ta) return; ta.addEventListener('dragover', e => { e.preventDefault(); ta.style.border = '1px dashed var(--accent)'; }); ta.addEventListener('dragleave', e => { e.preventDefault(); ta.style.border = '1px solid var(--border-color)'; }); ta.addEventListener('drop', async e => { e.preventDefault(); ta.style.border = '1px solid var(--border-color)'; if(e.dataTransfer.files && e.dataTransfer.files.length > 0) { const f = e.dataTransfer.files[0]; uploadWithProgress(f, (data) => { if(data.filename) { let txt = f.type.startsWith('image/') ? `[img:${data.filename}]` : `[file:${data.filename}|${data.original}]`; const s = ta.selectionStart; ta.value = ta.value.substring(0, s) + txt + ta.value.substring(ta.selectionEnd); ta.focus(); ta.setSelectionRange(s + txt.length, s + txt.length); } }); } }); }
 
 document.addEventListener('keydown', function(e) {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { 
-        if (document.getElementById('edit-mode') && document.getElementById('edit-mode').style.display === 'block') { 
-            e.preventDefault(); 
-            saveChanges(); 
-        } 
-    }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { if (document.getElementById('edit-mode') && document.getElementById('edit-mode').style.display === 'block') { e.preventDefault(); saveChanges(); } }
     if (e.key === 'Escape') {
         if (document.getElementById('lightbox') && document.getElementById('lightbox').style.display === 'flex') closeLightbox();
         else if (document.getElementById('sketch-modal') && document.getElementById('sketch-modal').style.display === 'flex') closeSketch();
         else if (document.getElementById('custom-modal') && document.getElementById('custom-modal').style.display === 'flex') document.getElementById('custom-modal').style.display = 'none';
+        else if (document.getElementById('contact-form-modal') && document.getElementById('contact-form-modal').style.display === 'flex') document.getElementById('contact-form-modal').style.display = 'none';
+        else if (document.getElementById('contact-picker-modal') && document.getElementById('contact-picker-modal').style.display === 'flex') document.getElementById('contact-picker-modal').style.display = 'none';
+        else if (document.getElementById('contacts-modal') && document.getElementById('contacts-modal').style.display === 'flex') document.getElementById('contacts-modal').style.display = 'none';
         else if (document.getElementById('reminder-modal') && document.getElementById('reminder-modal').style.display === 'flex') document.getElementById('reminder-modal').style.display = 'none';
         else if (document.getElementById('history-modal') && document.getElementById('history-modal').style.display === 'flex') closeHistoryModal();
         else if (document.getElementById('history-settings-modal') && document.getElementById('history-settings-modal').style.display === 'flex') document.getElementById('history-settings-modal').style.display = 'none';
@@ -4472,225 +4554,24 @@ document.addEventListener('keydown', function(e) {
     }
 });
 
-async function openRestoreModal() {
-    document.getElementById('restore-modal').style.display = 'flex'; 
-    document.getElementById('restore-status').style.display = 'none'; 
-    document.getElementById('restore-file-upload').value = '';
-    
-    const select = document.getElementById('server-backups'); 
-    select.innerHTML = '<option value="">-- Lade Backups... --</option>';
-    
-    try { 
-        const res = await fetch('/api/backups'); 
-        const backups = await res.json(); 
-        if (backups.length === 0) { 
-            select.innerHTML = '<option value="">Keine automatischen Backups gefunden</option>'; 
-        } else { 
-            select.innerHTML = '<option value="">-- Auswählen --</option>'; 
-            backups.forEach(b => { 
-                const opt = document.createElement('option'); 
-                opt.value = b.filename; 
-                opt.innerText = `${b.date} (${b.size} MB) - ${b.filename}`; 
-                select.appendChild(opt); 
-            }); 
-        } 
-    } catch(e) { 
-        select.innerHTML = '<option value="">Fehler beim Laden</option>'; 
-    }
-}
+async function openRestoreModal() { document.getElementById('restore-modal').style.display = 'flex'; document.getElementById('restore-status').style.display = 'none'; document.getElementById('restore-file-upload').value = ''; const select = document.getElementById('server-backups'); select.innerHTML = '<option value="">-- Lade Backups... --</option>'; try { const res = await fetch('/api/backups'); const backups = await res.json(); if (backups.length === 0) { select.innerHTML = '<option value="">Keine automatischen Backups gefunden</option>'; } else { select.innerHTML = '<option value="">-- Auswählen --</option>'; backups.forEach(b => { const opt = document.createElement('option'); opt.value = b.filename; opt.innerText = `${b.date} (${b.size} MB) - ${b.filename}`; select.appendChild(opt); }); } } catch(e) { select.innerHTML = '<option value="">Fehler beim Laden</option>'; } }
 
-async function executeRestore() {
-    const fileInput = document.getElementById('restore-file-upload'); 
-    const select = document.getElementById('server-backups'); 
-    const statusDiv = document.getElementById('restore-status'); 
-    const btn = document.getElementById('btn-do-restore');
-    
-    const file = fileInput.files[0]; 
-    const serverFile = select.value;
-    
-    if (!file && !serverFile) { 
-        statusDiv.innerText = "Bitte wähle ein Backup aus der Liste oder lade eine lokale Datei hoch!"; 
-        statusDiv.style.color = '#e74c3c'; 
-        statusDiv.style.background = 'rgba(231, 76, 60, 0.1)'; 
-        statusDiv.style.display = 'block'; 
-        return; 
-    }
-    
-    const fd = new FormData(); 
-    if (file) fd.append('file', file); else fd.append('server_file', serverFile);
-    
-    btn.disabled = true; 
-    btn.innerText = "Verifiziere & Lade..."; 
-    statusDiv.style.display = 'none';
-    
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/restore', true);
+async function executeRestore() { const fileInput = document.getElementById('restore-file-upload'); const select = document.getElementById('server-backups'); const statusDiv = document.getElementById('restore-status'); const btn = document.getElementById('btn-do-restore'); const file = fileInput.files[0]; const serverFile = select.value; if (!file && !serverFile) { statusDiv.innerText = "Bitte wähle ein Backup aus!"; statusDiv.style.color = '#e74c3c'; statusDiv.style.background = 'rgba(231, 76, 60, 0.1)'; statusDiv.style.display = 'block'; return; } const fd = new FormData(); if (file) fd.append('file', file); else fd.append('server_file', serverFile); btn.disabled = true; btn.innerText = "Verifiziere & Lade..."; statusDiv.style.display = 'none'; const xhr = new XMLHttpRequest(); xhr.open('POST', '/api/restore', true); if (file) { document.getElementById('restore-modal').style.display = 'none'; const modal = document.getElementById('upload-modal'); const bar = document.getElementById('upload-progress-bar'); const percentTxt = document.getElementById('upload-percent'); modal.style.display = 'flex'; bar.style.width = '0%'; percentTxt.innerText = '0%'; xhr.upload.onprogress = function(e) { if (e.lengthComputable) { const percent = Math.round((e.loaded / e.total) * 100); bar.style.width = percent + '%'; percentTxt.innerText = percent + '%'; } }; } xhr.onload = function() { if (file) document.getElementById('upload-modal').style.display = 'none'; try { const data = JSON.parse(xhr.responseText); if (xhr.status === 200 && data.status === 'success') { document.getElementById('restore-modal').style.display = 'flex'; statusDiv.style.color = '#27ae60'; statusDiv.style.background = 'rgba(39, 174, 96, 0.1)'; statusDiv.innerText = "Wiederherstellung erfolgreich! Die Seite wird nun neu geladen..."; statusDiv.style.display = 'block'; setTimeout(() => window.location.reload(), 2000); } else { document.getElementById('restore-modal').style.display = 'flex'; statusDiv.style.color = '#e74c3c'; statusDiv.style.background = 'rgba(231, 76, 60, 0.1)'; statusDiv.innerText = "Fehler: " + (data.error || "Unbekannter Serverfehler"); statusDiv.style.display = 'block'; btn.disabled = false; btn.innerText = "Wiederherstellen"; } } catch (e) { document.getElementById('restore-modal').style.display = 'flex'; statusDiv.style.color = '#e74c3c'; statusDiv.style.background = 'rgba(231, 76, 60, 0.1)'; statusDiv.innerText = "Netzwerkfehler beim Wiederherstellen."; statusDiv.style.display = 'block'; btn.disabled = false; btn.innerText = "Wiederherstellen"; } }; xhr.onerror = function() { if (file) document.getElementById('upload-modal').style.display = 'none'; document.getElementById('restore-modal').style.display = 'flex'; statusDiv.style.color = '#e74c3c'; statusDiv.style.background = 'rgba(231, 76, 60, 0.1)'; statusDiv.innerText = "Netzwerkfehler beim Hochladen des Backups."; statusDiv.style.display = 'block'; btn.disabled = false; btn.innerText = "Wiederherstellen"; }; xhr.send(fd); }
 
-    if (file) {
-        document.getElementById('restore-modal').style.display = 'none';
-        
-        const modal = document.getElementById('upload-modal');
-        const bar = document.getElementById('upload-progress-bar');
-        const percentTxt = document.getElementById('upload-percent');
-
-        modal.style.display = 'flex';
-        bar.style.width = '0%';
-        percentTxt.innerText = '0%';
-
-        xhr.upload.onprogress = function(e) {
-            if (e.lengthComputable) {
-                const percent = Math.round((e.loaded / e.total) * 100);
-                bar.style.width = percent + '%';
-                percentTxt.innerText = percent + '%';
-            }
-        };
-    }
-    
-    xhr.onload = function() {
-        if (file) document.getElementById('upload-modal').style.display = 'none';
-        try {
-            const data = JSON.parse(xhr.responseText);
-            if (xhr.status === 200 && data.status === 'success') {
-                document.getElementById('restore-modal').style.display = 'flex';
-                statusDiv.style.color = '#27ae60';
-                statusDiv.style.background = 'rgba(39, 174, 96, 0.1)';
-                statusDiv.innerText = "Wiederherstellung erfolgreich! Die Seite wird nun neu geladen...";
-                statusDiv.style.display = 'block';
-                setTimeout(() => window.location.reload(), 2000);
-            } else {
-                document.getElementById('restore-modal').style.display = 'flex';
-                statusDiv.style.color = '#e74c3c';
-                statusDiv.style.background = 'rgba(231, 76, 60, 0.1)';
-                statusDiv.innerText = "Fehler: " + (data.error || "Unbekannter Serverfehler");
-                statusDiv.style.display = 'block';
-                btn.disabled = false;
-                btn.innerText = "Wiederherstellen";
-            }
-        } catch (e) {
-            document.getElementById('restore-modal').style.display = 'flex';
-            statusDiv.style.color = '#e74c3c';
-            statusDiv.style.background = 'rgba(231, 76, 60, 0.1)';
-            statusDiv.innerText = "Netzwerkfehler beim Wiederherstellen.";
-            statusDiv.style.display = 'block';
-            btn.disabled = false;
-            btn.innerText = "Wiederherstellen";
-        }
-    };
-    
-    xhr.onerror = function() {
-        if (file) document.getElementById('upload-modal').style.display = 'none';
-        document.getElementById('restore-modal').style.display = 'flex';
-        statusDiv.style.color = '#e74c3c';
-        statusDiv.style.background = 'rgba(231, 76, 60, 0.1)';
-        statusDiv.innerText = "Netzwerkfehler beim Hochladen des Backups.";
-        statusDiv.style.display = 'block';
-        btn.disabled = false;
-        btn.innerText = "Wiederherstellen";
-    };
-
-    xhr.send(fd);
-}
-
-let touchStartX = 0;
-let touchEndX = 0;
-
-document.addEventListener('touchstart', e => { 
-    touchStartX = e.changedTouches[0].screenX; 
-}, {passive: true});
-
-document.addEventListener('touchend', e => {
-    if (document.querySelector('.modal-overlay[style*="display: flex"]')) return;
-
-    touchEndX = e.changedTouches[0].screenX;
-    if (window.innerWidth <= 768) {
-        const swipeDist = touchEndX - touchStartX;
-        const isHidden = document.body.classList.contains('sidebar-hidden');
-        
-        if (swipeDist > 70 && isHidden && touchStartX < 50) {
-            toggleSidebar();
-        } else if (swipeDist < -70 && !isHidden) {
-            toggleSidebar();
-        }
-    }
-}, {passive: true});
+let touchStartX = 0; let touchEndX = 0;
+document.addEventListener('touchstart', e => { touchStartX = e.changedTouches[0].screenX; }, {passive: true});
+document.addEventListener('touchend', e => { if (document.querySelector('.modal-overlay[style*="display: flex"]')) return; touchEndX = e.changedTouches[0].screenX; if (window.innerWidth <= 768) { const swipeDist = touchEndX - touchStartX; const isHidden = document.body.classList.contains('sidebar-hidden'); if (swipeDist > 70 && isHidden && touchStartX < 50) { toggleSidebar(); } else if (swipeDist < -70 && !isHidden) { toggleSidebar(); } } }, {passive: true});
 
 let initiallyClosedSpoilers = [];
+window.addEventListener('beforeprint', () => { document.querySelectorAll('details.spoiler').forEach(s => { if (!s.hasAttribute('open')) { initiallyClosedSpoilers.push(s); s.setAttribute('open', ''); } }); });
+window.addEventListener('afterprint', () => { initiallyClosedSpoilers.forEach(s => s.removeAttribute('open')); initiallyClosedSpoilers = []; });
 
-window.addEventListener('beforeprint', () => {
-    document.querySelectorAll('details.spoiler').forEach(s => {
-        if (!s.hasAttribute('open')) {
-            initiallyClosedSpoilers.push(s);
-            s.setAttribute('open', '');
-        }
-    });
-});
-
-window.addEventListener('afterprint', () => {
-    initiallyClosedSpoilers.forEach(s => s.removeAttribute('open'));
-    initiallyClosedSpoilers = [];
-});
-
-let mediaRecorder = null;
-let audioChunks = [];
-let isRecording = false;
-
-async function toggleAudioRecording() {
-    const btn = document.getElementById('btn-record-audio');
-    
-    if (isRecording) {
-        mediaRecorder.stop();
-        isRecording = false;
-        btn.innerHTML = '<i class="icon icon-mic"></i><span>Audio</span>';
-        btn.style.color = ''; 
-        btn.style.borderColor = '';
-        return;
-    }
-
-    try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        mediaRecorder = new MediaRecorder(stream);
-        audioChunks = [];
-
-        mediaRecorder.ondataavailable = event => {
-            if (event.data.size > 0) {
-                audioChunks.push(event.data);
-            }
-        };
-
-        mediaRecorder.onstop = () => {
-            const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
-            const file = new File([audioBlob], "audiomemo.webm", { type: 'audio/webm' });
-            
-            uploadWithProgress(file, (data) => {
-                if(data.filename) { 
-                    wrapSelection(`\n[audio:${data.filename}]\n`, '', ''); 
-                }
-            });
-            
-            stream.getTracks().forEach(track => track.stop());
-        };
-
-        mediaRecorder.start();
-        isRecording = true;
-        
-        btn.innerHTML = '<i class="icon icon-mic"></i><span style="animation: pulse 1s infinite;">Aufnahme...</span>';
-        btn.style.color = '#e74c3c';
-        btn.style.borderColor = '#e74c3c';
-
-    } catch (err) {
-        showModal("Fehler", "Zugriff auf das Mikrofon verweigert oder nicht gefunden.", [{ label: "Okay", class: "btn-cancel", action: () => {} }]);
-    }
-}
+let mediaRecorder = null; let audioChunks = []; let isRecording = false;
+async function toggleAudioRecording() { const btn = document.getElementById('btn-record-audio'); if (isRecording) { mediaRecorder.stop(); isRecording = false; btn.innerHTML = '<i class="icon icon-mic"></i><span>Audio</span>'; btn.style.color = ''; btn.style.borderColor = ''; return; } try { const stream = await navigator.mediaDevices.getUserMedia({ audio: true }); mediaRecorder = new MediaRecorder(stream); audioChunks = []; mediaRecorder.ondataavailable = event => { if (event.data.size > 0) { audioChunks.push(event.data); } }; mediaRecorder.onstop = () => { const audioBlob = new Blob(audioChunks, { type: 'audio/webm' }); const file = new File([audioBlob], "audiomemo.webm", { type: 'audio/webm' }); uploadWithProgress(file, (data) => { if(data.filename) { wrapSelection(`\n[audio:${data.filename}]\n`, '', ''); } }); stream.getTracks().forEach(track => track.stop()); }; mediaRecorder.start(); isRecording = true; btn.innerHTML = '<i class="icon icon-mic"></i><span style="animation: pulse 1s infinite;">Aufnahme...</span>'; btn.style.color = '#e74c3c'; btn.style.borderColor = '#e74c3c'; } catch (err) { showModal("Fehler", "Zugriff auf das Mikrofon verweigert oder nicht gefunden.", [{ label: "Okay", class: "btn-cancel", action: () => {} }]); } }
 
 window.onload = () => { 
-    if (window.isShareView) {
-        if (window.hljs) hljs.highlightAll();
-        return;
-    }
-    loadData(); 
-    initDragAndDrop(); 
-    initMentionSystem(); 
-    setInterval(checkAndReloadData, 30000); 
+    if (window.isShareView) { if (window.hljs) hljs.highlightAll(); return; }
+    loadData(); initDragAndDrop(); initMentionSystem(); setInterval(checkAndReloadData, 30000); 
 };
 EOF
 
@@ -4778,7 +4659,7 @@ if [ "$ACTION" == "1" ]; then
     find "$INSTALL_DIR" -type f -exec chmod 640 {} \;
     chmod +x "$INSTALL_DIR/app.py"
 
-    cat << EOF > /etc/systemd/system/$SERVICE_NAME
+    cat << SVCEOF > /etc/systemd/system/$SERVICE_NAME
 [Unit]
 Description=Notizen ($INSTANCE_NAME)
 After=network.target
@@ -4793,7 +4674,7 @@ Restart=always
 
 [Install]
 WantedBy=multi-user.target
-EOF
+SVCEOF
 
     systemctl daemon-reload
     systemctl enable "$SERVICE_NAME"
