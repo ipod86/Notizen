@@ -2395,14 +2395,16 @@ input, textarea {
 .menu-badge {
     background: #e74c3c;
     color: white;
-    border-radius: 12px;
-    padding: 2px 6px;
-    font-size: 0.8em;
+    border-radius: 10px;
+    padding: 1px 6px;
+    font-size: 0.75em;
     font-weight: bold;
     margin-left: 10px;
     display: none;
-    min-width: 14px;
     text-align: center;
+    flex-shrink: 0;
+    flex-grow: 0;
+    line-height: 1.4;
 }
 
 .modal-overlay { 
@@ -2769,6 +2771,13 @@ input[type="checkbox"].task-check { width: 16px; height: 16px; margin: 0; cursor
     height: 8px;
     border-radius: 50%;
     margin-left: 3px;
+    vertical-align: middle;
+    flex-shrink: 0;
+}
+.tag-overflow {
+    font-size: 0.6em;
+    opacity: 0.5;
+    margin-left: 2px;
     vertical-align: middle;
     flex-shrink: 0;
 }
@@ -3875,13 +3884,22 @@ function renderItems(items, parent) {
         }
 
         if (item.tags && item.tags.length > 0) {
-            item.tags.forEach(t => {
+            const maxDots = 3;
+            const shown = item.tags.slice(0, maxDots);
+            shown.forEach(t => {
                 const dot = document.createElement('span');
                 dot.className = 'tag-chip-small';
                 dot.style.background = t.color;
                 dot.title = t.name;
                 text.appendChild(dot);
             });
+            if (item.tags.length > maxDots) {
+                const more = document.createElement('span');
+                more.className = 'tag-overflow';
+                more.innerText = '+' + (item.tags.length - maxDots);
+                more.title = item.tags.slice(maxDots).map(t => t.name).join(', ');
+                text.appendChild(more);
+            }
         }
         
         text.onclick = (e) => { 
