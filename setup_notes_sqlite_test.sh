@@ -182,6 +182,36 @@ def init_db():
             conn.execute("UPDATE contacts SET phone_mobile = phone WHERE phone_mobile IS NULL AND phone IS NOT NULL")
         except sqlite3.OperationalError:
             pass
+
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS tags (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                color TEXT DEFAULT '#27ae60'
+            )
+        ''')
+
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS note_tags (
+                note_id TEXT,
+                tag_id TEXT,
+                PRIMARY KEY (note_id, tag_id)
+            )
+        ''')
+
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS templates (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                text TEXT,
+                created_at REAL
+            )
+        ''')
+
+        try:
+            conn.execute('ALTER TABLE notes ADD COLUMN is_pinned INTEGER DEFAULT 0')
+        except sqlite3.OperationalError:
+            pass
         
         if not conn.execute("SELECT key FROM settings WHERE key='theme'").fetchone():
             conn.execute("INSERT INTO settings (key, value) VALUES ('theme', 'dark')")
@@ -201,6 +231,7 @@ def init_db():
               OR COALESCE(OLD.is_trashed,0) != COALESCE(NEW.is_trashed,0)
               OR COALESCE(OLD.share_id,'') != COALESCE(NEW.share_id,'')
               OR COALESCE(OLD.text,'') != COALESCE(NEW.text,'')
+              OR COALESCE(OLD.is_pinned,0) != COALESCE(NEW.is_pinned,0)
             BEGIN 
                 UPDATE settings SET value = strftime('%s', 'now') WHERE key = 'tree_last_modified'; 
             END;
@@ -369,8 +400,16 @@ def index():
 @app.route('/api/tree', methods=['GET'])
 def get_tree():
     with get_db() as conn:
-        rows = conn.execute("SELECT id, parent_id, sort_order, title, reminder FROM notes WHERE is_trashed=0 ORDER BY sort_order").fetchall()
+        rows = conn.execute("SELECT id, parent_id, sort_order, title, reminder, is_pinned FROM notes WHERE is_trashed=0 ORDER BY sort_order").fetchall()
         sets = get_settings()
+
+        tag_rows = conn.execute("SELECT nt.note_id, t.id as tag_id, t.name, t.color FROM note_tags nt JOIN tags t ON nt.tag_id = t.id").fetchall()
+        tags_by_note = {}
+        for tr in tag_rows:
+            if tr['note_id'] not in tags_by_note:
+                tags_by_note[tr['note_id']] = []
+            tags_by_note[tr['note_id']].append({'id': tr['tag_id'], 'name': tr['name'], 'color': tr['color']})
+
         all_ids = {r['id'] for r in rows}
         nodes_by_parent = {}
         for r in rows:
@@ -379,7 +418,9 @@ def get_tree():
                 pid = None
             if pid not in nodes_by_parent: 
                 nodes_by_parent[pid] = []
-            nodes_by_parent[pid].append(dict(r))
+            node = dict(r)
+            node['tags'] = tags_by_note.get(r['id'], [])
+            nodes_by_parent[pid].append(node)
             
         def build_tree(pid=None):
             children = nodes_by_parent.get(pid, [])
@@ -896,6 +937,149 @@ def upload_contact_image(contact_id):
     
     return jsonify({"status": "success", "filename": filename})
 
+# --- PIN API ---
+@app.route('/api/notes/<note_id>/pin', methods=['POST'])
+def toggle_pin(note_id):
+    with get_db() as conn:
+        row = conn.execute("SELECT is_pinned FROM notes WHERE id=?", (note_id,)).fetchone()
+        if not row:
+            return jsonify({"error": "not found"}), 404
+        new_val = 0 if row['is_pinned'] else 1
+        conn.execute("UPDATE notes SET is_pinned=? WHERE id=?", (new_val, note_id))
+    return jsonify({"status": "success", "is_pinned": bool(new_val)})
+
+# --- DUPLICATE API ---
+@app.route('/api/notes/<note_id>/duplicate', methods=['POST'])
+def duplicate_note(note_id):
+    with get_db() as conn:
+        row = conn.execute("SELECT parent_id, sort_order, title, text, reminder FROM notes WHERE id=? AND is_trashed=0", (note_id,)).fetchone()
+        if not row:
+            return jsonify({"error": "not found"}), 404
+        new_id = uuid.uuid4().hex
+        conn.execute("INSERT INTO notes (id, parent_id, sort_order, title, text, reminder) VALUES (?, ?, ?, ?, ?, ?)",
+                     (new_id, row['parent_id'], (row['sort_order'] or 0) + 1, (row['title'] or '') + ' (Kopie)', row['text'], None))
+        tag_rows = conn.execute("SELECT tag_id FROM note_tags WHERE note_id=?", (note_id,)).fetchall()
+        for tr in tag_rows:
+            conn.execute("INSERT OR IGNORE INTO note_tags (note_id, tag_id) VALUES (?, ?)", (new_id, tr['tag_id']))
+    return jsonify({"status": "success", "id": new_id})
+
+# --- TAGS API ---
+@app.route('/api/tags', methods=['GET'])
+def get_tags():
+    with get_db() as conn:
+        rows = conn.execute("SELECT id, name, color FROM tags ORDER BY name").fetchall()
+        return jsonify([dict(r) for r in rows])
+
+@app.route('/api/tags', methods=['POST'])
+def create_tag():
+    data = request.json
+    tid = uuid.uuid4().hex
+    with get_db() as conn:
+        conn.execute("INSERT INTO tags (id, name, color) VALUES (?, ?, ?)",
+                     (tid, data.get('name', ''), data.get('color', '#27ae60')))
+    return jsonify({"status": "success", "id": tid})
+
+@app.route('/api/tags/<tag_id>', methods=['PUT'])
+def update_tag(tag_id):
+    data = request.json
+    with get_db() as conn:
+        conn.execute("UPDATE tags SET name=?, color=? WHERE id=?",
+                     (data.get('name', ''), data.get('color', '#27ae60'), tag_id))
+    return jsonify({"status": "success"})
+
+@app.route('/api/tags/<tag_id>', methods=['DELETE'])
+def delete_tag(tag_id):
+    with get_db() as conn:
+        conn.execute("DELETE FROM note_tags WHERE tag_id=?", (tag_id,))
+        conn.execute("DELETE FROM tags WHERE id=?", (tag_id,))
+    return jsonify({"status": "success"})
+
+@app.route('/api/notes/<note_id>/tags', methods=['GET'])
+def get_note_tags(note_id):
+    with get_db() as conn:
+        rows = conn.execute("SELECT t.id, t.name, t.color FROM note_tags nt JOIN tags t ON nt.tag_id = t.id WHERE nt.note_id=?", (note_id,)).fetchall()
+        return jsonify([dict(r) for r in rows])
+
+@app.route('/api/notes/<note_id>/tags', methods=['POST'])
+def set_note_tags(note_id):
+    data = request.json
+    tag_ids = data.get('tag_ids', [])
+    with get_db() as conn:
+        conn.execute("DELETE FROM note_tags WHERE note_id=?", (note_id,))
+        for tid in tag_ids:
+            conn.execute("INSERT OR IGNORE INTO note_tags (note_id, tag_id) VALUES (?, ?)", (note_id, tid))
+    return jsonify({"status": "success"})
+
+# --- TEMPLATES API ---
+@app.route('/api/templates', methods=['GET'])
+def get_templates():
+    with get_db() as conn:
+        rows = conn.execute("SELECT id, title, text, created_at FROM templates ORDER BY title").fetchall()
+        return jsonify([dict(r) for r in rows])
+
+@app.route('/api/templates', methods=['POST'])
+def create_template():
+    data = request.json
+    tid = uuid.uuid4().hex
+    with get_db() as conn:
+        conn.execute("INSERT INTO templates (id, title, text, created_at) VALUES (?, ?, ?, ?)",
+                     (tid, data.get('title', ''), data.get('text', ''), time.time()))
+    return jsonify({"status": "success", "id": tid})
+
+@app.route('/api/templates/<template_id>', methods=['DELETE'])
+def delete_template(template_id):
+    with get_db() as conn:
+        conn.execute("DELETE FROM templates WHERE id=?", (template_id,))
+    return jsonify({"status": "success"})
+
+# --- DASHBOARD API ---
+@app.route('/api/dashboard', methods=['GET'])
+def get_dashboard():
+    with get_db() as conn:
+        recent = conn.execute("SELECT id, title FROM notes WHERE is_trashed=0 ORDER BY rowid DESC LIMIT 8").fetchall()
+        pinned = conn.execute("SELECT id, title FROM notes WHERE is_trashed=0 AND is_pinned=1 ORDER BY title").fetchall()
+        
+        reminders = []
+        rem_rows = conn.execute("SELECT id, title, reminder FROM notes WHERE reminder IS NOT NULL AND reminder != '' AND is_trashed=0 ORDER BY reminder").fetchall()
+        now = datetime.now()
+        for r in rem_rows:
+            try:
+                r_str = r['reminder'].replace('Z', '')
+                r_dt = datetime.fromisoformat(r_str) if 'T' in r_str else datetime.strptime(r_str, '%Y-%m-%d')
+                if r_dt >= now:
+                    reminders.append(dict(r))
+                    if len(reminders) >= 5:
+                        break
+            except:
+                pass
+        
+        open_tasks = 0
+        task_rows = conn.execute("SELECT text FROM notes WHERE is_trashed=0 AND text LIKE '%- [ ]%'").fetchall()
+        for tr in task_rows:
+            open_tasks += (tr['text'] or '').count('- [ ]')
+        
+        total_notes = conn.execute("SELECT COUNT(*) as c FROM notes WHERE is_trashed=0").fetchone()['c']
+        
+        return jsonify({
+            "recent": [dict(r) for r in recent],
+            "pinned": [dict(r) for r in pinned],
+            "upcoming_reminders": reminders,
+            "open_tasks": open_tasks,
+            "total_notes": total_notes
+        })
+
+# --- QUICKNOTE API ---
+@app.route('/api/quicknote', methods=['POST'])
+def create_quicknote():
+    data = request.json or {}
+    new_id = uuid.uuid4().hex
+    title = data.get('title', 'Schnellnotiz ' + datetime.now().strftime('%d.%m.%Y %H:%M'))
+    text = data.get('text', '')
+    with get_db() as conn:
+        conn.execute("INSERT INTO notes (id, parent_id, sort_order, title, text) VALUES (?, ?, ?, ?, ?)",
+                     (new_id, None, 0, title, text))
+    return jsonify({"status": "success", "id": new_id})
+
 @app.route('/api/export', methods=['GET'])
 def export_backup():
     mem = io.BytesIO()
@@ -1316,6 +1500,8 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
                 </div>
                 
                 <div class="menu-row" onclick="openContactsModal()"><span><i class="icon icon-contact" style="margin-right:8px;"></i> Kontakte</span></div>
+                <div class="menu-row" onclick="openTagsManagerModal()"><span><i class="icon icon-tag" style="margin-right:8px;"></i> Tags verwalten</span></div>
+                <div class="menu-row" onclick="openTemplatesModal()"><span><i class="icon icon-file" style="margin-right:8px;"></i> Vorlagen</span></div>
                 <div class="menu-row" onclick="openMediaModal()"><span><i class="icon icon-media" style="margin-right:8px;"></i> Medien-Manager</span></div>
                 <div class="menu-row" onclick="openShareOverviewModal()"><span><i class="icon icon-share" style="margin-right:8px;"></i> Freigaben verwalten</span></div>
                 <div class="menu-row" onclick="openTrashModal()">
@@ -1383,13 +1569,19 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
                 <input type="text" id="search-input" placeholder="Titel oder Text suchen..." oninput="filterTree()">
                 <span id="clear-search" onclick="clearSearch()"><i class="icon icon-clear"></i></span>
             </div>
-            <button onclick="addItem(null)" style="width:100%;background:var(--accent) !important;color:white;padding:8px;border-radius:4px;font-weight:bold;"><i class="icon icon-add"></i> Hauptkategorie</button>
+            <div id="tag-filter-bar" style="display:none; margin-bottom:10px; display:flex; flex-wrap:wrap; gap:4px;"></div>
+            <div style="display:flex; gap:5px;">
+                <button onclick="addItem(null)" style="flex:1;background:var(--accent) !important;color:white;padding:8px;border-radius:4px;font-weight:bold;"><i class="icon icon-add"></i> Hauptkategorie</button>
+                <button onclick="addItemFromTemplate(null)" style="background:rgba(var(--accent-rgb),0.15) !important;color:var(--accent);padding:8px;border-radius:4px;font-weight:bold;" title="Aus Vorlage erstellen"><i class="icon icon-file"></i></button>
+            </div>
         </div>
         <div id="tree"></div>
     </div>
     
     <div id="editor">
-        <div id="no-selection" style="margin-top:50px;text-align:center;opacity:0.5">Bitte wähle eine Notiz aus der Navigation.</div>
+        <div id="no-selection">
+            <div id="dashboard" style="max-width:800px; margin:20px auto;"></div>
+        </div>
         <div id="edit-area" style="display:none">
             <div id="breadcrumb" style="font-size:0.8em;color:var(--accent);margin-bottom:15px;overflow-wrap:anywhere;word-break:break-word;"></div>
             
@@ -1404,13 +1596,18 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
                             <button onclick="toggleNoteMenu(event)" style="font-size:1.4em; padding:0 5px; font-weight:bold; letter-spacing: 2px;">⋮</button>
                             <div class="dropdown-content" id="note-menu-content" style="top:35px;">
                                 <div class="menu-row" onclick="handleMenuAction(event, enableEdit)"><span>Bearbeiten</span></div>
+                                <div class="menu-row" onclick="handleMenuAction(event, togglePinNote)"><span id="pin-menu-text"><i class="icon icon-pin" style="margin-right:8px;"></i> Anpinnen</span></div>
+                                <div class="menu-row" onclick="handleMenuAction(event, duplicateNote)"><span><i class="icon icon-add" style="margin-right:8px;"></i> Notiz duplizieren</span></div>
+                                <div class="menu-row" onclick="handleMenuAction(event, openNoteTagsModal)"><span><i class="icon icon-tag" style="margin-right:8px;"></i> Tags bearbeiten</span></div>
                                 <div class="menu-row" onclick="handleMenuAction(event, shareNote)"><span>Freigabe-Link</span></div>
                                 <div class="menu-row" id="menu-row-history" onclick="handleMenuAction(event, openHistoryModal)"><span>Versionsverlauf</span></div>
+                                <div class="menu-row" onclick="handleMenuAction(event, saveAsTemplate)"><span><i class="icon icon-file" style="margin-right:8px;"></i> Als Vorlage speichern</span></div>
                                 <div class="menu-row" onclick="handleMenuAction(event, window.print)"><span>Drucken / PDF</span></div>
                             </div>
                         </div>
                     </div>
                 </div>
+                <div id="view-tags" style="display:none;"></div>
                 <div id="display-area"></div>
             </div>
             
@@ -1432,6 +1629,7 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
                     </div>
                     <button class="tool-btn" onclick="wrapSelection('### ','', 'Überschrift')"><i class="icon icon-header"></i><span>Titel</span></button>
                     <button class="tool-btn" onclick="handleListAction('- ', 'Punkt')"><i class="icon icon-list"></i><span>Liste</span></button>
+                    <button class="tool-btn" onclick="handleNumberedList()"><i class="icon icon-list"></i><span>1. Liste</span></button>
                     <button class="tool-btn" onclick="handleListAction('- [ ] ', 'Aufgabe')"><i class="icon icon-todo"></i><span>To-Do</span></button>
                     <button class="tool-btn" onclick="wrapSelection('\n| Spalte 1 | Spalte 2 |\n|---|---|\n| Wert 1 | Wert 2 |\n| Wert 1 | Wert 2 |\n', '', 'Tabelle')"><i class="icon icon-table"></i><span>Tabelle</span></button>
                     <button class="tool-btn" onclick="wrapSelection('> ','', 'Zitat')"><i class="icon icon-quote"></i><span>Zitat</span></button>
@@ -1749,6 +1947,58 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
         </div>
     </div>
 
+    <button id="quicknote-fab" onclick="createQuickNote()" title="Schnellnotiz erstellen"><i class="icon icon-add"></i></button>
+
+    <div id="tags-manager-modal" class="modal-overlay">
+        <div class="modal" style="width: 500px; max-width: 95vw;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+                <h3 style="margin:0"><i class="icon icon-tag"></i> Tags verwalten</h3>
+            </div>
+            <div style="display:flex; gap:8px; margin-bottom:15px;">
+                <input type="text" id="new-tag-name" placeholder="Neuer Tag..." style="margin:0; flex:1;">
+                <input type="color" id="new-tag-color" value="#27ae60" style="width:45px; height:auto; margin:0; padding:2px; border-radius:4px;">
+                <button class="btn-save" onclick="createNewTag()" style="white-space:nowrap;">Hinzufügen</button>
+            </div>
+            <div id="tags-manager-list" style="text-align:left; max-height:50vh; overflow-y:auto; margin-bottom:20px;"></div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('tags-manager-modal').style.display='none'">Schließen</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="note-tags-modal" class="modal-overlay" style="z-index:2500;">
+        <div class="modal" style="width: 450px; max-width: 95vw;">
+            <h3 style="margin-top:0"><i class="icon icon-tag"></i> Tags für diese Notiz</h3>
+            <div id="note-tags-list" style="text-align:left; max-height:50vh; overflow-y:auto; margin-bottom:20px;"></div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('note-tags-modal').style.display='none'">Schließen</button>
+                <button class="btn-save" onclick="saveNoteTags()">Speichern</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="templates-modal" class="modal-overlay">
+        <div class="modal" style="width: 600px; max-width: 95vw;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+                <h3 style="margin:0"><i class="icon icon-file"></i> Vorlagen</h3>
+            </div>
+            <div id="templates-list" style="text-align:left; max-height:60vh; overflow-y:auto; margin-bottom:20px; display:grid; grid-template-columns:repeat(auto-fill, minmax(200px,1fr)); gap:12px;"></div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('templates-modal').style.display='none'">Schließen</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="template-picker-modal" class="modal-overlay" style="z-index:2500;">
+        <div class="modal" style="width: 550px; max-width: 95vw;">
+            <h3 style="margin-top:0"><i class="icon icon-file"></i> Aus Vorlage erstellen</h3>
+            <div id="template-picker-list" style="text-align:left; max-height:55vh; overflow-y:auto; margin-bottom:20px; display:grid; grid-template-columns:repeat(auto-fill, minmax(180px,1fr)); gap:12px;"></div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('template-picker-modal').style.display='none'">Abbruch</button>
+            </div>
+        </div>
+    </div>
+
     <div id="custom-modal" class="modal-overlay">
         <div class="modal">
             <h3 id="modal-title"></h3>
@@ -1864,6 +2114,8 @@ body {
 .icon-mic { -webkit-mask-image: url('/static/icons/microphone-outline.svg'); mask-image: url('/static/icons/microphone-outline.svg'); }
 .icon-media { -webkit-mask-image: url('/static/icons/media.svg'); mask-image: url('/static/icons/media.svg'); }
 .icon-contact { -webkit-mask-image: url('/static/icons/card-account-phone-outline.svg'); mask-image: url('/static/icons/card-account-phone-outline.svg'); }
+.icon-pin { -webkit-mask-image: url('/static/icons/reminders.svg'); mask-image: url('/static/icons/reminders.svg'); }
+.icon-tag { -webkit-mask-image: url('/static/icons/spoiler.svg'); mask-image: url('/static/icons/spoiler.svg'); }
 
 #sidebar { 
     width: var(--sidebar-width); 
@@ -2507,8 +2759,138 @@ input[type="checkbox"].task-check { width: 16px; height: 16px; margin: 0; cursor
     transform: scale(1.02);
 }
 
+/* --- PIN STYLES --- */
+.pin-indicator { color: var(--accent); margin-left: 5px; font-size: 0.8em; opacity: 0.7; }
+.pinned-section { border-bottom: 1px dashed var(--accent); margin-bottom: 5px; padding-bottom: 5px; }
+.pinned-section .tree-item .tree-text { color: var(--accent); }
+
+/* --- TAG STYLES --- */
+.tag-chip {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 0.7em;
+    font-weight: bold;
+    color: white;
+    margin: 1px 2px;
+    white-space: nowrap;
+    cursor: default;
+}
+.tag-chip-small {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-left: 3px;
+    vertical-align: middle;
+    flex-shrink: 0;
+}
+.tag-filter-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 0.75em;
+    font-weight: bold;
+    color: white;
+    cursor: pointer;
+    opacity: 0.5;
+    transition: opacity 0.2s;
+    border: 2px solid transparent;
+}
+.tag-filter-chip.active {
+    opacity: 1;
+    border-color: white;
+}
+.tag-manager-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px;
+    border-bottom: 1px solid var(--border-color);
+}
+.note-tag-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border-color);
+    cursor: pointer;
+    transition: background 0.2s;
+}
+.note-tag-item:hover { background: rgba(255,255,255,0.05); }
+#view-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px; }
+
+/* --- DASHBOARD STYLES --- */
+.dashboard-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 15px;
+    margin-top: 20px;
+}
+.dash-card {
+    background: var(--sidebar-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 18px;
+}
+.dash-card h4 { margin: 0 0 12px 0; font-size: 0.95em; opacity: 0.7; }
+.dash-card-item {
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(var(--accent-rgb), 0.1);
+    cursor: pointer;
+    transition: color 0.2s;
+    font-size: 0.9em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.dash-card-item:last-child { border-bottom: none; }
+.dash-card-item:hover { color: var(--accent); }
+.dash-stat {
+    text-align: center;
+    padding: 10px;
+}
+.dash-stat-number { font-size: 2em; font-weight: bold; color: var(--accent); }
+.dash-stat-label { font-size: 0.85em; opacity: 0.6; margin-top: 4px; }
+
+/* --- FAB BUTTON --- */
+#quicknote-fab {
+    position: fixed;
+    bottom: 25px;
+    right: 25px;
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background: var(--accent) !important;
+    color: white;
+    border: none;
+    font-size: 1.5em;
+    cursor: pointer;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+    z-index: 999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+#quicknote-fab:hover { transform: scale(1.1); box-shadow: 0 6px 20px rgba(0,0,0,0.4); }
+
+/* --- TEMPLATE STYLES --- */
+.template-card {
+    background: rgba(255,255,255,0.05);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 15px;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+}
+.template-card:hover { border-color: var(--accent); background: rgba(var(--accent-rgb), 0.05); }
+.template-card-title { font-weight: bold; margin-bottom: 5px; word-break: break-word; }
+.template-card-preview { font-size: 0.75em; color: #888; max-height: 60px; overflow: hidden; word-break: break-word; }
+
 @media print {
-    #sidebar, .header-actions, #mobile-toggle-btn, .toolbar, #edit-mode, #breadcrumb, #view-reminder-badge, #view-reminder-ack, .dropdown, #note-menu-content, #no-selection, #add-sub-level-btn { display: none !important; }
+    #sidebar, .header-actions, #mobile-toggle-btn, .toolbar, #edit-mode, #breadcrumb, #view-reminder-badge, #view-reminder-ack, .dropdown, #note-menu-content, #no-selection, #add-sub-level-btn, #quicknote-fab { display: none !important; }
     body, html { background: white !important; color: black !important; height: auto !important; width: auto !important; overflow: visible !important; display: block !important; position: static !important; }
     #editor { padding: 0 !important; margin: 0 !important; height: auto !important; width: auto !important; overflow: visible !important; display: block !important; position: static !important; }
     img, pre, blockquote, .code-container, .task-list-item, .spoiler, .md-table { page-break-inside: avoid; break-inside: avoid; }
@@ -2905,6 +3287,8 @@ async function checkAndReloadData() {
         
         await updateBadges();
         await loadContacts();
+        await loadAllTags();
+        renderTagFilterBar();
         updateToggleAllIcon();
 
         if (activeId) {
@@ -3224,6 +3608,27 @@ function renderDisplayArea() {
     if(window.hljs) {
         hljs.highlightAll(); 
     }
+
+    updatePinMenuText();
+
+    const viewTagsEl = document.getElementById('view-tags');
+    if (viewTagsEl) {
+        const node = findNode(fullTree.content, activeId);
+        if (node && node.tags && node.tags.length > 0) {
+            viewTagsEl.innerHTML = '';
+            node.tags.forEach(t => {
+                const chip = document.createElement('span');
+                chip.className = 'tag-chip';
+                chip.style.background = t.color;
+                chip.innerText = t.name;
+                viewTagsEl.appendChild(chip);
+            });
+            viewTagsEl.style.display = 'flex';
+        } else {
+            viewTagsEl.innerHTML = '';
+            viewTagsEl.style.display = 'none';
+        }
+    }
     
     const viewBadge = document.getElementById('view-reminder-badge');
     const viewAck = document.getElementById('view-reminder-ack');
@@ -3490,6 +3895,23 @@ function renderItems(items, parent) {
             rSpan.innerHTML = '<i class="icon icon-reminder_active"></i>'; 
             text.appendChild(rSpan); 
         }
+
+        if (item.is_pinned) {
+            const pinSpan = document.createElement('span');
+            pinSpan.className = 'pin-indicator';
+            pinSpan.innerHTML = '<i class="icon icon-pin"></i>';
+            text.appendChild(pinSpan);
+        }
+
+        if (item.tags && item.tags.length > 0) {
+            item.tags.forEach(t => {
+                const dot = document.createElement('span');
+                dot.className = 'tag-chip-small';
+                dot.style.background = t.color;
+                dot.title = t.name;
+                text.appendChild(dot);
+            });
+        }
         
         text.onclick = (e) => { 
             e.stopPropagation(); 
@@ -3555,7 +3977,30 @@ function renderTree() {
     rootGroup.className = 'tree-group'; 
     container.appendChild(rootGroup); 
     
-    renderItems(fullTree.content, rootGroup); 
+    let itemsToRender = fullTree.content;
+    
+    if (activeTagFilter) {
+        function hasTag(node, tagId) {
+            if (node.tags && node.tags.some(t => t.id === tagId)) return true;
+            if (node.children) {
+                for (let c of node.children) { if (hasTag(c, tagId)) return true; }
+            }
+            return false;
+        }
+        function filterByTag(items) {
+            let result = [];
+            items.forEach(item => {
+                if (hasTag(item, activeTagFilter)) {
+                    let filtered = { ...item, children: filterByTag(item.children || []) };
+                    result.push(filtered);
+                }
+            });
+            return result;
+        }
+        itemsToRender = filterByTag(fullTree.content);
+    }
+    
+    renderItems(itemsToRender, rootGroup); 
     
     if (document.body.classList.contains('edit-mode-active')) {
         initSortables(); 
@@ -4551,6 +4996,26 @@ function handleListAction(prefix, placeholder) {
 
 function insertCodeTag() { wrapSelection("'''\n", "\n'''", "CODE"); }
 
+function handleNumberedList() {
+    const ta = document.getElementById('node-text');
+    const start = ta.selectionStart;
+    const end = ta.selectionEnd;
+    const text = ta.value;
+    const selectedText = text.substring(start, end);
+    if (selectedText.includes('\n')) {
+        let num = 1;
+        const newText = selectedText.split('\n').map(line => { if (line.trim() === '') return line; return (num++) + '. ' + line; }).join('\n');
+        ta.value = text.substring(0, start) + newText + text.substring(end);
+        ta.setSelectionRange(start, start + newText.length);
+    } else {
+        const ins = '1. ' + (selectedText || 'Eintrag');
+        const prefix = (start > 0 && !text.charAt(start - 1).match(/\n/)) ? '\n' : '';
+        ta.value = text.substring(0, start) + prefix + ins + text.substring(end);
+        ta.setSelectionRange(start + prefix.length + 3, start + prefix.length + ins.length);
+    }
+    ta.focus();
+}
+
 function applyColor() { const hex = document.getElementById('text-color-input').value; wrapSelection(`[${hex}]`, '[/#]', 'Farbiger Text'); }
 
 function copyToClipboard(btn) { const el = document.createElement('textarea'); el.value = btn.nextElementSibling.innerText; document.body.appendChild(el); el.select(); document.execCommand('copy'); document.body.removeChild(el); btn.innerText = 'Kopiert!'; setTimeout(() => { btn.innerText = 'Copy'; }, 2000); }
@@ -4625,12 +5090,52 @@ function updateMenuUI() {
 
 async function addItem(parentId) { const newId = Date.now().toString() + Math.random().toString(36).substring(2, 6); const payload = { id: newId, parent_id: parentId, title: 'Neu', text: '' }; await fetch('/api/notes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); if (parentId) { collapsedIds.delete(parentId); saveCollapsedToLocal(); } await checkAndReloadData(); selectNode(newId); enableEdit(); }
 
-function deleteItem(id) { showModal("Notiz löschen", "Möchtest du diese Notiz wirklich in den Papierkorb verschieben?", [ { label: "Ja, in den Papierkorb", class: "btn-discard", action: async () => { const res = await fetch(`/api/notes/${id}`, { method: 'DELETE' }); if (res.status === 403) { showModal("Gesperrt", "Diese Notiz wird gerade von einem anderen Gerät bearbeitet und kann nicht gelöscht werden.", [{ label: "Verstanden", class: "btn-cancel", action: () => {} }]); return; } if (activeId === id) { activeId = null; document.getElementById('edit-area').style.display = 'none'; } const el = document.querySelector(`.tree-item-container[data-id="${id}"]`); if (el) el.remove(); updateBadges(); await checkAndReloadData(); } }, { label: "Abbruch", class: "btn-cancel", action: () => {} } ]); }
+function deleteItem(id) { showModal("Notiz löschen", "Möchtest du diese Notiz wirklich in den Papierkorb verschieben?", [ { label: "Ja, in den Papierkorb", class: "btn-discard", action: async () => { const res = await fetch(`/api/notes/${id}`, { method: 'DELETE' }); if (res.status === 403) { showModal("Gesperrt", "Diese Notiz wird gerade von einem anderen Gerät bearbeitet und kann nicht gelöscht werden.", [{ label: "Verstanden", class: "btn-cancel", action: () => {} }]); return; } if (activeId === id) { activeId = null; activeNoteData = null; document.getElementById('edit-area').style.display = 'none'; document.getElementById('no-selection').style.display = 'block'; loadDashboard(); } const el = document.querySelector(`.tree-item-container[data-id="${id}"]`); if (el) el.remove(); updateBadges(); await checkAndReloadData(); } }, { label: "Abbruch", class: "btn-cancel", action: () => {} } ]); }
 
 function findNode(items, id) { if (!Array.isArray(items)) return null; for (let i of items) { if (i.id === id) return i; if (i.children) { const f = findNode(i.children, id); if (f) return f; } } return null; }
 function getPath(items, id, path = []) { if (!Array.isArray(items)) return null; for (let i of items) { const n = [...path, {title: i.title, id: i.id}]; if (i.id === id) return n; if (i.children) { const r = getPath(i.children, id, n); if (r) return r; } } return null; }
 
 function initDragAndDrop() { const ta = document.getElementById('node-text'); if (!ta) return; ta.addEventListener('dragover', e => { e.preventDefault(); ta.style.border = '1px dashed var(--accent)'; }); ta.addEventListener('dragleave', e => { e.preventDefault(); ta.style.border = '1px solid var(--border-color)'; }); ta.addEventListener('drop', async e => { e.preventDefault(); ta.style.border = '1px solid var(--border-color)'; if(e.dataTransfer.files && e.dataTransfer.files.length > 0) { const f = e.dataTransfer.files[0]; uploadWithProgress(f, (data) => { if(data.filename) { let txt = f.type.startsWith('image/') ? `[img:${data.filename}]` : `[file:${data.filename}|${data.original}]`; const s = ta.selectionStart; ta.value = ta.value.substring(0, s) + txt + ta.value.substring(ta.selectionEnd); ta.focus(); ta.setSelectionRange(s + txt.length, s + txt.length); } }); } }); }
+
+function initTabHandler() {
+    const ta = document.getElementById('node-text');
+    if (!ta) return;
+    ta.addEventListener('keydown', function(e) {
+        if (e.key === 'Tab') {
+            e.preventDefault();
+            const start = ta.selectionStart;
+            const end = ta.selectionEnd;
+            const text = ta.value;
+            if (start === end) {
+                if (e.shiftKey) {
+                    const lineStart = text.lastIndexOf('\n', start - 1) + 1;
+                    if (text.substring(lineStart, lineStart + 4) === '    ') {
+                        ta.value = text.substring(0, lineStart) + text.substring(lineStart + 4);
+                        ta.setSelectionRange(Math.max(start - 4, lineStart), Math.max(start - 4, lineStart));
+                    } else if (text.substring(lineStart, lineStart + 1) === '\t') {
+                        ta.value = text.substring(0, lineStart) + text.substring(lineStart + 1);
+                        ta.setSelectionRange(Math.max(start - 1, lineStart), Math.max(start - 1, lineStart));
+                    }
+                } else {
+                    ta.value = text.substring(0, start) + '    ' + text.substring(end);
+                    ta.setSelectionRange(start + 4, start + 4);
+                }
+            } else {
+                const selected = text.substring(start, end);
+                const lineStart = text.lastIndexOf('\n', start - 1) + 1;
+                const block = text.substring(lineStart, end);
+                let newBlock;
+                if (e.shiftKey) {
+                    newBlock = block.split('\n').map(l => l.startsWith('    ') ? l.substring(4) : (l.startsWith('\t') ? l.substring(1) : l)).join('\n');
+                } else {
+                    newBlock = block.split('\n').map(l => '    ' + l).join('\n');
+                }
+                ta.value = text.substring(0, lineStart) + newBlock + text.substring(end);
+                ta.setSelectionRange(lineStart, lineStart + newBlock.length);
+            }
+        }
+    });
+}
 
 document.addEventListener('keydown', function(e) {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { if (document.getElementById('edit-mode') && document.getElementById('edit-mode').style.display === 'block') { e.preventDefault(); saveChanges(); } }
@@ -4641,6 +5146,10 @@ document.addEventListener('keydown', function(e) {
         else if (document.getElementById('contact-form-modal') && document.getElementById('contact-form-modal').style.display === 'flex') document.getElementById('contact-form-modal').style.display = 'none';
         else if (document.getElementById('contact-picker-modal') && document.getElementById('contact-picker-modal').style.display === 'flex') document.getElementById('contact-picker-modal').style.display = 'none';
         else if (document.getElementById('contacts-modal') && document.getElementById('contacts-modal').style.display === 'flex') document.getElementById('contacts-modal').style.display = 'none';
+        else if (document.getElementById('note-tags-modal') && document.getElementById('note-tags-modal').style.display === 'flex') document.getElementById('note-tags-modal').style.display = 'none';
+        else if (document.getElementById('tags-manager-modal') && document.getElementById('tags-manager-modal').style.display === 'flex') document.getElementById('tags-manager-modal').style.display = 'none';
+        else if (document.getElementById('template-picker-modal') && document.getElementById('template-picker-modal').style.display === 'flex') document.getElementById('template-picker-modal').style.display = 'none';
+        else if (document.getElementById('templates-modal') && document.getElementById('templates-modal').style.display === 'flex') document.getElementById('templates-modal').style.display = 'none';
         else if (document.getElementById('reminder-modal') && document.getElementById('reminder-modal').style.display === 'flex') document.getElementById('reminder-modal').style.display = 'none';
         else if (document.getElementById('history-modal') && document.getElementById('history-modal').style.display === 'flex') closeHistoryModal();
         else if (document.getElementById('history-settings-modal') && document.getElementById('history-settings-modal').style.display === 'flex') document.getElementById('history-settings-modal').style.display = 'none';
@@ -4671,9 +5180,311 @@ window.addEventListener('afterprint', () => { initiallyClosedSpoilers.forEach(s 
 let mediaRecorder = null; let audioChunks = []; let isRecording = false;
 async function toggleAudioRecording() { const btn = document.getElementById('btn-record-audio'); if (isRecording) { mediaRecorder.stop(); isRecording = false; btn.innerHTML = '<i class="icon icon-mic"></i><span>Audio</span>'; btn.style.color = ''; btn.style.borderColor = ''; return; } try { const stream = await navigator.mediaDevices.getUserMedia({ audio: true }); mediaRecorder = new MediaRecorder(stream); audioChunks = []; mediaRecorder.ondataavailable = event => { if (event.data.size > 0) { audioChunks.push(event.data); } }; mediaRecorder.onstop = () => { const audioBlob = new Blob(audioChunks, { type: 'audio/webm' }); const file = new File([audioBlob], "audiomemo.webm", { type: 'audio/webm' }); uploadWithProgress(file, (data) => { if(data.filename) { wrapSelection(`\n[audio:${data.filename}]\n`, '', ''); } }); stream.getTracks().forEach(track => track.stop()); }; mediaRecorder.start(); isRecording = true; btn.innerHTML = '<i class="icon icon-mic"></i><span style="animation: pulse 1s infinite;">Aufnahme...</span>'; btn.style.color = '#e74c3c'; btn.style.borderColor = '#e74c3c'; } catch (err) { showModal("Fehler", "Zugriff auf das Mikrofon verweigert oder nicht gefunden.", [{ label: "Okay", class: "btn-cancel", action: () => {} }]); } }
 
+// --- PIN ---
+async function togglePinNote() {
+    if (!activeId) return;
+    try {
+        const res = await fetch(`/api/notes/${activeId}/pin`, { method: 'POST' });
+        const data = await res.json();
+        await checkAndReloadData();
+        updatePinMenuText();
+    } catch(e) { console.error(e); }
+}
+
+function updatePinMenuText() {
+    const el = document.getElementById('pin-menu-text');
+    if (!el || !activeId) return;
+    const node = findNode(fullTree.content, activeId);
+    if (node && node.is_pinned) {
+        el.innerHTML = '<i class="icon icon-pin" style="margin-right:8px;"></i> Anpinnung aufheben';
+    } else {
+        el.innerHTML = '<i class="icon icon-pin" style="margin-right:8px;"></i> Anpinnen';
+    }
+}
+
+// --- DUPLICATE ---
+async function duplicateNote() {
+    if (!activeId) return;
+    try {
+        const res = await fetch(`/api/notes/${activeId}/duplicate`, { method: 'POST' });
+        const data = await res.json();
+        if (data.id) {
+            await checkAndReloadData();
+            selectNode(data.id);
+        }
+    } catch(e) { console.error(e); }
+}
+
+// --- TAGS ---
+var allTagsCache = [];
+var activeTagFilter = null;
+
+async function loadAllTags() {
+    try {
+        const res = await fetch('/api/tags');
+        if (res.ok) allTagsCache = await res.json();
+    } catch(e) { console.error(e); }
+}
+
+function renderTagFilterBar() {
+    const bar = document.getElementById('tag-filter-bar');
+    if (!bar) return;
+    if (allTagsCache.length === 0) {
+        bar.style.display = 'none';
+        return;
+    }
+    bar.style.display = 'flex';
+    bar.innerHTML = '';
+    allTagsCache.forEach(t => {
+        const chip = document.createElement('span');
+        chip.className = 'tag-filter-chip' + (activeTagFilter === t.id ? ' active' : '');
+        chip.style.background = t.color;
+        chip.innerText = t.name;
+        chip.onclick = () => {
+            if (activeTagFilter === t.id) { activeTagFilter = null; } 
+            else { activeTagFilter = t.id; }
+            renderTagFilterBar();
+            renderTree();
+        };
+        bar.appendChild(chip);
+    });
+    if (activeTagFilter) {
+        const clearChip = document.createElement('span');
+        clearChip.style.cssText = 'font-size:0.75em; cursor:pointer; opacity:0.6; padding:3px 6px; align-self:center;';
+        clearChip.innerHTML = '<i class="icon icon-clear"></i>';
+        clearChip.onclick = () => { activeTagFilter = null; renderTagFilterBar(); renderTree(); };
+        bar.appendChild(clearChip);
+    }
+}
+
+async function openTagsManagerModal() {
+    await loadAllTags();
+    document.getElementById('tags-manager-modal').style.display = 'flex';
+    renderTagsManagerList();
+}
+
+function renderTagsManagerList() {
+    const list = document.getElementById('tags-manager-list');
+    list.innerHTML = '';
+    if (allTagsCache.length === 0) {
+        list.innerHTML = '<p style="opacity:0.5; text-align:center;">Noch keine Tags erstellt.</p>';
+        return;
+    }
+    allTagsCache.forEach(t => {
+        const div = document.createElement('div');
+        div.className = 'tag-manager-item';
+        div.innerHTML = `<span class="tag-chip" style="background:${t.color}">${t.name}</span><span style="flex-grow:1;"></span>`;
+        const btnDel = document.createElement('button');
+        btnDel.className = 'tool-btn';
+        btnDel.style.color = '#e74c3c';
+        btnDel.style.borderColor = '#e74c3c';
+        btnDel.innerHTML = '<i class="icon icon-trash"></i>';
+        btnDel.onclick = async () => {
+            await fetch(`/api/tags/${t.id}`, { method: 'DELETE' });
+            await loadAllTags();
+            renderTagsManagerList();
+            renderTagFilterBar();
+            await checkAndReloadData();
+        };
+        div.appendChild(btnDel);
+        list.appendChild(div);
+    });
+}
+
+async function createNewTag() {
+    const name = document.getElementById('new-tag-name').value.trim();
+    const color = document.getElementById('new-tag-color').value;
+    if (!name) return;
+    await fetch('/api/tags', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, color }) });
+    document.getElementById('new-tag-name').value = '';
+    await loadAllTags();
+    renderTagsManagerList();
+    renderTagFilterBar();
+}
+
+var pendingNoteTags = [];
+
+async function openNoteTagsModal() {
+    if (!activeId) return;
+    await loadAllTags();
+    try {
+        const res = await fetch(`/api/notes/${activeId}/tags`);
+        const currentTags = await res.json();
+        pendingNoteTags = currentTags.map(t => t.id);
+    } catch(e) { pendingNoteTags = []; }
+    document.getElementById('note-tags-modal').style.display = 'flex';
+    renderNoteTagsList();
+}
+
+function renderNoteTagsList() {
+    const list = document.getElementById('note-tags-list');
+    list.innerHTML = '';
+    if (allTagsCache.length === 0) {
+        list.innerHTML = '<p style="opacity:0.5; text-align:center;">Erstelle zuerst Tags unter Einstellungen → Tags verwalten.</p>';
+        return;
+    }
+    allTagsCache.forEach(t => {
+        const div = document.createElement('div');
+        div.className = 'note-tag-item';
+        const isSelected = pendingNoteTags.includes(t.id);
+        div.innerHTML = `<input type="checkbox" ${isSelected ? 'checked' : ''} style="accent-color:${t.color}; width:18px; height:18px;"> <span class="tag-chip" style="background:${t.color}">${t.name}</span>`;
+        div.onclick = () => {
+            if (pendingNoteTags.includes(t.id)) {
+                pendingNoteTags = pendingNoteTags.filter(x => x !== t.id);
+            } else {
+                pendingNoteTags.push(t.id);
+            }
+            renderNoteTagsList();
+        };
+        list.appendChild(div);
+    });
+}
+
+async function saveNoteTags() {
+    if (!activeId) return;
+    await fetch(`/api/notes/${activeId}/tags`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tag_ids: pendingNoteTags }) });
+    document.getElementById('note-tags-modal').style.display = 'none';
+    await checkAndReloadData();
+    renderDisplayArea();
+}
+
+// --- TEMPLATES ---
+async function openTemplatesModal() {
+    document.getElementById('templates-modal').style.display = 'flex';
+    renderTemplatesList();
+}
+
+async function renderTemplatesList() {
+    const list = document.getElementById('templates-list');
+    list.innerHTML = 'Lade Vorlagen...';
+    try {
+        const res = await fetch('/api/templates');
+        const data = await res.json();
+        if (data.length === 0) {
+            list.innerHTML = '<p style="opacity:0.5; grid-column:1/-1; text-align:center;">Noch keine Vorlagen gespeichert. Erstelle Vorlagen über das Notiz-Menü (⋮) → "Als Vorlage speichern".</p>';
+            return;
+        }
+        list.innerHTML = '';
+        data.forEach(t => {
+            const card = document.createElement('div');
+            card.className = 'template-card';
+            card.innerHTML = `<div class="template-card-title">${t.title || 'Unbenannt'}</div><div class="template-card-preview">${(t.text || '').substring(0, 150)}</div>`;
+            const btnDel = document.createElement('button');
+            btnDel.className = 'tool-btn';
+            btnDel.style.cssText = 'color:#e74c3c; border-color:#e74c3c; margin-top:8px; width:100%;';
+            btnDel.innerHTML = '<i class="icon icon-trash"></i><span>Löschen</span>';
+            btnDel.onclick = async (e) => {
+                e.stopPropagation();
+                await fetch(`/api/templates/${t.id}`, { method: 'DELETE' });
+                renderTemplatesList();
+            };
+            card.appendChild(btnDel);
+            list.appendChild(card);
+        });
+    } catch(e) { list.innerHTML = 'Fehler beim Laden.'; }
+}
+
+async function saveAsTemplate() {
+    if (!activeNoteData) return;
+    try {
+        await fetch('/api/templates', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: activeNoteData.title || 'Vorlage', text: activeNoteData.text || '' }) });
+        showModal("Vorlage gespeichert", "Die aktuelle Notiz wurde als Vorlage gespeichert. Du kannst sie beim Erstellen neuer Notizen verwenden.", [{ label: "OK", class: "btn-cancel", action: () => {} }]);
+    } catch(e) { console.error(e); }
+}
+
+var templatePickerParentId = null;
+
+async function addItemFromTemplate(parentId) {
+    templatePickerParentId = parentId;
+    document.getElementById('template-picker-modal').style.display = 'flex';
+    const list = document.getElementById('template-picker-list');
+    list.innerHTML = 'Lade...';
+    try {
+        const res = await fetch('/api/templates');
+        const data = await res.json();
+        if (data.length === 0) {
+            list.innerHTML = '<p style="opacity:0.5; grid-column:1/-1; text-align:center;">Noch keine Vorlagen gespeichert.</p>';
+            return;
+        }
+        list.innerHTML = '';
+        data.forEach(t => {
+            const card = document.createElement('div');
+            card.className = 'contact-picker-tile';
+            card.innerHTML = `<div style="font-weight:bold; font-size:0.9em;">${t.title || 'Unbenannt'}</div><div style="font-size:0.7em; color:#888; max-height:40px; overflow:hidden;">${(t.text || '').substring(0, 80)}</div>`;
+            card.onclick = () => createNoteFromTemplate(t);
+            list.appendChild(card);
+        });
+    } catch(e) { list.innerHTML = 'Fehler.'; }
+}
+
+async function createNoteFromTemplate(template) {
+    document.getElementById('template-picker-modal').style.display = 'none';
+    const newId = Date.now().toString() + Math.random().toString(36).substring(2, 6);
+    const payload = { id: newId, parent_id: templatePickerParentId, title: template.title || 'Neu', text: template.text || '' };
+    await fetch('/api/notes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    if (templatePickerParentId) { collapsedIds.delete(templatePickerParentId); saveCollapsedToLocal(); }
+    await checkAndReloadData();
+    selectNode(newId);
+    enableEdit();
+}
+
+// --- DASHBOARD ---
+async function loadDashboard() {
+    const container = document.getElementById('dashboard');
+    if (!container) return;
+    try {
+        const res = await fetch('/api/dashboard');
+        if (!res.ok) return;
+        const d = await res.json();
+        let html = '<h2 style="margin-top:0; opacity:0.8;">Dashboard</h2>';
+        html += '<div class="dashboard-grid">';
+        
+        html += '<div class="dash-card"><div class="dash-stat"><div class="dash-stat-number">' + d.total_notes + '</div><div class="dash-stat-label">Notizen gesamt</div></div></div>';
+        html += '<div class="dash-card"><div class="dash-stat"><div class="dash-stat-number">' + d.open_tasks + '</div><div class="dash-stat-label">Offene Aufgaben</div></div></div>';
+        
+        if (d.pinned && d.pinned.length > 0) {
+            html += '<div class="dash-card"><h4><i class="icon icon-pin"></i> Angepinnt</h4>';
+            d.pinned.forEach(n => { html += `<div class="dash-card-item" onclick="selectNode('${n.id}')">${n.title || 'Unbenannt'}</div>`; });
+            html += '</div>';
+        }
+        
+        if (d.upcoming_reminders && d.upcoming_reminders.length > 0) {
+            html += '<div class="dash-card"><h4><i class="icon icon-reminders"></i> Nächste Erinnerungen</h4>';
+            d.upcoming_reminders.forEach(n => { html += `<div class="dash-card-item" onclick="selectNode('${n.id}')">${n.title || 'Unbenannt'} <span style="font-size:0.75em; color:#888;">${(n.reminder||'').replace('T',' ')}</span></div>`; });
+            html += '</div>';
+        }
+        
+        html += '<div class="dash-card" style="grid-column: 1 / -1;"><h4><i class="icon icon-history"></i> Zuletzt bearbeitet</h4>';
+        if (d.recent && d.recent.length > 0) {
+            html += '<div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(180px,1fr)); gap:8px;">';
+            d.recent.forEach(n => { html += `<div class="dash-card-item" onclick="selectNode('${n.id}')" style="padding:8px; background:rgba(255,255,255,0.03); border-radius:6px; border:1px solid var(--border-color);">${n.title || 'Unbenannt'}</div>`; });
+            html += '</div>';
+        } else {
+            html += '<p style="opacity:0.5;">Noch keine Notizen vorhanden.</p>';
+        }
+        html += '</div>';
+        
+        html += '</div>';
+        container.innerHTML = html;
+    } catch(e) { console.error(e); }
+}
+
+// --- QUICKNOTE ---
+async function createQuickNote() {
+    try {
+        const res = await fetch('/api/quicknote', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+        const data = await res.json();
+        if (data.id) {
+            await checkAndReloadData();
+            selectNode(data.id);
+            enableEdit();
+        }
+    } catch(e) { console.error(e); }
+}
+
 window.onload = () => { 
     if (window.isShareView) { if (window.hljs) hljs.highlightAll(); return; }
-    loadData(); initDragAndDrop(); initMentionSystem(); setInterval(checkAndReloadData, 30000); 
+    loadData(); initDragAndDrop(); initTabHandler(); initMentionSystem(); loadDashboard(); loadAllTags().then(() => renderTagFilterBar()); setInterval(checkAndReloadData, 30000); 
 };
 EOF
 
