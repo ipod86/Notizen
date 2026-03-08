@@ -1512,7 +1512,7 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
                             <span><i class="icon icon-color" style="margin-right:8px;"></i> Akzentfarbe</span>
                             <input type="color" id="accent-color-picker" onchange="updateGlobalAccent(this.value)" onclick="event.stopPropagation()">
                         </div>
-                        <div class="menu-row" onclick="handleMenuAction(event, togglePassword)"><span id="pwd-toggle-text"><i class="icon icon-password" style="margin-right:8px;"></i> Passwortschutz an</span></div>
+                        <div class="menu-row" onclick="handleMenuAction(event, togglePassword)"><span id="pwd-toggle-text"><i class="icon icon-password" style="margin-right:8px;"></i> Passwortschutz: Inaktiv</span></div>
                         <div class="menu-row" onclick="handleMenuAction(event, toggleHistorySettings)"><span><i class="icon icon-history" style="margin-right:8px;"></i> Historien-Optionen</span></div>
                     </div>
                 </div>
@@ -1599,6 +1599,7 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
                                 <div class="menu-row" id="menu-row-history" onclick="handleMenuAction(event, openHistoryModal)"><span><i class="icon icon-history" style="margin-right:8px;"></i> Versionsverlauf</span></div>
                                 <div class="menu-row" onclick="handleMenuAction(event, saveAsTemplate)"><span><i class="icon icon-file" style="margin-right:8px;"></i> Als Vorlage speichern</span></div>
                                 <div class="menu-row" onclick="handleMenuAction(event, window.print)"><span><i class="icon icon-printer" style="margin-right:8px;"></i> Drucken / PDF</span></div>
+                                <div class="menu-row" onclick="handleMenuAction(event, deleteActiveNote)" style="color:#e74c3c;"><span><i class="icon icon-trash" style="margin-right:8px;"></i> Notiz löschen</span></div>
                             </div>
                         </div>
                     </div>
@@ -5106,7 +5107,7 @@ async function toggleTheme() { const newTheme = document.body.getAttribute('data
 
 function updateMenuUI() { 
     const pwdBtn = document.getElementById('pwd-toggle-text'); const logoutBtn = document.getElementById('logout-btn'); const whToggleText = document.getElementById('webhook-toggle-text'); 
-    if(pwdBtn) pwdBtn.innerHTML = fullTree.settings.password_enabled ? '<i class="icon icon-password" style="margin-right:8px;"></i> Passwortschutz aus' : '<i class="icon icon-password" style="margin-right:8px;"></i> Passwortschutz an'; 
+    if(pwdBtn) pwdBtn.innerHTML = fullTree.settings.password_enabled ? '<i class="icon icon-password" style="margin-right:8px;"></i> Passwortschutz: Aktiv ✓' : '<i class="icon icon-password" style="margin-right:8px;"></i> Passwortschutz: Inaktiv'; 
     if(logoutBtn) logoutBtn.style.display = fullTree.settings.password_enabled ? 'flex' : 'none'; 
     if(whToggleText) whToggleText.innerHTML = fullTree.settings.webhook_enabled ? '<i class="icon icon-webhook" style="margin-right:8px;"></i> Webhook (Aktiviert)' : '<i class="icon icon-webhook" style="margin-right:8px;"></i> Webhook (Push)'; 
     const taskToggleText = document.getElementById('toggle-tasks-text'); const remToggleText = document.getElementById('toggle-reminders-text');
@@ -5121,7 +5122,9 @@ function updateMenuUI() {
 
 async function addItem(parentId) { const newId = Date.now().toString() + Math.random().toString(36).substring(2, 6); const payload = { id: newId, parent_id: parentId, title: 'Neu', text: '' }; await fetch('/api/notes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); if (parentId) { collapsedIds.delete(parentId); saveCollapsedToLocal(); } await checkAndReloadData(); selectNode(newId); enableEdit(); }
 
-function deleteItem(id) { showModal("Notiz löschen", "Möchtest du diese Notiz wirklich in den Papierkorb verschieben?", [ { label: "Ja, in den Papierkorb", class: "btn-discard", action: async () => { const res = await fetch(`/api/notes/${id}`, { method: 'DELETE' }); if (res.status === 403) { showModal("Gesperrt", "Diese Notiz wird gerade von einem anderen Gerät bearbeitet und kann nicht gelöscht werden.", [{ label: "Verstanden", class: "btn-cancel", action: () => {} }]); return; } if (activeId === id) { activeId = null; activeNoteData = null; document.getElementById('edit-area').style.display = 'none'; document.getElementById('no-selection').style.display = 'block'; loadDashboard(); } const el = document.querySelector(`.tree-item-container[data-id="${id}"]`); if (el) el.remove(); updateBadges(); await checkAndReloadData(); } }, { label: "Abbruch", class: "btn-cancel", action: () => {} } ]); }
+function deleteActiveNote() { if (activeId) deleteItem(activeId); }
+
+function deleteItem(id) { showModal("Notiz löschen", "Möchtest du diese Notiz wirklich in den Papierkorb verschieben?\n\nAchtung: Alle Unterkategorien und deren Inhalte werden dabei ebenfalls in den Papierkorb verschoben.", [ { label: "Ja, in den Papierkorb", class: "btn-discard", action: async () => { const res = await fetch(`/api/notes/${id}`, { method: 'DELETE' }); if (res.status === 403) { showModal("Gesperrt", "Diese Notiz wird gerade von einem anderen Gerät bearbeitet und kann nicht gelöscht werden.", [{ label: "Verstanden", class: "btn-cancel", action: () => {} }]); return; } if (activeId === id) { activeId = null; activeNoteData = null; document.getElementById('edit-area').style.display = 'none'; document.getElementById('no-selection').style.display = 'block'; loadDashboard(); } const el = document.querySelector(`.tree-item-container[data-id="${id}"]`); if (el) el.remove(); updateBadges(); await checkAndReloadData(); } }, { label: "Abbruch", class: "btn-cancel", action: () => {} } ]); }
 
 function findNode(items, id) { if (!Array.isArray(items)) return null; for (let i of items) { if (i.id === id) return i; if (i.children) { const f = findNode(i.children, id); if (f) return f; } } return null; }
 function getPath(items, id, path = []) { if (!Array.isArray(items)) return null; for (let i of items) { const n = [...path, {title: i.title, id: i.id}]; if (i.id === id) return n; if (i.children) { const r = getPath(i.children, id, n); if (r) return r; } } return null; }
