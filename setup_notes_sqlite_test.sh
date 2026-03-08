@@ -5353,12 +5353,76 @@ function renderTagsManagerList() {
     allTagsCache.forEach(t => {
         const div = document.createElement('div');
         div.className = 'tag-manager-item';
-        div.innerHTML = `<span class="tag-chip" style="background:${t.color}">${t.name}</span><span style="flex-grow:1;"></span>`;
+
+        const chipSpan = document.createElement('span');
+        chipSpan.className = 'tag-chip';
+        chipSpan.style.background = t.color;
+        chipSpan.innerText = t.name;
+        div.appendChild(chipSpan);
+
+        const spacer = document.createElement('span');
+        spacer.style.flexGrow = '1';
+        div.appendChild(spacer);
+
+        const btnEdit = document.createElement('button');
+        btnEdit.className = 'tool-btn';
+        btnEdit.innerHTML = '<i class="icon icon-sketch"></i>';
+        btnEdit.title = 'Bearbeiten';
+        btnEdit.onclick = () => {
+            div.innerHTML = '';
+            div.style.flexWrap = 'wrap';
+
+            const editColor = document.createElement('input');
+            editColor.type = 'color';
+            editColor.value = t.color;
+            editColor.style.cssText = 'width:36px; height:32px; padding:1px; margin:0; border-radius:4px; border:1px solid var(--border-color); cursor:pointer;';
+
+            const editName = document.createElement('input');
+            editName.type = 'text';
+            editName.value = t.name;
+            editName.style.cssText = 'flex:1; min-width:80px; margin:0; padding:6px 10px; font-size:0.9em;';
+
+            const btnSave = document.createElement('button');
+            btnSave.className = 'btn-save';
+            btnSave.style.padding = '6px 12px';
+            btnSave.style.fontSize = '0.85em';
+            btnSave.innerText = 'OK';
+            btnSave.onclick = async () => {
+                const newName = editName.value.trim();
+                if (!newName) return;
+                await fetch(`/api/tags/${t.id}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: newName, color: editColor.value })
+                });
+                await loadAllTags();
+                renderTagsManagerList();
+                renderTagFilterBar();
+                await checkAndReloadData();
+            };
+
+            const btnCancel = document.createElement('button');
+            btnCancel.className = 'btn-cancel';
+            btnCancel.style.padding = '6px 12px';
+            btnCancel.style.fontSize = '0.85em';
+            btnCancel.innerText = 'X';
+            btnCancel.onclick = () => renderTagsManagerList();
+
+            div.appendChild(editColor);
+            div.appendChild(editName);
+            div.appendChild(btnSave);
+            div.appendChild(btnCancel);
+            editName.focus();
+            editName.select();
+        };
+        div.appendChild(btnEdit);
+
         const btnDel = document.createElement('button');
         btnDel.className = 'tool-btn';
         btnDel.style.color = '#e74c3c';
         btnDel.style.borderColor = '#e74c3c';
         btnDel.innerHTML = '<i class="icon icon-trash"></i>';
+        btnDel.title = 'Löschen';
         btnDel.onclick = async () => {
             await fetch(`/api/tags/${t.id}`, { method: 'DELETE' });
             await loadAllTags();
