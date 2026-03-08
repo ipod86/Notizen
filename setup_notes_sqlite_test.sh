@@ -2795,13 +2795,30 @@ input[type="checkbox"].task-check { width: 16px; height: 16px; margin: 0; cursor
     font-weight: bold;
     color: white;
     cursor: pointer;
-    opacity: 0.5;
-    transition: opacity 0.2s;
+    transition: transform 0.15s, box-shadow 0.15s;
     border: 2px solid transparent;
 }
+.tag-filter-chip:hover {
+    transform: scale(1.05);
+}
 .tag-filter-chip.active {
-    opacity: 1;
-    border-color: white;
+    box-shadow: 0 0 0 2px var(--text-color);
+}
+.tag-filter-expand {
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 8px;
+    border-radius: 12px;
+    font-size: 0.7em;
+    font-weight: bold;
+    color: var(--text-color);
+    background: rgba(255,255,255,0.1);
+    border: 1px solid var(--border-color);
+    cursor: pointer;
+    transition: background 0.15s;
+}
+.tag-filter-expand:hover {
+    background: rgba(255,255,255,0.2);
 }
 .tag-manager-item {
     display: flex;
@@ -5212,6 +5229,7 @@ async function duplicateNote() {
 // --- TAGS ---
 var allTagsCache = [];
 var activeTagFilter = null;
+var tagFilterExpanded = false;
 
 async function loadAllTags() {
     try {
@@ -5231,7 +5249,12 @@ function renderTagFilterBar() {
     }
     bar.style.display = 'flex';
     bar.innerHTML = '';
-    allTagsCache.forEach(t => {
+
+    const maxVisible = 5;
+    const showAll = tagFilterExpanded || allTagsCache.length <= maxVisible;
+    const visibleTags = showAll ? allTagsCache : allTagsCache.slice(0, maxVisible);
+
+    visibleTags.forEach(t => {
         const chip = document.createElement('span');
         chip.className = 'tag-filter-chip' + (activeTagFilter === t.id ? ' active' : '');
         chip.style.background = t.color;
@@ -5244,6 +5267,22 @@ function renderTagFilterBar() {
         };
         bar.appendChild(chip);
     });
+
+    if (!showAll) {
+        const moreBtn = document.createElement('span');
+        moreBtn.className = 'tag-filter-expand';
+        moreBtn.innerText = '+' + (allTagsCache.length - maxVisible);
+        moreBtn.onclick = () => { tagFilterExpanded = true; renderTagFilterBar(); };
+        bar.appendChild(moreBtn);
+    } else if (allTagsCache.length > maxVisible && tagFilterExpanded) {
+        const lessBtn = document.createElement('span');
+        lessBtn.className = 'tag-filter-expand';
+        lessBtn.innerText = '▴';
+        lessBtn.title = 'Weniger anzeigen';
+        lessBtn.onclick = () => { tagFilterExpanded = false; renderTagFilterBar(); };
+        bar.appendChild(lessBtn);
+    }
+
     if (activeTagFilter) {
         const clearChip = document.createElement('span');
         clearChip.style.cssText = 'font-size:0.75em; cursor:pointer; opacity:0.6; padding:3px 6px; align-self:center;';
