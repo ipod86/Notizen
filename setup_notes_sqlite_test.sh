@@ -1315,6 +1315,16 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
                     <input type="color" id="accent-color-picker" onchange="updateGlobalAccent(this.value)" onclick="event.stopPropagation()">
                 </div>
                 
+                <div class="menu-row" onclick="openContactsModal()"><span><i class="icon icon-contact" style="margin-right:8px;"></i> Kontakte</span></div>
+                <div class="menu-row" onclick="openMediaModal()"><span><i class="icon icon-media" style="margin-right:8px;"></i> Medien-Manager</span></div>
+                <div class="menu-row" onclick="openShareOverviewModal()"><span><i class="icon icon-share" style="margin-right:8px;"></i> Freigaben verwalten</span></div>
+                <div class="menu-row" onclick="openTrashModal()">
+                    <span style="display:flex; align-items:center; width:100%;">
+                        <span style="flex-grow:1;"><i class="icon icon-trash" style="margin-right:8px;"></i> Papierkorb</span>
+                        <span id="trash-badge" class="menu-badge">0</span>
+                    </span>
+                </div>
+
                 <div class="dropdown-submenu" onclick="toggleSubmenu(this, event)">
                     <div class="menu-row">
                         <span><i class="icon icon-folder" style="margin-right:8px;"></i> Allgemeine Einstellungen</span><span class="submenu-arrow">▶</span>
@@ -1346,15 +1356,6 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
                     </div>
                 </div>
                 
-                <div class="menu-row" onclick="openMediaModal()"><span><i class="icon icon-media" style="margin-right:8px;"></i> Medien-Manager</span></div>
-                <div class="menu-row" onclick="openShareOverviewModal()"><span><i class="icon icon-share" style="margin-right:8px;"></i> Freigaben verwalten</span></div>
-                <div class="menu-row" onclick="openContactsModal()"><span><i class="icon icon-contact" style="margin-right:8px;"></i> Kontakte</span></div>
-                <div class="menu-row" onclick="openTrashModal()">
-                    <span style="display:flex; align-items:center; width:100%;">
-                        <span style="flex-grow:1;"><i class="icon icon-trash" style="margin-right:8px;"></i> Papierkorb</span>
-                        <span id="trash-badge" class="menu-badge">0</span>
-                    </span>
-                </div>
 <div class="menu-row" id="logout-btn" style="display:none; color:#e74c3c;" onclick="window.location.href='/logout'"><span><i class="icon icon-logout" style="margin-right:8px;"></i> Abmelden</span></div>
 
 <div class="menu-row" style="opacity: 0.5; font-size: 0.75em;" onclick="window.open('https://github.com/ipod86/Notizen', '_blank')">
@@ -1422,6 +1423,13 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
                     <button class="tool-btn" onclick="wrapSelection('**','**', 'Fett')"><i class="icon icon-bold"></i><span>Fett</span></button>
                     <button class="tool-btn" onclick="wrapSelection('_','_', 'Kursiv')"><i class="icon icon-italic"></i><span>Kursiv</span></button>
                     <button class="tool-btn" onclick="wrapSelection('~~','~~', 'Text')"><i class="icon icon-strikethrough"></i><span>Streich</span></button>
+                    <div class="tool-btn color-tool">
+                        <div class="color-row">
+                            <span onclick="applyColor()"><i class="icon icon-color"></i></span>
+                            <input type="color" id="text-color-input" value="#27ae60">
+                        </div>
+                        <span>Farbe</span>
+                    </div>
                     <button class="tool-btn" onclick="wrapSelection('### ','', 'Überschrift')"><i class="icon icon-header"></i><span>Titel</span></button>
                     <button class="tool-btn" onclick="handleListAction('- ', 'Punkt')"><i class="icon icon-list"></i><span>Liste</span></button>
                     <button class="tool-btn" onclick="handleListAction('- [ ] ', 'Aufgabe')"><i class="icon icon-todo"></i><span>To-Do</span></button>
@@ -1437,13 +1445,6 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
                     <button class="tool-btn" onclick="triggerMentionButton()"><i class="icon icon-mention"></i><span>Verweis</span></button>
                     <button class="tool-btn" onclick="openContactPicker()"><i class="icon icon-contact"></i><span>Kontakt</span></button>
                     <button class="tool-btn" onclick="wrapSelection('[','](https://)', 'Link-Text')"><i class="icon icon-link"></i><span>Web-Link</span></button>
-                    <div class="tool-btn color-tool">
-                        <div class="color-row">
-                            <span onclick="applyColor()"><i class="icon icon-color"></i></span>
-                            <input type="color" id="text-color-input" value="#27ae60">
-                        </div>
-                        <span>Farbe</span>
-                    </div>
                 </div>
 
                 <div style="display:flex; gap:10px; margin-bottom:10px; align-items:stretch;">
