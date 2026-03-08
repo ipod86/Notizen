@@ -3095,6 +3095,10 @@ function renderMarkdown(text) {
     if (!text) return ''; 
     let html = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); 
     
+    // Process deleted-tags BEFORE bold/italic to prevent underscores being eaten by _..._
+    html = html.replace(/\[contact_deleted:([^\]]+)\]/g, '<span class="contact-deleted-inline"><i class="icon icon-contact"></i> Kontakt gelöscht ($1)</span>');
+    html = html.replace(/\[media_deleted:([^\]]+)\]/g, '<span class="media-deleted-inline"><i class="icon icon-media"></i> Medium gelöscht ($1)</span>');
+
     let last = ""; 
     while (last !== html) { 
         last = html; 
@@ -3114,10 +3118,6 @@ function renderMarkdown(text) {
         if (contact) return renderContactCardHTML(contact);
         return '<span class="contact-deleted-inline"><i class="icon icon-contact"></i> Kontakt nicht gefunden</span>';
     });
-
-    html = html.replace(/\[contact_deleted:([^\]]+)\]/g, '<span class="contact-deleted-inline"><i class="icon icon-contact"></i> Kontakt gelöscht ($1)</span>');
-
-    html = html.replace(/\[media_deleted:([^\]]+)\]/g, '<span class="media-deleted-inline"><i class="icon icon-media"></i> Medium gelöscht ($1)</span>');
     
     html = html.replace(/\[note:([a-zA-Z0-9]+)\|([^\]]+)\]/g, (match, id, title) => `<a href="#" onclick="if(!window.isShareView){selectNode('${id}'); return false;}" class="note-link"><i class="icon icon-mention"></i> ${title}</a>`);
     html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" style="color:var(--accent); text-decoration:underline;">$1</a>');
