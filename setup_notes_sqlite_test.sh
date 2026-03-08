@@ -1559,7 +1559,7 @@ cat << 'EOF' > "$TARGET_DIR/templates/index.html"
                 <input type="text" id="search-input" placeholder="Titel oder Text suchen..." oninput="filterTree()">
                 <span id="clear-search" onclick="clearSearch()"><i class="icon icon-clear"></i></span>
             </div>
-            <div id="tag-filter-bar" style="display:none; margin-bottom:10px; flex-wrap:wrap; gap:4px;"></div>
+            <div id="tag-filter-bar" style="display:none; margin-bottom:10px; gap:4px; flex-wrap:nowrap; overflow:hidden;"></div>
             <div style="display:flex; gap:5px;">
                 <button onclick="addItem(null)" style="flex:1;background:var(--accent) !important;color:white;padding:8px;border-radius:4px;font-weight:bold;"><i class="icon icon-add"></i> Hauptkategorie</button>
                 <button onclick="addItemFromTemplate(null)" style="background:rgba(var(--accent-rgb),0.15) !important;color:var(--accent);padding:8px;border-radius:4px;font-weight:bold;" title="Aus Vorlage erstellen"><i class="icon icon-file"></i></button>
@@ -2797,6 +2797,8 @@ input[type="checkbox"].task-check { width: 16px; height: 16px; margin: 0; cursor
     cursor: pointer;
     transition: transform 0.15s, box-shadow 0.15s;
     border: 2px solid transparent;
+    flex-shrink: 0;
+    white-space: nowrap;
 }
 .tag-filter-chip:hover {
     transform: scale(1.05);
@@ -2816,6 +2818,9 @@ input[type="checkbox"].task-check { width: 16px; height: 16px; margin: 0; cursor
     border: 1px solid var(--border-color);
     cursor: pointer;
     transition: background 0.15s;
+    flex-shrink: 0;
+    white-space: nowrap;
+}
 }
 .tag-filter-expand:hover {
     background: rgba(255,255,255,0.2);
@@ -5250,46 +5255,86 @@ function renderTagFilterBar() {
     bar.style.display = 'flex';
     bar.innerHTML = '';
 
-    const maxVisible = 5;
-    const showAll = tagFilterExpanded || allTagsCache.length <= maxVisible;
-    const visibleTags = showAll ? allTagsCache : allTagsCache.slice(0, maxVisible);
-
-    visibleTags.forEach(t => {
-        const chip = document.createElement('span');
-        chip.className = 'tag-filter-chip' + (activeTagFilter === t.id ? ' active' : '');
-        chip.style.background = t.color;
-        chip.innerText = t.name;
-        chip.onclick = () => {
-            if (activeTagFilter === t.id) { activeTagFilter = null; } 
-            else { activeTagFilter = t.id; }
-            renderTagFilterBar();
-            renderTree();
-        };
-        bar.appendChild(chip);
-    });
-
-    if (!showAll) {
-        const moreBtn = document.createElement('span');
-        moreBtn.className = 'tag-filter-expand';
-        moreBtn.innerText = '+' + (allTagsCache.length - maxVisible);
-        moreBtn.onclick = () => { tagFilterExpanded = true; renderTagFilterBar(); };
-        bar.appendChild(moreBtn);
-    } else if (allTagsCache.length > maxVisible && tagFilterExpanded) {
+    if (tagFilterExpanded) {
+        bar.style.flexWrap = 'wrap';
+        allTagsCache.forEach(t => {
+            bar.appendChild(makeTagChip(t));
+        });
         const lessBtn = document.createElement('span');
         lessBtn.className = 'tag-filter-expand';
         lessBtn.innerText = '▴';
         lessBtn.title = 'Weniger anzeigen';
         lessBtn.onclick = () => { tagFilterExpanded = false; renderTagFilterBar(); };
         bar.appendChild(lessBtn);
+        if (activeTagFilter) bar.appendChild(makeTagClearBtn());
+        return;
     }
 
-    if (activeTagFilter) {
-        const clearChip = document.createElement('span');
-        clearChip.style.cssText = 'font-size:0.75em; cursor:pointer; opacity:0.6; padding:3px 6px; align-self:center;';
-        clearChip.innerHTML = '<i class="icon icon-clear"></i>';
-        clearChip.onclick = () => { activeTagFilter = null; renderTagFilterBar(); renderTree(); };
-        bar.appendChild(clearChip);
-    }
+    // Render all chips to measure
+    bar.style.flexWrap = 'nowrap';
+    const chips = allTagsCache.map(t => makeTagChip(t));
+    chips.forEach(c => bar.appendChild(c));
+    if (activeTagFilter) bar.appendChild(makeTagClearBtn());
+
+    // Wait a frame so the browser lays them out, then measure
+    requestAnimationFrame(() => {
+        if (!bar.offsetWidth) return;
+        const barWidth = bar.clientWidth;
+        const gap = 4;
+        // Reserve space for +N button and optional X button
+        const reserveForMore = 40;
+        const reserveForClear = activeTagFilter ? 30 : 0;
+        const maxWidth = barWidth - reserveForMore - reserveForClear;
+
+        let usedWidth = 0;
+        let fitCount = 0;
+
+        for (let i = 0; i < chips.length; i++) {
+            const w = chips[i].offsetWidth + gap;
+            if (usedWidth + w <= maxWidth || i === 0) {
+                usedWidth += w;
+                fitCount++;
+            } else {
+                break;
+            }
+        }
+
+        if (fitCount >= allTagsCache.length) return; // all fit, no changes needed
+
+        // Rebuild with only fitting chips
+        bar.innerHTML = '';
+        for (let i = 0; i < fitCount; i++) {
+            bar.appendChild(makeTagChip(allTagsCache[i]));
+        }
+        const moreBtn = document.createElement('span');
+        moreBtn.className = 'tag-filter-expand';
+        moreBtn.innerText = '+' + (allTagsCache.length - fitCount);
+        moreBtn.onclick = () => { tagFilterExpanded = true; renderTagFilterBar(); };
+        bar.appendChild(moreBtn);
+        if (activeTagFilter) bar.appendChild(makeTagClearBtn());
+    });
+}
+
+function makeTagChip(t) {
+    const chip = document.createElement('span');
+    chip.className = 'tag-filter-chip' + (activeTagFilter === t.id ? ' active' : '');
+    chip.style.background = t.color;
+    chip.innerText = t.name;
+    chip.onclick = () => {
+        if (activeTagFilter === t.id) { activeTagFilter = null; } 
+        else { activeTagFilter = t.id; }
+        renderTagFilterBar();
+        renderTree();
+    };
+    return chip;
+}
+
+function makeTagClearBtn() {
+    const clearChip = document.createElement('span');
+    clearChip.style.cssText = 'font-size:0.75em; cursor:pointer; opacity:0.6; padding:3px 6px; align-self:center;';
+    clearChip.innerHTML = '<i class="icon icon-clear"></i>';
+    clearChip.onclick = () => { activeTagFilter = null; renderTagFilterBar(); renderTree(); };
+    return clearChip;
 }
 
 async function openTagsManagerModal() {
