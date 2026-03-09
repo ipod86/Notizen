@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1.0">
+    <title>Notizen</title><link rel="icon" type="image/svg+xml" href="/static/icons/book-plus.svg">
+    <link rel="stylesheet" href="/static/style.css?v={{ v }}">
+    <script src="/static/lib/sortable/Sortable.min.js"></script>
+    <link rel="stylesheet" href="/static/lib/highlight/tomorrow-night-blue.min.css">
+    <script src="/static/lib/highlight/highlight.min.js"></script>
+</head>
+<body data-theme="{{ theme }}">
+    <script>
+        if (localStorage.getItem('sidebarState') === 'closed') {
+            document.body.classList.add('sidebar-hidden');
+        }
+        const initialAccent = '{{ accent }}';
+        document.documentElement.style.setProperty('--accent', initialAccent); 
+        const r = parseInt(initialAccent.slice(1,3), 16), g = parseInt(initialAccent.slice(3,5), 16), b = parseInt(initialAccent.slice(5,7), 16); 
+        document.documentElement.style.setProperty('--accent-rgb', `${r}, ${g}, ${b}`);
+    </script>
+    
+    <div class="header-actions" style="display: flex; gap: 15px; align-items: center;">
+        <div id="todo-dashboard-btn" style="position: relative; cursor: pointer; font-size: 1.4em;" onclick="openTodoModal()" title="Meine Aufgaben">
+            <i class="icon icon-tasks"></i>
+            <span id="todo-badge" class="icon-badge">0</span>
+        </div>
+        <div id="notification-bell" style="position: relative; cursor: pointer; font-size: 1.4em;" onclick="openNotificationsModal()" title="Erinnerungen">
+            <i class="icon icon-reminders"></i>
+            <span id="notification-badge" class="icon-badge">0</span>
+        </div>
+
+        <div class="dropdown">
+            <button onclick="toggleSettings(event)" style="font-size:1.4em"><i class="icon icon-settings"></i></button>
+            <div class="dropdown-content" id="dropdown-menu">
+                <div class="menu-row" onclick="openContactsModal()"><span><i class="icon icon-contact" style="margin-right:8px;"></i> Kontakte</span></div>
+                <div class="menu-row" onclick="openTagsManagerModal()"><span><i class="icon icon-tag" style="margin-right:8px;"></i> Tags verwalten</span></div>
+                <div class="menu-row" onclick="openTemplatesModal()"><span><i class="icon icon-file" style="margin-right:8px;"></i> Vorlagen</span></div>
+                <div class="menu-row" onclick="openMediaModal()"><span><i class="icon icon-media" style="margin-right:8px;"></i> Medien-Manager</span></div>
+                <div class="menu-row" onclick="openShareOverviewModal()"><span><i class="icon icon-share" style="margin-right:8px;"></i> Freigaben verwalten</span></div>
+                <div class="menu-row" onclick="openTrashModal()">
+                    <span style="display:flex; align-items:center; width:100%;">
+                        <span style="flex-grow:1;"><i class="icon icon-trash" style="margin-right:8px;"></i> Papierkorb</span>
+                        <span id="trash-badge" class="menu-badge">0</span>
+                    </span>
+                </div>
+
+                <div class="dropdown-submenu" onclick="toggleSubmenu(this, event)">
+                    <div class="menu-row">
+                        <span><i class="icon icon-folder" style="margin-right:8px;"></i> Allgemeine Einstellungen</span><span class="submenu-arrow">▶</span>
+                    </div>
+                    <div class="submenu-content">
+                        <div class="menu-row" onclick="handleMenuAction(event, toggleTheme)"><span><i class="icon icon-theme" style="margin-right:8px;"></i> Theme wechseln</span></div>
+                        <div class="menu-row" onclick="event.stopPropagation()">
+                            <span><i class="icon icon-color" style="margin-right:8px;"></i> Akzentfarbe</span>
+                            <input type="color" id="accent-color-picker" onchange="updateGlobalAccent(this.value)" onclick="event.stopPropagation()">
+                        </div>
+                        <div class="menu-row" onclick="handleMenuAction(event, togglePassword)"><span id="pwd-toggle-text"><i class="icon icon-password" style="margin-right:8px;"></i> Passwortschutz: Inaktiv</span></div>
+                        <div class="menu-row" onclick="handleMenuAction(event, toggleHistorySettings)"><span><i class="icon icon-history" style="margin-right:8px;"></i> Historien-Optionen</span></div>
+                    </div>
+                </div>
+
+                <div class="dropdown-submenu" onclick="toggleSubmenu(this, event)">
+                    <div class="menu-row">
+                        <span><i class="icon icon-reminders" style="margin-right:8px;"></i> Benachrichtigungen</span><span class="submenu-arrow">▶</span>
+                    </div>
+                    <div class="submenu-content">
+                        <div class="menu-row" onclick="toggleHeaderIcon('tasks', event)"><span id="toggle-tasks-text"><i class="icon icon-tasks" style="margin-right:8px;"></i> Aufgaben-Icon: An</span></div>
+                        <div class="menu-row" onclick="toggleHeaderIcon('reminders', event)"><span id="toggle-reminders-text"><i class="icon icon-reminder_active" style="margin-right:8px;"></i> Erinnerungs-Icon: An</span></div>
+                        <div class="menu-row" onclick="handleMenuAction(event, toggleWebhookModal)"><span id="webhook-toggle-text"><i class="icon icon-webhook" style="margin-right:8px;"></i> Webhook (Push)</span></div>
+                    </div>
+                </div>
+
+                <div class="dropdown-submenu" onclick="toggleSubmenu(this, event)">
+                    <div class="menu-row">
+                        <span><i class="icon icon-save" style="margin-right:8px;"></i> Backup & Restore</span><span class="submenu-arrow">▶</span>
+                    </div>
+                    <div class="submenu-content">
+                        <div class="menu-row" onclick="handleMenuAction(event, exportData)"><span><i class="icon icon-export" style="margin-right:8px;"></i> Backup herunterladen</span></div>
+                        <div class="menu-row" onclick="handleMenuAction(event, openRestoreModal)"><span><i class="icon icon-restore" style="margin-right:8px;"></i> Wiederherstellen</span></div>
+                    </div>
+                </div>
+                
+<div class="menu-row" id="logout-btn" style="display:none; color:#e74c3c;" onclick="window.location.href='/logout'"><span><i class="icon icon-logout" style="margin-right:8px;"></i> Abmelden</span></div>
+
+<div class="menu-row" style="opacity: 0.5; font-size: 0.75em;" onclick="window.open('https://github.com/ipod86/Notizen', '_blank')">
+    <span><i class="icon icon-link" style="margin-right:8px;"></i> Open Source auf GitHub</span>
+</div>
+                
+            </div>
+            
+        </div>
+    </div>
+    
+    <button id="mobile-toggle-btn" onclick="toggleSidebar()"><span>◀</span></button>
+    
+    <div id="sidebar">
+        <div class="sidebar-header">
+            <h3 style="margin:0; cursor:pointer;" onclick="goToDashboard()" title="Zum Dashboard">Notizen</h3>
+            <div style="display:flex; gap:8px;">
+                <button id="toggle-all-btn" onclick="toggleAllFolders()" title="Alle auf/zu"><i class="icon icon-folder_open"></i></button>
+                <button id="sort-btn" onclick="confirmAutoSort()" title="Automatisch sortieren"><i class="icon icon-sort-abc"></i></button>
+                <button onclick="toggleEditMode()" title="Struktur Bearbeiten"><i class="icon icon-sketch"></i></button>
+            </div>
+        </div>
+        <div style="padding:15px; flex-shrink: 0;">
+            <div class="search-wrapper">
+                <input type="text" id="search-input" placeholder="Titel oder Text suchen..." oninput="filterTree()">
+                <span id="clear-search" onclick="clearSearch()"><i class="icon icon-clear"></i></span>
+            </div>
+            <div id="tag-filter-bar" style="display:none; margin-bottom:10px; gap:4px; flex-wrap:nowrap; overflow:hidden; padding:2px 0;"></div>
+            <div style="display:flex; gap:5px;">
+                <button onclick="addItem(null)" style="flex:1;background:var(--accent) !important;color:white;padding:8px;border-radius:4px;font-weight:bold;"><i class="icon icon-add"></i> Hauptkategorie</button>
+                <button onclick="addItemFromTemplate(null)" style="background:rgba(var(--accent-rgb),0.15) !important;color:var(--accent);padding:8px;border-radius:4px;font-weight:bold;" title="Aus Vorlage erstellen"><i class="icon icon-file"></i></button>
+            </div>
+        </div>
+        <div id="tree"></div>
+    </div>
+    
+    <div id="editor">
+        <div id="no-selection">
+            <div id="dashboard" style="max-width:800px; margin:20px auto;"></div>
+        </div>
+        <div id="edit-area" style="display:none">
+            <div id="breadcrumb" style="font-size:0.8em;color:var(--accent);margin-bottom:15px;overflow-wrap:anywhere;word-break:break-word;"></div>
+            
+            <div id="view-mode">
+                <div style="display:flex; align-items:center; gap:12px; margin-bottom:20px; flex-wrap:wrap;">
+                    <h1 id="view-title" style="margin:0; overflow-wrap:anywhere; word-break:break-word; max-width:85%;"></h1>
+                    <span id="view-reminder-badge" style="display:none; color:#e74c3c; font-size:1.2em; animation: pulse 2s infinite;" title="Erinnerung aktiv!"><i class="icon icon-reminder_active"></i></span>
+                    <button id="view-reminder-ack" onclick="clearReminder()" style="display:none; background:#e74c3c !important; color:white; padding:4px 8px; border-radius:4px; font-size:0.8em; font-weight:bold;">Bestätigen</button>
+                    
+                    <div style="margin-left:auto; display:flex; align-items:center; position:relative;">
+                        <div class="dropdown">
+                            <button onclick="toggleNoteMenu(event)" style="font-size:1.4em; padding:0 5px; font-weight:bold; letter-spacing: 2px;">⋮</button>
+                            <div class="dropdown-content" id="note-menu-content" style="top:35px;">
+                                <div class="menu-row" onclick="handleMenuAction(event, enableEdit)"><span><i class="icon icon-sketch" style="margin-right:8px;"></i> Bearbeiten</span></div>
+                                <div class="menu-row" onclick="handleMenuAction(event, togglePinNote)"><span id="pin-menu-text"><i class="icon icon-pin" style="margin-right:8px;"></i> Anpinnen</span></div>
+                                <div class="menu-row" onclick="handleMenuAction(event, duplicateNote)"><span><i class="icon icon-add" style="margin-right:8px;"></i> Notiz duplizieren</span></div>
+                                <div class="menu-row" onclick="handleMenuAction(event, openNoteTagsModal)"><span><i class="icon icon-tag" style="margin-right:8px;"></i> Tags bearbeiten</span></div>
+                                <div class="menu-row" onclick="handleMenuAction(event, shareNote)"><span><i class="icon icon-share" style="margin-right:8px;"></i> Freigabe-Link</span></div>
+                                <div class="menu-row" id="menu-row-history" onclick="handleMenuAction(event, openHistoryModal)"><span><i class="icon icon-history" style="margin-right:8px;"></i> Versionsverlauf</span></div>
+                                <div class="menu-row" onclick="handleMenuAction(event, saveAsTemplate)"><span><i class="icon icon-file" style="margin-right:8px;"></i> Als Vorlage speichern</span></div>
+                                <div class="menu-row" onclick="handleMenuAction(event, window.print)"><span><i class="icon icon-printer" style="margin-right:8px;"></i> Drucken / PDF</span></div>
+                                <div class="menu-row" onclick="handleMenuAction(event, deleteActiveNote)" style="color:#e74c3c;"><span><i class="icon icon-trash" style="margin-right:8px;"></i> Notiz löschen</span></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div id="view-tags" style="display:none;"></div>
+                <div id="display-area"></div>
+            </div>
+            
+            <div id="edit-mode" style="display:none">
+                <div id="mention-dropdown"></div>
+
+                <div class="toolbar">
+                    <button class="tool-btn" onclick="saveChanges();" style="background:var(--accent) !important; color:white;"><i class="icon icon-save-disk"></i><span>OK</span></button>
+                    <button class="tool-btn" onclick="cancelEdit()" style="color:#e74c3c;"><i class="icon icon-cancel"></i><span>Abbruch</span></button>
+                    <button class="tool-btn" onclick="wrapSelection('**','**', 'Fett')"><i class="icon icon-bold"></i><span>Fett</span></button>
+                    <button class="tool-btn" onclick="wrapSelection('_','_', 'Kursiv')"><i class="icon icon-italic"></i><span>Kursiv</span></button>
+                    <button class="tool-btn" onclick="wrapSelection('~~','~~', 'Text')"><i class="icon icon-strikethrough"></i><span>Streich</span></button>
+                    <div class="tool-btn color-tool">
+                        <div class="color-row">
+                            <span onclick="applyColor()"><i class="icon icon-color"></i></span>
+                            <input type="color" id="text-color-input" value="#27ae60">
+                        </div>
+                        <span>Farbe</span>
+                    </div>
+                    <button class="tool-btn" onclick="wrapSelection('### ','', 'Überschrift')"><i class="icon icon-header"></i><span>Titel</span></button>
+                    <button class="tool-btn" onclick="handleListAction('- ', 'Punkt')"><i class="icon icon-list"></i><span>Liste</span></button>
+                    <button class="tool-btn" onclick="handleNumberedList()"><i class="icon icon-list"></i><span>1. Liste</span></button>
+                    <button class="tool-btn" onclick="handleListAction('- [ ] ', 'Aufgabe')"><i class="icon icon-todo"></i><span>To-Do</span></button>
+                    <button class="tool-btn" onclick="wrapSelection('\n| Spalte 1 | Spalte 2 |\n|---|---|\n| Wert 1 | Wert 2 |\n| Wert 1 | Wert 2 |\n', '', 'Tabelle')"><i class="icon icon-table"></i><span>Tabelle</span></button>
+                    <button class="tool-btn" onclick="wrapSelection('> ','', 'Zitat')"><i class="icon icon-quote"></i><span>Zitat</span></button>
+                    <button class="tool-btn" onclick="wrapSelection('[s=Spoiler-Titel]\n','\n[/s]', 'Text hier...')"><i class="icon icon-spoiler"></i><span>Spoiler</span></button>
+                    <button class="tool-btn" onclick="wrapSelection('\n---\n','', '')"><i class="icon icon-hr"></i><span>Linie</span></button>
+                    <button class="tool-btn" onclick="insertCodeTag()"><i class="icon icon-code"></i><span>Code</span></button>
+                    <button class="tool-btn" onclick="uploadImage()"><i class="icon icon-image"></i><span>Bild</span></button>
+                    <button class="tool-btn" onclick="uploadGenericFile()"><i class="icon icon-file-plus"></i><span>Datei</span></button>
+                    <button class="tool-btn" onclick="openSketch()"><i class="icon icon-sketch"></i><span>Skizze</span></button>
+                    <button class="tool-btn" id="btn-record-audio" onclick="toggleAudioRecording()"><i class="icon icon-mic"></i><span>Audio</span></button>
+                    <button class="tool-btn" onclick="triggerMentionButton()"><i class="icon icon-mention"></i><span>Verweis</span></button>
+                    <button class="tool-btn" onclick="openContactPicker()"><i class="icon icon-contact"></i><span>Kontakt</span></button>
+                    <button class="tool-btn" onclick="wrapSelection('[','](https://)', 'Link-Text')"><i class="icon icon-link"></i><span>Web-Link</span></button>
+                </div>
+
+                <div style="display:flex; gap:10px; margin-bottom:10px; align-items:stretch;">
+                    <input type="text" id="node-title" placeholder="Titel der Notiz..." style="margin-bottom:0; flex-grow:1;">
+                    <button class="tool-btn" onclick="openReminderModal()" style="margin:0; min-height:100%; flex-direction:row; gap:5px; padding:0 10px; width:auto;">
+                        <i class="icon icon-reminders"></i><span id="edit-reminder-text">Erinnerung</span>
+                    </button>
+                    <button class="tool-btn" id="edit-reminder-clear" onclick="clearReminder()" style="display:none; margin:0; min-height:100%; flex-direction:row; gap:5px; padding:0 10px; width:auto; color:#e74c3c; border-color:#e74c3c;">
+                        <i class="icon icon-clear"></i><span>Löschen</span>
+                    </button>
+                </div>
+
+                <textarea id="node-text" placeholder="Text, Notizen, Code oder Bilder hier einfügen..." style="height:60vh"></textarea>
+            </div>
+            
+            <button id="add-sub-level-btn" onclick="addItem(activeId)" style="margin-top:20px;border:1px solid var(--accent) !important;color:var(--accent);padding:5px 10px;border-radius:4px;"><i class="icon icon-add"></i> Unter-Ebene erstellen</button>
+        </div>
+    </div>
+    
+    <div id="todo-modal" class="modal-overlay">
+        <div class="modal" style="width: 650px; max-width: 95vw;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+                <h3 style="margin:0">Meine Aufgaben</h3>
+                <label style="font-size:0.9em; cursor:pointer;">
+                    <input type="checkbox" id="todo-show-all" onchange="renderTodoList()"> Alle anzeigen
+                </label>
+            </div>
+            <div id="todo-list" style="text-align:left; max-height: 60vh; overflow-y: auto; margin-bottom: 20px;">
+                Lade...
+            </div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('todo-modal').style.display='none'">Schließen</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="media-modal" class="modal-overlay">
+        <div class="modal" style="width: 800px; max-width: 95vw;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+                <h3 style="margin:0"><i class="icon icon-media"></i> Medien-Manager</h3>
+                <span style="font-size:0.8em; color:#888;">Alle hochgeladenen Dateien</span>
+            </div>
+            <div id="media-list" style="text-align:left; max-height: 60vh; overflow-y: auto; margin-bottom: 20px; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 15px;">
+                Lade Medien...
+            </div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('media-modal').style.display='none'">Schließen</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="media-info-modal" class="modal-overlay" style="z-index: 2500;">
+        <div class="modal" style="width: 500px; max-width: 95vw;">
+            <h3 style="margin-top:0"><i class="icon icon-link"></i> Verknüpfte Notizen</h3>
+            <p style="font-size:0.85em; opacity:0.7; margin-bottom:15px; text-align: left;">Diese Datei wird in folgenden Notizen verwendet:</p>
+            <div id="media-info-list" style="text-align:left; max-height: 40vh; overflow-y: auto; margin-bottom: 20px;">
+                Suche nach Verknüpfungen...
+            </div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('media-info-modal').style.display='none'">Schließen</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="share-overview-modal" class="modal-overlay">
+        <div class="modal" style="width: 550px; max-width: 95vw;">
+            <h3 style="margin-top:0">Aktive Freigaben</h3>
+            <p style="font-size:0.85em; opacity:0.7; text-align:left; margin-bottom:15px;">Hier siehst du alle Notizen, die aktuell über einen öffentlichen Link erreichbar sind.</p>
+            <div id="share-list" style="text-align:left; max-height: 50vh; overflow-y: auto; margin-bottom: 20px;">
+                Lade...
+            </div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('share-overview-modal').style.display='none'">Schließen</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="trash-modal" class="modal-overlay">
+        <div class="modal" style="width: 600px; max-width: 95vw;">
+            <h3 style="margin-top:0">Papierkorb</h3>
+            <div id="trash-list" style="text-align:left; max-height: 50vh; overflow-y: auto; margin-bottom: 20px;">
+                Lade...
+            </div>
+            <div class="modal-btns" style="justify-content: space-between;">
+                <button class="btn-discard" onclick="emptyTrash()"><i class="icon icon-trash"></i> Alle endgültig löschen</button>
+                <button class="btn-cancel" onclick="document.getElementById('trash-modal').style.display='none'">Schließen</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="history-modal" class="modal-overlay">
+        <div class="modal" style="width: 700px; max-width: 95vw;">
+            <h3 style="margin-top:0">Versionsverlauf</h3>
+            <div id="history-list" style="text-align:left; max-height: 60vh; overflow-y: auto; margin-bottom: 20px;">
+                Lade...
+            </div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="closeHistoryModal()">Schließen</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="notifications-modal" class="modal-overlay">
+        <div class="modal" style="width: 500px; max-width: 95vw;">
+            <h3 style="margin-top:0">Überfällige Erinnerungen</h3>
+            <div id="notifications-list" style="text-align:left; max-height: 60vh; overflow-y: auto; margin-bottom: 20px;">
+                </div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('notifications-modal').style.display='none'">Schließen</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="history-settings-modal" class="modal-overlay">
+        <div class="modal">
+            <h3 style="margin-top:0">Historien-Einstellungen</h3>
+            <div style="text-align:left; margin-bottom: 15px;">
+                <label style="display:block; margin-bottom:10px; cursor:pointer;">
+                    <input type="checkbox" id="history-enabled"> Versionsverlauf aktivieren
+                </label>
+                <label style="display:block; margin-bottom:5px; font-size:0.9em;">Lebensdauer der Versionen (in Tagen):</label>
+                <input type="number" id="history-days" min="1" max="365" style="width:100%;">
+                <p style="font-size:0.8em; color:#888; margin-top:5px;">Ältere Versionen (und deren verknüpfte Bilder) werden nachts vom System gelöscht.</p>
+            </div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('history-settings-modal').style.display='none'">Abbruch</button>
+                <button class="btn-save" onclick="saveHistorySettings()">Speichern</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="upload-modal" class="modal-overlay">
+        <div class="modal">
+            <h3 style="margin-top:0">Upload läuft...</h3>
+            <div style="width:100%; background:rgba(255,255,255,0.1); border-radius:5px; margin-top:15px; overflow:hidden;">
+                <div id="upload-progress-bar" style="width:0%; height:20px; background:var(--accent); border-radius:5px; transition:width 0.2s ease;"></div>
+            </div>
+            <div id="upload-percent" style="margin-top:10px; font-weight:bold;">0%</div>
+        </div>
+    </div>
+
+    <div id="restore-modal" class="modal-overlay">
+        <div class="modal" style="width: 500px; max-width: 95vw;">
+            <h3 style="margin-top:0">Backup Wiederherstellen</h3>
+            <div style="text-align: left; margin-bottom: 15px;">
+                <p style="font-size: 0.9em; color: #ccc;">Wähle ein automatisches Server-Backup aus der Liste:</p>
+                <select id="server-backups" style="width: 100%; padding: 10px; margin-bottom: 15px; background: rgba(255,255,255,0.05); color: inherit; border: 1px solid var(--border-color); border-radius: 4px;">
+                    <option value="">-- Lade Backups... --</option>
+                </select>
+                <p style="font-size: 0.9em; color: #ccc;">Oder lade eine lokale Backup-Datei (.tar.gz) hoch:</p>
+                <input type="file" id="restore-file-upload" accept=".tar.gz,.gz" style="width: 100%; padding: 10px; background: rgba(255,255,255,0.05); border: 1px dashed var(--accent); border-radius: 4px; box-sizing: border-box;">
+            </div>
+            <div id="restore-status" style="font-size: 0.9em; margin-bottom: 15px; display: none; padding: 10px; border-radius: 4px; background: rgba(0,0,0,0.2);"></div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('restore-modal').style.display='none'">Abbruch</button>
+                <button class="btn-save" id="btn-do-restore" onclick="executeRestore()">Wiederherstellen</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="sketch-modal" class="modal-overlay">
+        <div class="modal" style="width: 1000px; max-width: 95vw;">
+            <h3 style="margin-top:0">Skizzenblock</h3>
+            <div id="sketch-toolbar">
+                <div class="sketch-tool">
+                    <span>Hintergrund:</span>
+                    <select id="sketch-bg-select" onchange="setSketchBg(this.value)" style="padding:5px; border-radius:4px;">
+                        <option value="white">Weiß</option>
+                        <option value="black">Schwarz</option>
+                    </select>
+                </div>
+                <div class="sketch-tool">
+                    <span>Farbe:</span>
+                    <input type="color" onchange="sketchColor=this.value" value="#000000">
+                </div>
+                <div class="sketch-tool">
+                    <span>Dicke:</span>
+                    <input type="range" min="1" max="50" value="8" onchange="sketchWidth=this.value" style="width: 80px;">
+                </div>
+                <button id="btn-pen" class="sketch-btn active" onclick="setSketchMode('pen')"><i class="icon icon-sketch"></i> Stift</button>
+                <button id="btn-highlighter" class="sketch-btn" onclick="setSketchMode('highlighter')"><i class="icon icon-color"></i> Marker</button>
+                <button id="btn-eraser" class="sketch-btn" onclick="setSketchMode('eraser')"><i class="icon icon-clear"></i> Radierer</button>
+                <button class="sketch-btn" onclick="undoSketch()" style="color:#f39c12;"><i class="icon icon-undo"></i> Zurück</button>
+                <button class="sketch-btn" onclick="sketchStrokes=[]; redrawSketch();" style="color:#e74c3c;"><i class="icon icon-trash"></i> Leeren</button>
+                <div style="flex-grow:1; text-align:right;">
+                    <button class="btn-cancel" onclick="closeSketch()">Abbruch</button>
+                    <button class="btn-save" onclick="saveSketch()">Speichern</button>
+                </div>
+            </div>
+            <div id="canvas-wrapper">
+                <canvas id="sketch-canvas"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <div id="reminder-modal" class="modal-overlay">
+        <div class="modal">
+            <h3 style="margin-top:0">Erinnerung setzen</h3>
+            <p style="font-size:0.85em; opacity:0.7; margin-bottom:15px;">Wann möchtest du an diese Notiz erinnert werden?</p>
+            <div style="margin-bottom:15px; text-align:left;">
+                <label style="display:block; margin-bottom:10px; cursor:pointer;">
+                    <input type="checkbox" id="reminder-has-time" onchange="toggleReminderInput()"> Mit fester Uhrzeit
+                </label>
+                <input type="date" id="reminder-date" style="display:block; width:100%;">
+                <input type="datetime-local" id="reminder-datetime" style="display:none; width:100%;">
+            </div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('reminder-modal').style.display='none'">Abbruch</button>
+                <button class="btn-save" onclick="saveReminder()">Speichern</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="webhook-modal" class="modal-overlay">
+        <div class="modal" style="max-width: 500px;">
+            <h3 style="margin-top:0">Webhook Push-Benachrichtigungen</h3>
+            <p style="font-size:0.85em; opacity:0.7; margin-bottom:15px;">Sende Erinnerungen direkt an dein Smartphone oder Discord.</p>
+            <div style="text-align:left; margin-bottom: 15px;">
+                <label style="display:block; margin-bottom:10px; cursor:pointer;">
+                    <input type="checkbox" id="webhook-enabled"> Webhooks aktivieren
+                </label>
+                <label style="display:block; margin-bottom:5px; font-size:0.9em;">HTTP Methode:</label>
+                <select id="webhook-method" onchange="toggleWebhookPayload()" style="width:100%; padding:10px; margin-bottom:10px; background:rgba(255,255,255,0.05); color:inherit; border:1px solid var(--border-color); border-radius:4px;">
+                    <option value="GET">GET (z.B. ntfy.sh)</option>
+                    <option value="POST">POST (z.B. Discord)</option>
+                </select>
+                <label style="display:block; margin-bottom:5px; font-size:0.9em;">Ziel-URL:</label>
+                <input type="text" id="webhook-url" placeholder="https://..." style="margin-bottom:10px;">
+                <div id="webhook-payload-container" style="display:none;">
+                    <label style="display:block; margin-bottom:5px; font-size:0.9em;">JSON Payload:</label>
+                    <textarea id="webhook-payload" rows="4" placeholder='{"text": "Erinnerung: {{TITLE}} ist fällig!"}' style="font-family:monospace; font-size:0.9em;"></textarea>
+                </div>
+            </div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('webhook-modal').style.display='none'">Abbruch</button>
+                <button class="btn-cancel" onclick="testWebhook()" style="border-color: var(--accent) !important; color: var(--accent);">Testen</button>
+                <button class="btn-save" onclick="saveWebhook()">Speichern</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="contacts-modal" class="modal-overlay">
+        <div class="modal" style="width: 800px; max-width: 95vw;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+                <h3 style="margin:0"><i class="icon icon-contact"></i> Kontakte</h3>
+                <button class="btn-save" onclick="openCreateContactForm()"><i class="icon icon-add"></i> Neuer Kontakt</button>
+            </div>
+            <div id="contacts-list" style="text-align:left; max-height: 60vh; overflow-y: auto; margin-bottom: 20px; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 15px;">
+                Lade Kontakte...
+            </div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('contacts-modal').style.display='none'">Schließen</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="contact-form-modal" class="modal-overlay" style="z-index: 2500;">
+        <div class="modal" style="width: 500px; max-width: 95vw; max-height: 90vh; overflow-y: auto;">
+            <h3 style="margin-top:0" id="contact-form-title">Neuer Kontakt</h3>
+            <div style="text-align:left; margin-bottom:15px;">
+                <div id="contact-form-avatar" style="text-align:center; margin-bottom:15px;">
+                    <div id="contact-avatar-preview" style="width:80px; height:80px; border-radius:50%; background:rgba(var(--accent-rgb),0.2); display:inline-flex; align-items:center; justify-content:center; font-size:2em; color:var(--accent); cursor:pointer; overflow:hidden; border:2px dashed var(--border-color);" onclick="uploadContactAvatar()" title="Bild hochladen">
+                        <i class="icon icon-contact" style="font-size:1.2em;"></i>
+                    </div>
+                    <div style="font-size:0.75em; color:#888; margin-top:5px;">Klick zum Hochladen</div>
+                </div>
+                <input type="hidden" id="contact-form-id">
+                <label style="display:block; margin-bottom:5px; font-size:0.9em;">Name *</label>
+                <input type="text" id="contact-form-name" placeholder="Vor- und Nachname" style="margin-bottom:10px;">
+                <label style="display:block; margin-bottom:5px; font-size:0.9em;">Mobil</label>
+                <input type="text" id="contact-form-phone-mobile" placeholder="+49 170 ..." style="margin-bottom:10px;">
+                <label style="display:block; margin-bottom:5px; font-size:0.9em;">Festnetz</label>
+                <input type="text" id="contact-form-phone-landline" placeholder="+49 271 ..." style="margin-bottom:10px;">
+                <label style="display:block; margin-bottom:5px; font-size:0.9em;">E-Mail</label>
+                <input type="text" id="contact-form-email" placeholder="name@example.de" style="margin-bottom:10px;">
+                <label style="display:block; margin-bottom:5px; font-size:0.9em;">Firma</label>
+                <input type="text" id="contact-form-company" placeholder="Firma / Organisation" style="margin-bottom:10px;">
+                <label style="display:block; margin-bottom:5px; font-size:0.9em;">Adresse</label>
+                <textarea id="contact-form-address" placeholder="Straße, PLZ, Ort" rows="2" style="margin-bottom:10px; resize:vertical;"></textarea>
+                <label style="display:block; margin-bottom:5px; font-size:0.9em;">Notizen</label>
+                <textarea id="contact-form-notes" placeholder="Eigene Notizen zum Kontakt..." rows="3" style="margin-bottom:10px; resize:vertical;"></textarea>
+            </div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('contact-form-modal').style.display='none'">Abbruch</button>
+                <button class="btn-save" onclick="saveContactForm()">Speichern</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="contact-picker-modal" class="modal-overlay" style="z-index: 2500;">
+        <div class="modal" style="width: 700px; max-width: 95vw;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+                <h3 style="margin:0"><i class="icon icon-contact"></i> Kontakt einfügen</h3>
+                <button class="btn-save" onclick="document.getElementById('contact-picker-modal').style.display='none'; openContactsModal();" style="font-size:0.85em;"><i class="icon icon-settings"></i> Verwalten</button>
+            </div>
+            <div id="contact-picker-list" style="text-align:left; max-height: 55vh; overflow-y: auto; margin-bottom: 20px; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px;">
+                Lade Kontakte...
+            </div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('contact-picker-modal').style.display='none'">Abbruch</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="tags-manager-modal" class="modal-overlay">
+        <div class="modal" style="width: 500px; max-width: 95vw;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+                <h3 style="margin:0"><i class="icon icon-tag"></i> Tags verwalten</h3>
+            </div>
+            <div style="display:flex; gap:8px; margin-bottom:15px;">
+                <input type="text" id="new-tag-name" placeholder="Neuer Tag..." style="margin:0; flex:1;">
+                <input type="color" id="new-tag-color" value="#27ae60" style="width:45px; height:auto; margin:0; padding:2px; border-radius:4px;">
+                <button class="btn-save" onclick="createNewTag()" style="white-space:nowrap;">Hinzufügen</button>
+            </div>
+            <div id="tags-manager-list" style="text-align:left; max-height:50vh; overflow-y:auto; margin-bottom:20px;"></div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('tags-manager-modal').style.display='none'">Schließen</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="note-tags-modal" class="modal-overlay" style="z-index:2500;">
+        <div class="modal" style="width: 450px; max-width: 95vw;">
+            <h3 style="margin-top:0"><i class="icon icon-tag"></i> Tags für diese Notiz</h3>
+            <div id="note-tags-list" style="text-align:left; max-height:50vh; overflow-y:auto; margin-bottom:20px;"></div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('note-tags-modal').style.display='none'">Schließen</button>
+                <button class="btn-save" onclick="saveNoteTags()">Speichern</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="templates-modal" class="modal-overlay">
+        <div class="modal" style="width: 600px; max-width: 95vw;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+                <h3 style="margin:0"><i class="icon icon-file"></i> Vorlagen</h3>
+            </div>
+            <div id="templates-list" style="text-align:left; max-height:60vh; overflow-y:auto; margin-bottom:20px; display:grid; grid-template-columns:repeat(auto-fill, minmax(200px,1fr)); gap:12px;"></div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('templates-modal').style.display='none'">Schließen</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="template-picker-modal" class="modal-overlay" style="z-index:2500;">
+        <div class="modal" style="width: 550px; max-width: 95vw;">
+            <h3 style="margin-top:0"><i class="icon icon-file"></i> Aus Vorlage erstellen</h3>
+            <div id="template-picker-list" style="text-align:left; max-height:55vh; overflow-y:auto; margin-bottom:20px; display:grid; grid-template-columns:repeat(auto-fill, minmax(180px,1fr)); gap:12px;"></div>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="document.getElementById('template-picker-modal').style.display='none'">Abbruch</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="custom-modal" class="modal-overlay">
+        <div class="modal">
+            <h3 id="modal-title"></h3>
+            <p id="modal-text" style="white-space: pre-wrap; word-break: break-word; font-size: 0.9em; opacity: 0.9; margin-bottom: 20px;"></p>
+            <input type="password" id="modal-input" style="display:none; margin-top: 15px; width: 100%; box-sizing: border-box;" placeholder="Sicheres Passwort...">
+            <div class="modal-btns" id="modal-btns-container"></div>
+        </div>
+    </div>
+    
+    <div id="lightbox" onclick="closeLightbox()">
+        <img id="lightbox-img" src="">
+    </div>
+    
+    <script src="/static/script.js?v={{ v }}"></script>
+</body>
+</html>
