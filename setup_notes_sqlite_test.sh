@@ -58,7 +58,7 @@ write_app_code() {
     cp -r /tmp/notizen-extract/Notizen-main/static/lib "$TARGET_DIR/static/" 2>/dev/null || true
     
     rm -rf /tmp/notizen-static.zip /tmp/notizen-extract
-
+}
 if [ "$ACTION" == "1" ]; then
     # --- NEUE INSTANZ ANLEGEN ---
     echo ""
