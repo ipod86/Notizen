@@ -42,21 +42,27 @@ write_app_code() {
     local TARGET_DIR=$1
     echo "Schreibe strukturierte Code-Dateien nach $TARGET_DIR ..."
 
+    # Ordnerstruktur vorbereiten
     mkdir -p "$TARGET_DIR/static"
     mkdir -p "$TARGET_DIR/templates"
-    mkdir -p "$TARGET_DIR/uploads"
     mkdir -p "$TARGET_DIR/uploads/contacts"
     mkdir -p "$TARGET_DIR/backups"
 
-    echo "Lade statische Bibliotheken und Icons von GitHub herunter..."
+    echo "Lade Code und Assets von GitHub herunter..."
     apt-get install -y unzip wget > /dev/null 2>&1
     wget -qO /tmp/notizen-static.zip https://github.com/ipod86/Notizen/archive/refs/heads/main.zip
     unzip -qo /tmp/notizen-static.zip -d /tmp/notizen-extract
     
+    # 1. Inhalt von 'app' direkt ins Hauptverzeichnis
     cp -r /tmp/notizen-extract/Notizen-main/app/. "$TARGET_DIR/" 2>/dev/null || true
-    cp -r /tmp/notizen-extract/Notizen-main/static/icons "$TARGET_DIR/static/" 2>/dev/null || true
-    cp -r /tmp/notizen-extract/Notizen-main/static/lib "$TARGET_DIR/static/" 2>/dev/null || true
     
+    # 2. Den GESAMTEN Inhalt von 'static' (Ordner + Dateien) kopieren
+    cp -r /tmp/notizen-extract/Notizen-main/static/. "$TARGET_DIR/static/" 2>/dev/null || true
+    
+    # 3. Den Inhalt von 'templates' kopieren
+    cp -r /tmp/notizen-extract/Notizen-main/templates/. "$TARGET_DIR/templates/" 2>/dev/null || true
+    
+    # Cleanup
     rm -rf /tmp/notizen-static.zip /tmp/notizen-extract
 }
 if [ "$ACTION" == "1" ]; then
